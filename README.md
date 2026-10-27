@@ -25,9 +25,13 @@ The ISA is designed around ~8 semantic instruction families that map directly to
 4. **Many tiles beat one big core.** Area goes to tile count and SRAM, not OoO windows.
 5. **Explicit movement beats implicit coherence** at scale. Local heaps + message passing + DMA.
 
-## Component Integration
+## A Chiplet Beside MegaPad
 
-While the stand-alone LM-1 repo has the SoC as a standalone chip, the most likely home for this system is as part of a partner system with the [Megapad-64 Forth Machine](https://github.com/dgoldman0/megapad/) architecture using a chiplet approach. The Forth Machine handles a lot of the control, I/O, number crunching, and the Lisp machine engine acts as a partner device. Current idea for combined SoC name: Leviathan. 
+LM-1 is a chiplet that works beside the [MegaPad-64 Forth Machine](https://github.com/dgoldman0/megapad/). MegaPad handles control, I/O and number crunching, and LM-1 runs Lisp as its partner device. KDOS and Desk, from MegaPad and [Akashic](https://github.com/dgoldman0/akashic), are the system's operating system and desktop. The working name for the combined chip is Leviathan.
+
+This repository holds the chiplet: its specification, RTL, FPGA target, emulator and toolchain. The specification still describes LM-1's own PCIe, Ethernet, NVMe and display interfaces; the chiplet revision replaces them with a link to MegaPad.
+
+LM-1's earlier standalone software stack (its BIOS, the Lispos boot path, a virtual filesystem, a display engine model and the Crystal desktop) is preserved by the tag `archive/lm1-os-desktop-e19aebd-20261027`.
 
 ## Status
 
@@ -53,9 +57,6 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | Document | Description |
 |----------|-------------|
 | [design/emulator.md](design/emulator.md) | Emulator architecture and bringup plan |
-| [design/bios.md](design/bios.md) | BIOS / firmware: boot sequence, trap tables, image loader |
-| [design/os.md](design/os.md) | Lispos: actors, object system, GC, storage, REPL |
-| [design/desktop.md](design/desktop.md) | Crystal: Lisp-native desktop environment |
 
 ### RTL Implementation
 
@@ -69,14 +70,14 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | [rtl/target/xilinx7/](rtl/target/xilinx7/) | FPGA target: Genesys 2 (Kintex-7 325T) constraints |
 | [rtl/doc/](rtl/doc/) | RTL design documentation |
 | [fpga/](fpga/) | FPGA top-level wrapper + synthesis file lists |
-| [tb/](tb/) | Verilator testbench: 42 tests, test generators |
+| [tb/](tb/) | Verilator testbench: 41 tests, test generators |
 
 ### Emulator
 
 | Directory | Description |
 |-----------|-------------|
-| [emu/lm1/](emu/lm1/) | Python emulator: core, executor, compiler, VDI, desktop, VFS, toolkit |
-| [emu/tests/](emu/tests/) | Emulator test suite: 258 tests across 13 phases |
+| [emu/lm1/](emu/lm1/) | Python emulator with a C accelerator: core, executor, assembler, Lisp compiler |
+| [emu/tests/](emu/tests/) | Emulator test suite: 172 tests in 9 phases (`make -C emu test`) |
 
 ## Influences and Prior Art
 

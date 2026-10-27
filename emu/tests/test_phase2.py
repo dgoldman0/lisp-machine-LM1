@@ -1,6 +1,6 @@
 """Phase 2 tests — allocation, tagged field access, TST.SHAPE.
 
-Build-plan milestone: cons a list of fixnums, walk it, sum them.
+Milestone: cons a list of fixnums, walk it, sum them.
 """
 
 from lm1.testing.harness import test
@@ -489,7 +489,7 @@ def test_cons_list_5_sum():
 
 @test("cons_list_100_sum", batch="phase2_integration")
 def test_cons_list_100_sum():
-    """Build-plan milestone: cons a list of 100 fixnums, walk it, sum them.
+    """Milestone: cons a list of 100 fixnums, walk it, sum them.
 
     Uses a loop to build the list, then a loop to sum it.
     Expected: sum(1..100) = 5050.

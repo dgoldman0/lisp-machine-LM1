@@ -1,6 +1,6 @@
 """Phase 4 tests — dispatch: CALL.DIRECT, CALL.CLOSURE, RET, IC, frame mechanics.
 
-Build-plan milestone: define two shapes, dispatch a method on each via IC.
+Milestone: define two shapes, dispatch a method on each via IC.
 """
 
 from lm1.testing.harness import test
@@ -271,7 +271,7 @@ def test_ic_miss_traps():
 def test_ic_polymorphic():
     """IC dispatch works for two different shapes at the same callsite.
     
-    This is the BUILD-PLAN milestone: define two shapes, dispatch on each.
+    This is the milestone: define two shapes, dispatch on each.
     """
     emu = _emu()
     t = emu.thread

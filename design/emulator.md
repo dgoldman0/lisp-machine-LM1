@@ -9,7 +9,7 @@
 
 The emulator is the first thing that runs LM-1 code. It's not a cycle-accurate simulator — it's a **functional emulator** that executes the ISA correctly so we can:
 
-1. Boot the BIOS and OS
+1. Run the compiled Lisp runtime
 2. Develop and test the compiler
 3. Run Lisp programs and validate semantics
 4. Debug the ISA design (find missing instructions, broken invariants)
@@ -121,7 +121,7 @@ EmulatorConfig = {
 }
 ```
 
-Start with **1 tile, 1 thread** for initial bringup. Scale up once the BIOS and OS boot.
+Start with **1 tile, 1 thread** for initial bringup. Scale up once the Lisp runtime runs.
 
 ## 5. Emulator Loop
 
@@ -176,7 +176,7 @@ The emulator exposes a debug interface (over a socket or stdio) that lets you:
 | `ic-dump` | Show IC table contents |
 | `disas <addr> <len>` | Disassemble instructions |
 
-This is critical for bringing up the BIOS — there's no display or REPL yet, so the debugger is your only window into the machine.
+This is critical during bring-up: until the runtime's REPL runs, the debugger is the only window into the machine.
 
 ## 7. Host I/O Bridge
 
@@ -190,7 +190,7 @@ The emulator provides I/O devices as memory-mapped regions or via special TRAP c
 | **Timer** | CYCLE instruction | Read host cycle counter (or wall clock) |
 | **Shutdown** | HALT instruction | Exit emulator |
 
-These traps are **not** part of the ISA spec — they're emulator-specific. The BIOS abstracts over them so the OS never calls these directly.
+These traps are **not** part of the ISA spec — they're emulator-specific stand-ins for I/O, which the chiplet receives from MegaPad over the link.
 
 ## 8. Implementation Language
 
@@ -225,8 +225,8 @@ Estimated size: ~2000–3000 lines Python, ~800–1200 lines C++.
 3. **Phase 3:** Add trap handling. Implement `TRAP_NURSERY_OVERFLOW` → simple stop-and-copy GC in the trap handler (written in LM-1 assembly or cheating with emulator-native code initially).
 4. **Phase 4:** Add IC table. Test `CALL.IC` with hand-crafted dispatch. Verify hit/miss/install cycle.
 5. **Phase 5:** Add message queues. Test `SEND`/`RECV` between threads, then between tiles.
-6. **Phase 6:** Load and run the BIOS image. First sign of life: the BIOS prints "LM-1" to the console.
-7. **Phase 7:** Load and boot the OS image. REPL comes up.
+6. **Phase 6:** Compile Lisp programs with the cross-compiler and run them.
+7. **Phase 7:** MegaPad loads and starts the runtime over the link.
 
 ## 10. Testing Strategy
 
@@ -234,4 +234,4 @@ Estimated size: ~2000–3000 lines Python, ~800–1200 lines C++.
 - **GC stress tests:** Tight allocation loops that force nursery overflows. Verify no tagged pointers are lost.
 - **IC tests:** Monomorphic, polymorphic, and megamorphic dispatch patterns.
 - **Queue tests:** Producer-consumer across tiles.
-- **Integration:** Boot the BIOS, then boot the OS, then run `(+ 1 2)` at the REPL.
+- **Integration:** Compile and run Lisp programs end to end, such as `(+ 1 2)` and `(fact 10)`.

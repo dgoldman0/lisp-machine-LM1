@@ -1,6 +1,6 @@
 """Phase 3 tests — traps, PUSH.MULTI/POP.MULTI, write barrier, nursery GC.
 
-Build-plan milestone: allocate until nursery overflows 10×, live objects survive.
+Milestone: allocate until nursery overflows 10×, live objects survive.
 """
 
 import io
@@ -575,7 +575,7 @@ def test_gc_overflow_triggers_gc():
 def test_gc_10_overflows():
     """Allocate until nursery overflows 10×, verify live objects survive.
     
-    This is the BUILD-PLAN.md Phase 3 milestone test.
+    This is the Phase 3 milestone test.
     """
     # Small nursery: 1 cons cell = 24 bytes
     # Every 2nd allocation triggers GC (nursery fills after 1 alloc).

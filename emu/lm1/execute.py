@@ -57,7 +57,6 @@ from collections import deque
 EMU_TRAP_PUTCHAR   = 0x80
 EMU_TRAP_GETCHAR   = 0x81
 EMU_TRAP_BLOCK_IO  = 0x82
-EMU_TRAP_VDI       = 0x83
 EMU_TRAP_MEM_BYTE  = 0x84  # Byte-level memory: r1=sub(0=load,1=store), r2=addr, r3=offset, r4=value
 EMU_TRAP_SET_TRAP_TABLE = 0x90    # BIOS: r1 = trap table base address
 EMU_TRAP_SET_TEMPLATE   = 0x91   # BIOS: r1 = index, r2 = 64-bit header value
@@ -111,7 +110,6 @@ class Emulator:
         tile_id: int = 0,
         num_threads: int = 1,
         block_device: str | None = None,
-        vdi: 'VDI | None' = None,
     ):
         self.mem = Memory(mem_size)
         self.tile_id = tile_id
@@ -175,9 +173,6 @@ class Emulator:
         # Block device (Phase 7)
         self.block_device_path: str | None = block_device
 
-        # VDI display engine (Phase 9)
-        self.vdi = vdi
-
         # Stats
         self.instruction_count = 0
 
@@ -200,11 +195,6 @@ class Emulator:
         # Index 2: Vector header template (hdr_sub=2, size=0 — filled at alloc)
         t.header_templates[2] = make_header(HDR_VECTOR, 0, 2)
 
-    def load_bios(self, bios_words: list[int], base: int = 0) -> None:
-        """Load BIOS instruction words into memory and set PC to base."""
-        self.mem.load_instructions(base, bios_words)
-        for tc in self.threads:
-            tc.pc = base
     # -- Register / memory convenience ---
 
     def reg(self, idx: int) -> int:
@@ -1285,9 +1275,6 @@ class Emulator:
             # GC engine command (no-op in emulator — GC engines are HW-only)
             pass
 
-        elif code == EMU_TRAP_VDI:
-            self._handle_vdi_trap()
-
         elif code == EMU_TRAP_MEM_BYTE:
             # Byte-level memory access:
             #   r1 = sub-function: 0=load_byte, 1=store_byte
@@ -1319,85 +1306,6 @@ class Emulator:
 
         else:
             raise LM1Trap(code, f"Unhandled trap: {trap_name(code)}")
-
-    def _handle_vdi_trap(self) -> None:
-        """Handle VDI display engine trap (0x83).
-
-        r1 = function code (tagged fixnum)
-        r2..r8 = arguments (tagged fixnums)
-        Returns results in r1 (and sometimes r2, r3) as tagged fixnums.
-        """
-        from .vdi import (
-            VDI_SET_MODE, VDI_FILL_RECT, VDI_BLIT,
-            VDI_DRAW_CHAR, VDI_DRAW_STRING, VDI_SET_CURSOR, VDI_READ_PIXEL,
-            VDI_DRAW_LINE, VDI_GET_MODE, VDI_SCROLL, VDI_PRESENT,
-            VDI_READ_EVENT, VDI_GRAD_RECT, VDI_SHADOW_RECT,
-        )
-        t = self.thread
-        if self.vdi is None:
-            # No VDI attached — return error
-            t.regs[1] = tag_fixnum(-1)
-            return
-        vdi = self.vdi
-        func = untag_fixnum(t.regs[1])
-
-        # Helper: untag register as int
-        def arg(n: int) -> int:
-            return untag_fixnum(t.regs[n])
-
-        if func == VDI_SET_MODE:
-            vdi.set_mode(arg(2), arg(3))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_FILL_RECT:
-            vdi.fill_rect(arg(2), arg(3), arg(4), arg(5), arg(6))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_BLIT:
-            vdi.blit(arg(2), arg(3), arg(4), arg(5), arg(6), arg(7))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_DRAW_CHAR:
-            vdi.draw_char(arg(2), arg(3), arg(4), arg(5), arg(6))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_DRAW_STRING:
-            # Read string from emulator memory
-            vdi.draw_string_from_mem(
-                arg(2), arg(3),
-                self.mem.load_byte, arg(4), arg(5),
-                arg(6), arg(7))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_SET_CURSOR:
-            vdi.set_cursor(arg(2), arg(3), bool(arg(4)))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_READ_PIXEL:
-            px = vdi.read_pixel(arg(2), arg(3))
-            t.regs[1] = tag_fixnum(px)
-        elif func == VDI_DRAW_LINE:
-            vdi.draw_line(arg(2), arg(3), arg(4), arg(5), arg(6))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_GET_MODE:
-            t.regs[1] = tag_fixnum(vdi.width)
-            t.regs[2] = tag_fixnum(vdi.height)
-        elif func == VDI_SCROLL:
-            vdi.scroll(arg(2), arg(3), arg(4), arg(5), arg(6), arg(7))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_PRESENT:
-            vdi.present()
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_READ_EVENT:
-            evt_type, data1, data2 = vdi.read_event()
-            t.regs[1] = tag_fixnum(evt_type)
-            t.regs[2] = tag_fixnum(data1)
-            t.regs[3] = tag_fixnum(data2)
-        elif func == VDI_GRAD_RECT:
-            vdi.grad_rect(arg(2), arg(3), arg(4), arg(5),
-                          arg(6), arg(7), arg(8))
-            t.regs[1] = tag_fixnum(0)
-        elif func == VDI_SHADOW_RECT:
-            vdi.shadow_rect(arg(2), arg(3), arg(4), arg(5),
-                            arg(6), arg(7))
-            t.regs[1] = tag_fixnum(0)
-        else:
-            # Unknown VDI function
-            t.regs[1] = tag_fixnum(-1)
 
     # -- Trace output ---
 

@@ -1,6 +1,6 @@
 """Phase 5 tests — messaging, atomics, multi-thread, multi-tile.
 
-Build-plan milestone: producer on tile 0 sends fixnums, consumer on tile 1
+Milestone: producer on tile 0 sends fixnums, consumer on tile 1
 sums them.
 """
 
@@ -447,7 +447,7 @@ def test_cross_tile_send_recv():
 
 @test("producer_consumer_sum", batch="phase5_multitile")
 def test_producer_consumer_sum():
-    """BUILD-PLAN MILESTONE: producer on tile 0 sends fixnums 1..10,
+    """MILESTONE: producer on tile 0 sends fixnums 1..10,
     consumer on tile 1 sums them → fixnum(55).
 
     Producer:

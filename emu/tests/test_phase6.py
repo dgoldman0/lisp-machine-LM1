@@ -234,12 +234,12 @@ def test_asm_tailcall_direct():
 
 
 # ===================================================================
-# Batch: phase6_milestone — BUILD-PLAN milestone test in assembly
+# Batch: phase6_milestone — milestone test in assembly
 # ===================================================================
 
 @test("asm_sum_1_to_10", batch="phase6_milestone")
 def test_asm_sum_1_to_10():
-    """BUILD-PLAN MILESTONE: sum 1..10 as fixnums → fixnum(55) in assembly."""
+    """MILESTONE: sum 1..10 as fixnums → fixnum(55) in assembly."""
     source = """
     ; Sum fixnum(1) through fixnum(10) → r5
     .equ FIX_0,  0        ; tag_fixnum(0)

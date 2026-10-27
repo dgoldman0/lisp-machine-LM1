@@ -7,16 +7,11 @@ emulator, and the REPL pipeline:
 """
 
 import io
-import os
 import struct
-import tempfile
 
 from lm1.testing.harness import test
 from lm1.execute import Emulator
 from lm1.asm import Assembler
-from lm1.bios import (
-    assemble_bios, make_os_image, IMAGE_MAGIC, IMAGE_LOAD_ADDR,
-)
 from lm1.word import (
     NIL, T, tag_fixnum, untag_fixnum,
     is_fixnum, is_cons_ref, make_header,
@@ -33,67 +28,6 @@ NURSERY_BASE = 0x3_0000
 NURSERY_SIZE = 0x1_0000
 OLDGEN_BASE  = 0x5_0000
 OLDGEN_SIZE  = 0x2_0000
-
-
-def _compile_and_run(lisp_forms, max_instructions=50_000):
-    """Cross-compile Lisp forms, assemble, boot via BIOS, run, return output."""
-    cc = Compiler()
-
-    # OS entry point: setup, then jump over function bodies
-    cc._emit("; ===== LM-1 Lispos Runtime =====")
-    cc._emit_label("_os_entry")
-    cc._emit_instr("LI sp, 0x3FF8")
-    cc._emit_instr("LI fp, 0")
-    cc._emit_instr("BR _call_main")
-    cc._emit("")
-
-    # Emit runtime helpers (function bodies)
-    cc.emit_putchar()
-    cc.emit_print_fixnum()
-    cc.emit_print_value()
-    cc.emit_newline()
-
-    # Compile user forms
-    cc.compile_toplevel(lisp_forms)
-
-    # Call main and halt
-    cc._emit_label("_call_main")
-    cc.emit_call_main('main')
-
-    asm_source = cc.get_output()
-
-    # Assemble to words
-    asm = Assembler()
-    os_words = asm.assemble_to_words(asm_source)
-
-    # Package as OS image
-    os_image = make_os_image(os_words, entry_offset=32)
-
-    # Write block device
-    with tempfile.NamedTemporaryFile(suffix='.img', delete=False) as f:
-        fname = f.name
-        # Pad to at least 4K block boundary
-        f.write(os_image)
-        rest = (4096 - len(os_image) % 4096) % 4096
-        f.write(b'\x00' * rest)
-
-    try:
-        stdout = io.StringIO()
-        emu = Emulator(
-            mem_size=1024 * 1024,
-            nursery_base=NURSERY_BASE,
-            nursery_size=NURSERY_SIZE,
-            oldgen_base=OLDGEN_BASE,
-            oldgen_size=OLDGEN_SIZE,
-            stdout=stdout,
-            block_device=fname,
-        )
-        words, labels = assemble_bios()
-        emu.load_bios(words, base=0)
-        emu.run(max_instructions=max_instructions)
-        return stdout.getvalue(), emu
-    finally:
-        os.unlink(fname)
 
 
 def _compile_direct(lisp_forms, max_instructions=50_000):
@@ -315,39 +249,6 @@ def test_exec_print_list():
     output, emu = _compile_direct(forms)
     lines = [l for l in output.strip().split('\n') if l.strip()]
     assert lines[-1].strip() == "(1 2)", f"Expected '(1 2)', got: {output!r}"
-
-
-# ===================================================================
-# Batch: phase8_bios_boot — Full BIOS boot to compiled OS
-# ===================================================================
-
-@test("bios_boot_add", batch="phase8_bios_boot")
-def test_bios_boot_add():
-    """Full pipeline: BIOS boots → OS prints (+ 1 2) = 3."""
-    forms = [
-        ['defun', 'main', [],
-            ['print-fixnum', ['+', 1, 2]],
-            ['newline']],
-    ]
-    output, emu = _compile_and_run(forms)
-    # Output includes BIOS banner + OS output
-    assert "3" in output, f"Expected '3' in output: {output!r}"
-
-
-@test("bios_boot_fact", batch="phase8_bios_boot")
-def test_bios_boot_fact():
-    """Full pipeline: BIOS boots → OS computes (fact 10) = 3628800."""
-    forms = [
-        ['defun', 'fact', ['n'],
-            ['if', ['eq', 'n', 0],
-                1,
-                ['*', 'n', ['fact', ['-', 'n', 1]]]]],
-        ['defun', 'main', [],
-            ['print-fixnum', ['fact', 10]],
-            ['newline']],
-    ]
-    output, emu = _compile_and_run(forms, max_instructions=500_000)
-    assert "3628800" in output, f"Expected '3628800' in output: {output!r}"
 
 
 @test("exec_eq_true", batch="phase8_exec")
