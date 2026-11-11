@@ -45,7 +45,7 @@ module lm1_megapad_link_tb;
     logic        sb_present, sb_rst_n, sb_stop_req, sb_stopped, sb_ready;
     logic        sb_id_req, sb_id_ack;
     logic [7:0]  sb_id_index;
-    logic [63:0] sb_id_data, sb_boot_addr, sb_boot_len;
+    logic [63:0] sb_id_data, sb_boot_addr, sb_boot_len, sb_boot_arg;
 
     // ------------------------------------------------------------------
     // MegaPad's side
@@ -92,7 +92,7 @@ module lm1_megapad_link_tb;
         .sb_ready(sb_ready), .sb_id_req(sb_id_req),
         .sb_id_index(sb_id_index), .sb_id_ack(sb_id_ack),
         .sb_id_data(sb_id_data), .sb_boot_addr(sb_boot_addr),
-        .sb_boot_len(sb_boot_len),
+        .sb_boot_len(sb_boot_len), .sb_boot_arg(sb_boot_arg),
         .m_req(m_req), .m_addr(m_addr), .m_wdata(m_wdata), .m_wen(m_wen),
         .m_size(m_size), .m_ack(m_ack), .m_error(m_error),
         .m_rdata(m_rdata), .m_weight(m_weight), .m_bwlimit(m_bwlimit),
@@ -106,7 +106,8 @@ module lm1_megapad_link_tb;
     logic [11:0] mb_addr = 12'd0;
     logic [7:0]  mb_wdata = 8'd0, mb_rdata;
     logic [7:0]  mb_requester = 8'd0;
-    logic [3:0]  ipi_out, ef_out;
+    // MegaPad's mailbox has a line for each of its sixteen cores.
+    logic [15:0] ipi_out, ef_out;
 
     mp64_mailbox #(
         .N_CORES(4), .N_GLOBAL_CORES(16), .N_PORTS(1), .PORT_ID_BASE(PORT_ID)
@@ -202,7 +203,7 @@ module lm1_megapad_link_tb;
     // ------------------------------------------------------------------
     logic        core_rst_n, stop_req;
     logic        runtime_stopped = 1'b0, runtime_ready = 1'b0;
-    logic [63:0] boot_addr, boot_len;
+    logic [63:0] boot_addr, boot_len, boot_arg;
 
     logic        hm_req_valid, hm_req_ready, hm_req_we, hm_cancel;
     logic [63:0] hm_req_addr, hm_req_wdata;
@@ -248,10 +249,10 @@ module lm1_megapad_link_tb;
         .sb_ready(sb_ready), .sb_id_req(sb_id_req),
         .sb_id_index(sb_id_index), .sb_id_ack(sb_id_ack),
         .sb_id_data(sb_id_data), .sb_boot_addr(sb_boot_addr),
-        .sb_boot_len(sb_boot_len),
+        .sb_boot_len(sb_boot_len), .sb_boot_arg(sb_boot_arg),
         .core_rst_n(core_rst_n), .stop_req(stop_req),
         .runtime_stopped(runtime_stopped), .runtime_ready(runtime_ready),
-        .boot_addr(boot_addr), .boot_len(boot_len),
+        .boot_addr(boot_addr), .boot_len(boot_len), .boot_arg(boot_arg),
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
         .hm_req_addr(hm_req_addr), .hm_req_wdata(hm_req_wdata),
         .hm_req_we(hm_req_we), .hm_req_size(hm_req_size),
@@ -306,7 +307,7 @@ module lm1_megapad_link_tb;
     localparam logic [3:0] R_RANGE_BASE = 4'h5, R_RANGE_LIM = 4'h6;
     localparam logic [3:0] R_RANGE_RTS = 4'h7, R_ID_INDEX = 4'h9;
     localparam logic [3:0] R_ID_DATA = 4'hA, R_BOOT_ADDR = 4'hB;
-    localparam logic [3:0] R_BOOT_LEN = 4'hC;
+    localparam logic [3:0] R_BOOT_LEN = 4'hC, R_BOOT_ARG = 4'hD;
 
     logic [63:0] rd;
     task automatic reg_write(input logic [3:0] idx, input logic [63:0] data);
@@ -445,9 +446,12 @@ module lm1_megapad_link_tb;
         lend(3'd1, 64'h0010_8000, 64'h0010_9000, 2'b11);
         reg_write(R_BOOT_ADDR, 64'h0010_4000);
         reg_write(R_BOOT_LEN, 64'd32);
+        reg_write(R_BOOT_ARG, 64'h0010_5000);
         reg_write(R_CTRL, 64'h09);          // ENABLE, DOORBELL_EN, released
         #1;
         check("LM-1 leaves reset", core_rst_n == 1'b1);
+        check("the control block's address reaches LM-1's runtime",
+              boot_arg == 64'h0010_5000);
         while (!boot_done && !boot_failed) @(negedge clk);
         @(negedge clk);
         check("LM-1 fetches its image through the bridge",
@@ -539,11 +543,11 @@ module lm1_megapad_link_tb;
         repeat (2) @(negedge clk);
         #1;
         check("LM-1's signal raises core 2's IPI line and external flag",
-              ipi_out == 4'b0100 && ef_out == 4'b0100);
+              ipi_out == 16'h0004 && ef_out == 16'h0004);
         mbox_write(8'd2, 4'hA, PORT_ID);    // MBOX_ACK from core 2
         #1;
         check("the core's acknowledgement by port ID clears both",
-              ipi_out == 4'b0000 && ef_out == 4'b0000);
+              ipi_out == 16'h0000 && ef_out == 16'h0000);
 
         $display("\nStop and reset");
         reg_write(R_CTRL, 64'h0D);          // + STOP_REQ

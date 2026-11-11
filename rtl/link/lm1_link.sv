@@ -78,6 +78,7 @@ module lm1_link #(
     output logic [63:0] sb_id_data,
     input  logic [63:0] sb_boot_addr,
     input  logic [63:0] sb_boot_len,
+    input  logic [63:0] sb_boot_arg,
 
     // ---- Local: reset and lifecycle ----
     output logic        core_rst_n,     // reset for LM-1's own logic
@@ -86,6 +87,7 @@ module lm1_link #(
     input  logic        runtime_ready,
     output logic [63:0] boot_addr,
     output logic [63:0] boot_len,
+    output logic [63:0] boot_arg,       // address of the control block
 
     // ---- Local: host-memory port ----
     input  logic        hm_req_valid,
@@ -122,6 +124,7 @@ module lm1_link #(
     assign stop_req   = sb_stop_req;
     assign boot_addr  = sb_boot_addr;
     assign boot_len   = sb_boot_len;
+    assign boot_arg   = sb_boot_arg;
     assign sb_ready   = core_rst_n && runtime_ready;
 
     // The identity record is readable in reset, so it resets on por_n alone.

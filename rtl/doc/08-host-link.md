@@ -54,6 +54,7 @@ them, so LM-1 can reach nothing else of MegaPad's.
 | `sb_ready` | to MegaPad | LM-1's runtime is up |
 | `sb_id_req`, `sb_id_index`, `sb_id_ack`, `sb_id_data` | both | Read of one identity word |
 | `sb_boot_addr`, `sb_boot_len` | to LM-1 | The image MegaPad names |
+| `sb_boot_arg` | to LM-1 | The address of the control block MegaPad lends, where LM-1's runtime finds its queues |
 
 The identity record answers while LM-1 is held in reset, so it has a reset
 of its own, `por_n`. Word 0 is `0x4348_4950_0000_0001`: the ASCII tag `CHIP`
@@ -66,7 +67,7 @@ in the low byte. Every further word reads zero.
 |------|---------|
 | `core_rst_n` | Reset for LM-1's own logic: `por_n` and `sb_rst_n` |
 | `stop_req`, `runtime_stopped`, `runtime_ready` | The stop handshake and the ready flag, to and from the runtime |
-| `boot_addr`, `boot_len` | The sideband's boot words |
+| `boot_addr`, `boot_len`, `boot_arg` | The sideband's boot words |
 | `hm_*` | The host-memory port: a request with its burst length, `hm_cancel`, and responses with their code, a `last` mark and a ready input |
 | `dbi_*` | A doorbell from MegaPad, offered with its source ID |
 | `dbo_*` | A doorbell to MegaPad, taken with its destination ID |

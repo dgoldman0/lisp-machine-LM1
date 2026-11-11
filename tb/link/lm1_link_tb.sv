@@ -40,10 +40,10 @@ module lm1_link_tb;
     logic        sb_present, sb_rst_n, sb_stop_req, sb_stopped, sb_ready;
     logic        sb_id_req, sb_id_ack;
     logic [7:0]  sb_id_index;
-    logic [63:0] sb_id_data, sb_boot_addr, sb_boot_len;
+    logic [63:0] sb_id_data, sb_boot_addr, sb_boot_len, sb_boot_arg;
 
     logic        core_rst_n, stop_req, runtime_stopped, runtime_ready;
-    logic [63:0] boot_addr, boot_len;
+    logic [63:0] boot_addr, boot_len, boot_arg;
 
     logic        hm_req_valid, hm_req_ready, hm_req_we, hm_cancel;
     logic [63:0] hm_req_addr, hm_req_wdata;
@@ -86,10 +86,10 @@ module lm1_link_tb;
         .sb_ready(sb_ready), .sb_id_req(sb_id_req),
         .sb_id_index(sb_id_index), .sb_id_ack(sb_id_ack),
         .sb_id_data(sb_id_data), .sb_boot_addr(sb_boot_addr),
-        .sb_boot_len(sb_boot_len),
+        .sb_boot_len(sb_boot_len), .sb_boot_arg(sb_boot_arg),
         .core_rst_n(core_rst_n), .stop_req(stop_req),
         .runtime_stopped(runtime_stopped), .runtime_ready(runtime_ready),
-        .boot_addr(boot_addr), .boot_len(boot_len),
+        .boot_addr(boot_addr), .boot_len(boot_len), .boot_arg(boot_arg),
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
         .hm_req_addr(hm_req_addr), .hm_req_wdata(hm_req_wdata),
         .hm_req_we(hm_req_we), .hm_req_size(hm_req_size),
@@ -361,7 +361,7 @@ module lm1_link_tb;
         por_n = 1'b0;
         sb_rst_n = 1'b0; sb_stop_req = 1'b0;
         sb_id_req = 1'b0; sb_id_index = 8'd0;
-        sb_boot_addr = 64'd0; sb_boot_len = 64'd0;
+        sb_boot_addr = 64'd0; sb_boot_len = 64'd0; sb_boot_arg = 64'd0;
         lk_dbt_valid = 1'b0; lk_dbt_src = 8'd0; lk_dbr_ready = 1'b0;
         runtime_stopped = 1'b0; runtime_ready = 1'b0;
         rt_req_valid = 1'b0; rt_req_addr = 64'd0; rt_req_wdata = 64'd0;
@@ -395,11 +395,13 @@ module lm1_link_tb;
         hostmem[10'h202] = 64'h3333_3333_0000_0003;
         sb_boot_addr = 64'h1000;
         sb_boot_len  = 64'd20;          // two and a half words
+        sb_boot_arg  = 64'h2040;
         @(posedge clk);
         sb_rst_n = 1'b1;
         while (!boot_done && !boot_failed) @(posedge clk);
         @(posedge clk);
         check("the fetch completes", boot_done && !boot_failed);
+        check("the boot argument reaches the runtime", boot_arg == 64'h2040);
         check("a length of 20 bytes loads three words", loaded_n == 3);
         check("the words arrive in order with their offsets",
               loaded[0] == 64'h1111_1111_0000_0001 && loaded_offs[0] == 0 &&
