@@ -13,6 +13,7 @@ Comprehensive hardware documentation for the LM-1 Dynamic Object Processor.
 | 05 | [Garbage Collection Hardware](05-gc-engines.md) | Scanner, copier, fixup engines, write barriers, card tables, forwarding pointers — how GC runs in hardware |
 | 06 | [SoC Integration](06-soc-integration.md) | Tile, cluster, crossbar, clock gating, message queues, NoC stubs, and the full chip hierarchy |
 | 07 | [Design Decisions & Comparisons](07-design-decisions.md) | Why multi-cycle over pipelined, why tagged words, how this differs from RISC-V/x86/GPU/Lisp Machine, tradeoffs made |
+| 08 | [Host Link](08-host-link.md) | LM-1's end of the link to MegaPad: memory requests into lent memory, doorbells, the sideband and the boot fetch |
 
 ## RTL File Map
 
@@ -37,6 +38,9 @@ rtl/
 ├── cluster/
 │   ├── lm1_cluster.sv             # 8-tile cluster — crossbar, shared SRAM, GC engines
 │   └── lm1_crossbar.sv            # Round-robin arbiter for shared SRAM access
+├── link/
+│   ├── lm1_link.sv                # Host link endpoint — memory requests, doorbells, sideband
+│   └── lm1_link_boot.sv           # Boot fetch — loads the image MegaPad names
 ├── gc/
 │   ├── lm1_gc_engine_top.sv       # GC engine wrapper — command dispatch, memory arbiter
 │   ├── lm1_gc_scanner.sv          # Object graph scanner — finds live references
@@ -52,7 +56,7 @@ rtl/
 
 | Metric | Value |
 |--------|-------|
-| Total RTL | ~6,500 lines across 23 files |
+| Total RTL | ~7,100 lines across 25 files |
 | Word width | 64-bit tagged words |
 | Instruction width | 32-bit fixed |
 | GPRs per thread | 32 |

@@ -29,7 +29,7 @@ The ISA is designed around ~8 semantic instruction families that map directly to
 
 LM-1 is a chiplet that works beside the [MegaPad-64 Forth Machine](https://github.com/dgoldman0/megapad/). MegaPad handles control, I/O and number crunching, and LM-1 runs Lisp as its partner device. KDOS and Desk, from MegaPad and [Akashic](https://github.com/dgoldman0/akashic), are the system's operating system and desktop. The working name for the combined chip is Leviathan.
 
-This repository holds the chiplet: its specification, RTL, FPGA target, emulator and toolchain. The specification still describes LM-1's own PCIe, Ethernet, NVMe and display interfaces; the chiplet revision replaces them with a link to MegaPad.
+This repository holds the chiplet: its specification, RTL, FPGA target, emulator and toolchain. The specification still describes LM-1's own PCIe, Ethernet, NVMe and display interfaces; the chiplet revision replaces them with a link to MegaPad. LM-1's end of that link is in the RTL ([rtl/doc/08-host-link.md](rtl/doc/08-host-link.md)).
 
 LM-1's earlier standalone software stack (its BIOS, the Lispos boot path, a virtual filesystem, a display engine model and the Crystal desktop) is preserved by the tag `archive/lm1-os-desktop-e19aebd-20261027`.
 
@@ -66,11 +66,13 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | [rtl/tile/](rtl/tile/) | Tile: core + SRAM + message queues |
 | [rtl/cluster/](rtl/cluster/) | Cluster: 8 tiles + crossbar + shared SRAM |
 | [rtl/gc/](rtl/gc/) | GC engines: scanner, copier, fixup |
+| [rtl/link/](rtl/link/) | Host link: LM-1's end of the link to MegaPad, and the boot fetch |
 | [rtl/tech/](rtl/tech/) | Technology wrappers: SRAMs, clock gating |
 | [rtl/target/xilinx7/](rtl/target/xilinx7/) | FPGA target: Genesys 2 (Kintex-7 325T) constraints |
 | [rtl/doc/](rtl/doc/) | RTL design documentation |
 | [fpga/](fpga/) | FPGA top-level wrapper + synthesis file lists |
 | [tb/](tb/) | Verilator testbench: 41 tests, test generators |
+| [tb/link/](tb/link/) | Host-link benches: against a behavioural MegaPad, and against MegaPad's RTL when `MEGAPAD_ROOT` is set |
 
 ### Emulator
 
