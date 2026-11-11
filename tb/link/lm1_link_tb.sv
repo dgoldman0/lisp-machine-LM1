@@ -31,7 +31,8 @@ module lm1_link_tb;
     logic        lk_rq_valid, lk_rq_ready, lk_rq_wen, lk_rq_cancel;
     logic [63:0] lk_rq_addr, lk_rq_wdata;
     logic [1:0]  lk_rq_size;
-    logic        lk_rs_valid, lk_rs_ready;
+    logic [7:0]  lk_rq_len;
+    logic        lk_rs_valid, lk_rs_ready, lk_rs_last;
     logic [63:0] lk_rs_rdata;
     logic [1:0]  lk_rs_code;
     logic        lk_dbt_valid, lk_dbt_ready, lk_dbr_valid, lk_dbr_ready;
@@ -47,14 +48,16 @@ module lm1_link_tb;
     logic        hm_req_valid, hm_req_ready, hm_req_we, hm_cancel;
     logic [63:0] hm_req_addr, hm_req_wdata;
     logic [1:0]  hm_req_size;
-    logic        hm_resp_valid;
+    logic [7:0]  hm_req_len;
+    logic        hm_resp_valid, hm_resp_ready, hm_resp_last;
     logic [63:0] hm_resp_data;
     logic [1:0]  hm_resp_code;
 
     logic        rt_req_valid, rt_req_ready, rt_req_we, rt_cancel;
     logic [63:0] rt_req_addr, rt_req_wdata;
     logic [1:0]  rt_req_size;
-    logic        rt_resp_valid;
+    logic [7:0]  rt_req_len;
+    logic        rt_resp_valid, rt_resp_ready, rt_resp_last;
     logic [63:0] rt_resp_data;
     logic [1:0]  rt_resp_code;
 
@@ -70,9 +73,10 @@ module lm1_link_tb;
         .lk_rq_valid(lk_rq_valid), .lk_rq_ready(lk_rq_ready),
         .lk_rq_addr(lk_rq_addr), .lk_rq_wdata(lk_rq_wdata),
         .lk_rq_wen(lk_rq_wen), .lk_rq_size(lk_rq_size),
-        .lk_rq_cancel(lk_rq_cancel),
+        .lk_rq_len(lk_rq_len), .lk_rq_cancel(lk_rq_cancel),
         .lk_rs_valid(lk_rs_valid), .lk_rs_ready(lk_rs_ready),
         .lk_rs_rdata(lk_rs_rdata), .lk_rs_code(lk_rs_code),
+        .lk_rs_last(lk_rs_last),
         .lk_dbt_valid(lk_dbt_valid), .lk_dbt_ready(lk_dbt_ready),
         .lk_dbt_src(lk_dbt_src),
         .lk_dbr_valid(lk_dbr_valid), .lk_dbr_ready(lk_dbr_ready),
@@ -89,9 +93,10 @@ module lm1_link_tb;
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
         .hm_req_addr(hm_req_addr), .hm_req_wdata(hm_req_wdata),
         .hm_req_we(hm_req_we), .hm_req_size(hm_req_size),
-        .hm_cancel(hm_cancel),
-        .hm_resp_valid(hm_resp_valid), .hm_resp_data(hm_resp_data),
-        .hm_resp_code(hm_resp_code),
+        .hm_req_len(hm_req_len), .hm_cancel(hm_cancel),
+        .hm_resp_valid(hm_resp_valid), .hm_resp_ready(hm_resp_ready),
+        .hm_resp_data(hm_resp_data), .hm_resp_code(hm_resp_code),
+        .hm_resp_last(hm_resp_last),
         .dbi_valid(dbi_valid), .dbi_ready(dbi_ready), .dbi_src(dbi_src),
         .dbo_valid(dbo_valid), .dbo_ready(dbo_ready), .dbo_dst(dbo_dst)
     );
@@ -102,15 +107,17 @@ module lm1_link_tb;
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
         .hm_req_addr(hm_req_addr), .hm_req_wdata(hm_req_wdata),
         .hm_req_we(hm_req_we), .hm_req_size(hm_req_size),
-        .hm_cancel(hm_cancel),
-        .hm_resp_valid(hm_resp_valid), .hm_resp_data(hm_resp_data),
-        .hm_resp_code(hm_resp_code),
+        .hm_req_len(hm_req_len), .hm_cancel(hm_cancel),
+        .hm_resp_valid(hm_resp_valid), .hm_resp_ready(hm_resp_ready),
+        .hm_resp_data(hm_resp_data), .hm_resp_code(hm_resp_code),
+        .hm_resp_last(hm_resp_last),
         .rt_req_valid(rt_req_valid), .rt_req_ready(rt_req_ready),
         .rt_req_addr(rt_req_addr), .rt_req_wdata(rt_req_wdata),
         .rt_req_we(rt_req_we), .rt_req_size(rt_req_size),
-        .rt_cancel(rt_cancel),
-        .rt_resp_valid(rt_resp_valid), .rt_resp_data(rt_resp_data),
-        .rt_resp_code(rt_resp_code),
+        .rt_req_len(rt_req_len), .rt_cancel(rt_cancel),
+        .rt_resp_valid(rt_resp_valid), .rt_resp_ready(rt_resp_ready),
+        .rt_resp_data(rt_resp_data), .rt_resp_code(rt_resp_code),
+        .rt_resp_last(rt_resp_last),
         .ld_valid(ld_valid), .ld_ready(ld_ready),
         .ld_offset(ld_offset), .ld_data(ld_data),
         .boot_done(boot_done), .boot_failed(boot_failed)
@@ -123,13 +130,14 @@ module lm1_link_tb;
     int          host_delay = 2;
     int          host_requests = 0;
 
-    typedef enum int { H_IDLE, H_BUSY, H_RESP } hstate_t;
+    typedef enum int { H_IDLE, H_BUSY, H_RESP, H_WDATA } hstate_t;
     hstate_t     hstate = H_IDLE;
     int          hcount;
     logic [63:0] h_addr, h_wdata;
-    logic        h_wen, h_cancelled;
+    logic [7:0]  h_left;        // words of the burst after the current one
+    logic        h_wen, h_cancelled, h_refuse;
 
-    assign lk_rq_ready = (hstate == H_IDLE) && sb_rst_n;
+    assign lk_rq_ready = (hstate == H_IDLE || hstate == H_WDATA) && sb_rst_n;
     assign lk_rs_valid = (hstate == H_RESP);
 
     always_ff @(posedge clk) begin
@@ -139,7 +147,12 @@ module lm1_link_tb;
                     h_addr      <= lk_rq_addr;
                     h_wdata     <= lk_rq_wdata;
                     h_wen       <= lk_rq_wen;
+                    h_left      <= lk_rq_len;
                     h_cancelled <= 1'b0;
+                    // The whole burst is admitted or refused at its start.
+                    h_refuse    <= (lk_rq_addr < 64'h1000) ||
+                                   (lk_rq_addr + 64'd8 * (64'(lk_rq_len) + 64'd1)
+                                    > 64'h3000);
                     hcount      <= host_delay;
                     host_requests <= host_requests + 1;
                     hstate      <= H_BUSY;
@@ -149,28 +162,52 @@ module lm1_link_tb;
                 if (lk_rq_cancel)
                     h_cancelled <= 1'b1;
                 if (hcount == 0) begin
+                    lk_rs_rdata <= 64'd0;
+                    lk_rs_last  <= 1'b1;
+                    hstate      <= H_RESP;
                     if (h_cancelled || lk_rq_cancel) begin
-                        lk_rs_code  <= 2'd3;
-                        lk_rs_rdata <= 64'd0;
-                    end else if (h_addr < 64'h1000 || h_addr >= 64'h3000) begin
-                        lk_rs_code  <= 2'd1;
-                        lk_rs_rdata <= 64'd0;
+                        lk_rs_code <= 2'd3;
+                    end else if (h_refuse) begin
+                        lk_rs_code <= 2'd1;
                     end else if (h_wen) begin
                         hostmem[h_addr[12:3]] <= h_wdata;
-                        lk_rs_code  <= 2'd0;
-                        lk_rs_rdata <= 64'd0;
+                        lk_rs_code <= 2'd0;
+                        if (h_left != 8'd0) begin
+                            h_addr <= h_addr + 64'd8;
+                            h_left <= h_left - 8'd1;
+                            hstate <= H_WDATA;
+                        end
                     end else begin
                         lk_rs_code  <= 2'd0;
                         lk_rs_rdata <= hostmem[h_addr[12:3]];
+                        lk_rs_last  <= (h_left == 8'd0);
                     end
-                    hstate <= H_RESP;
                 end else begin
                     hcount <= hcount - 1;
                 end
             end
+            H_WDATA: begin
+                if (lk_rq_cancel) begin
+                    lk_rs_code <= 2'd3; lk_rs_rdata <= 64'd0;
+                    lk_rs_last <= 1'b1;
+                    hstate     <= H_RESP;
+                end else if (lk_rq_valid) begin
+                    h_wdata <= lk_rq_wdata;
+                    hcount  <= host_delay;
+                    hstate  <= H_BUSY;
+                end
+            end
             H_RESP: begin
-                if (lk_rs_ready)
-                    hstate <= H_IDLE;
+                if (lk_rs_ready) begin
+                    if (lk_rs_last) begin
+                        hstate <= H_IDLE;
+                    end else begin
+                        h_addr <= h_addr + 64'd8;
+                        h_left <= h_left - 8'd1;
+                        hcount <= host_delay;
+                        hstate <= H_BUSY;
+                    end
+                end
             end
             default: hstate <= H_IDLE;
         endcase
@@ -181,11 +218,11 @@ module lm1_link_tb;
     // ------------------------------------------------------------------
     // Image words taken by the load port
     // ------------------------------------------------------------------
-    logic [63:0] loaded      [0:15];
-    logic [63:0] loaded_offs [0:15];
+    logic [63:0] loaded      [0:63];
+    logic [63:0] loaded_offs [0:63];
     int          loaded_n = 0;
     always_ff @(posedge clk) begin
-        if (ld_valid && ld_ready && loaded_n < 16) begin
+        if (ld_valid && ld_ready && loaded_n < 64) begin
             loaded[loaded_n]      <= ld_data;
             loaded_offs[loaded_n] <= ld_offset;
             loaded_n <= loaded_n + 1;
@@ -221,7 +258,7 @@ module lm1_link_tb;
         int waited;
         @(negedge clk);
         rt_req_valid = 1'b1; rt_req_addr = addr; rt_req_wdata = wdata;
-        rt_req_we = we; rt_req_size = 2'd3;
+        rt_req_we = we; rt_req_size = 2'd3; rt_req_len = 8'd0;
         #1;
         while (!rt_req_ready) begin
             @(negedge clk);
@@ -246,6 +283,78 @@ module lm1_link_tb;
         rt_cancel = 1'b0;
     endtask
 
+    // Bursts on the runtime's port.
+    logic [63:0] b_data [0:15];
+    logic [1:0]  b_code [0:15];
+    logic        b_last [0:15];
+    int          b_n;
+
+    task automatic rt_burst_read(input logic [63:0] addr, input logic [7:0] len);
+        logic done;
+        @(negedge clk);
+        rt_req_valid = 1'b1; rt_req_addr = addr; rt_req_we = 1'b0;
+        rt_req_size = 2'd3; rt_req_len = len;
+        #1;
+        while (!rt_req_ready) begin
+            @(negedge clk);
+            #1;
+        end
+        @(negedge clk);
+        rt_req_valid = 1'b0; rt_req_len = 8'd0;
+        b_n = 0;
+        done = 1'b0;
+        #1;
+        while (!done) begin
+            if (rt_resp_valid) begin
+                b_data[b_n] = rt_resp_data;
+                b_code[b_n] = rt_resp_code;
+                b_last[b_n] = rt_resp_last;
+                done = rt_resp_last;
+                b_n++;
+            end
+            @(negedge clk);
+            #1;
+        end
+    endtask
+
+    // Sends len + 1 words, base, base + 1, ...; stops when LM-1's end
+    // answers early.  Leaves the one response in b_code[0] and b_last[0].
+    task automatic rt_burst_write(input logic [63:0] addr, input logic [7:0] len,
+                                  input logic [63:0] base);
+        logic ended;
+        @(negedge clk);
+        rt_req_valid = 1'b1; rt_req_addr = addr; rt_req_wdata = base;
+        rt_req_we = 1'b1; rt_req_size = 2'd3; rt_req_len = len;
+        #1;
+        while (!rt_req_ready) begin
+            @(negedge clk);
+            #1;
+        end
+        ended = 1'b0;
+        for (int k = 1; k <= int'(len) && !ended; k++) begin
+            @(negedge clk);
+            rt_req_wdata = base + 64'(k); rt_req_len = 8'd0;
+            #1;
+            while (!rt_req_ready && !rt_resp_valid) begin
+                @(negedge clk);
+                #1;
+            end
+            if (rt_resp_valid)
+                ended = 1'b1;
+        end
+        if (!ended)
+            @(negedge clk);
+        rt_req_valid = 1'b0; rt_req_we = 1'b0; rt_req_len = 8'd0;
+        #1;
+        while (!rt_resp_valid) begin
+            @(negedge clk);
+            #1;
+        end
+        b_code[0] = rt_resp_code;
+        b_last[0] = rt_resp_last;
+        @(negedge clk);
+    endtask
+
     int prev_n;
 
     initial begin
@@ -257,6 +366,8 @@ module lm1_link_tb;
         runtime_stopped = 1'b0; runtime_ready = 1'b0;
         rt_req_valid = 1'b0; rt_req_addr = 64'd0; rt_req_wdata = 64'd0;
         rt_req_we = 1'b0; rt_req_size = 2'd3; rt_cancel = 1'b0;
+        rt_req_len = 8'd0; rt_resp_ready = 1'b1;
+        lk_rs_last = 1'b1;
         ld_ready = 1'b1;
         dbi_ready = 1'b0; dbo_valid = 1'b0; dbo_dst = 8'd0;
         lk_rs_code = 2'd0; lk_rs_rdata = 64'd0;
@@ -330,6 +441,29 @@ module lm1_link_tb;
             #1;
         end
         @(negedge clk);
+
+        $display("\nBursts on the runtime's port");
+        hostmem[10'h280] = 64'hB0; hostmem[10'h281] = 64'hB1;
+        hostmem[10'h282] = 64'hB2; hostmem[10'h283] = 64'hB3;
+        prev_n = host_requests;
+        rt_burst_read(64'h1400, 8'd3);
+        check("a read burst of four words is one request on the link",
+              host_requests == prev_n + 1);
+        check("its four words arrive in order, the fourth marked last",
+              b_n == 4 && b_data[0] == 64'hB0 && b_data[3] == 64'hB3 &&
+              !b_last[0] && !b_last[2] && b_last[3]);
+        rt_burst_write(64'h1800, 8'd2, 64'hAA00);
+        check("a write burst of three words gets one response, OK",
+              b_code[0] == 2'd0 && b_last[0]);
+        check("its words are in the host's memory",
+              hostmem[10'h300] == 64'hAA00 && hostmem[10'h301] == 64'hAA01 &&
+              hostmem[10'h302] == 64'hAA02);
+        rt_burst_write(64'h2FF0, 8'd3, 64'hCC00);
+        check("a write burst the host refuses ends at once as REFUSED",
+              b_code[0] == 2'd1 && b_last[0]);
+        rt_access(64'h2000, 64'd0, 1'b0, 0);
+        check("a single access follows the refused burst",
+              r_code == 2'd0 && r_data == 64'hABCD_EF01_2345_6789);
 
         $display("\nDoorbells");
         @(posedge clk);
@@ -412,6 +546,28 @@ module lm1_link_tb;
         repeat (3) @(posedge clk);
         #1;
         check("a length of zero finishes at once", boot_done == 1'b1);
+
+        $display("\nA long image, fetched in bursts");
+        sb_rst_n <= 1'b0;
+        repeat (2) @(posedge clk);
+        for (int i = 0; i < 20; i++)
+            hostmem[10'h240 + i] = 64'hF00D_0000 + 64'(i);
+        sb_boot_addr <= 64'h1200;
+        sb_boot_len  <= 64'd160;        // twenty words
+        prev_n = loaded_n;
+        @(posedge clk);
+        host_requests = 0;
+        sb_rst_n <= 1'b1;
+        @(posedge clk);
+        while (!boot_done && !boot_failed) @(posedge clk);
+        @(posedge clk);
+        check("twenty words load", boot_done && loaded_n == prev_n + 20);
+        check("the first and the last are right",
+              loaded[prev_n] == 64'hF00D_0000 &&
+              loaded[prev_n + 19] == 64'hF00D_0013 &&
+              loaded_offs[prev_n + 19] == 64'd152);
+        check("in three requests of eight, eight and four words",
+              host_requests == 3);
 
         $display("\n=== lm1_link_tb: %0d passed, %0d failed ===",
                  pass_count, fail_count);

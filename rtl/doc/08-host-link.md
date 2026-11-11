@@ -25,13 +25,19 @@ cycle in which both are high.
 
 | Channel | Direction | Payload |
 |---------|-----------|---------|
-| Memory request | LM-1 to MegaPad | `addr`, `wdata`, `wen`, `size`; one request outstanding at a time |
-| Memory response | MegaPad to LM-1 | `rdata`, `code`: 0 OK, 1 REFUSED, 2 MEM_ERROR, 3 CANCELLED |
+| Memory request | LM-1 to MegaPad | `addr`, `wdata`, `wen`, `size`, `len`; one request outstanding at a time |
+| Memory response | MegaPad to LM-1 | `rdata`, `code`: 0 OK, 1 REFUSED, 2 MEM_ERROR, 3 CANCELLED; `last` |
 | Doorbell in | MegaPad to LM-1 | `src`, the ID of the participant that signalled |
 | Doorbell out | LM-1 to MegaPad | `dst`, the ID of the participant to signal |
 
 `lk_rq_cancel` abandons the outstanding request. MegaPad still answers it,
 with CANCELLED unless its response was already waiting.
+
+A request with `len` = n asks for a burst of n + 1 consecutive 64-bit words.
+A read burst is one request and n + 1 responses, the final one marked
+`last`. A write burst is n + 1 request messages, each with its word, and one
+response. MegaPad admits or refuses a burst whole, and a response other than
+OK ends it.
 
 An address is MegaPad's address of the access. MegaPad's port bridge checks
 it against the ranges lent to LM-1 and answers REFUSED for anything outside
@@ -61,23 +67,25 @@ in the low byte. Every further word reads zero.
 | `core_rst_n` | Reset for LM-1's own logic: `por_n` and `sb_rst_n` |
 | `stop_req`, `runtime_stopped`, `runtime_ready` | The stop handshake and the ready flag, to and from the runtime |
 | `boot_addr`, `boot_len` | The sideband's boot words |
-| `hm_*` | The host-memory port: a request, `hm_cancel`, and a response with its code |
+| `hm_*` | The host-memory port: a request with its burst length, `hm_cancel`, and responses with their code, a `last` mark and a ready input |
 | `dbi_*` | A doorbell from MegaPad, offered with its source ID |
 | `dbo_*` | A doorbell to MegaPad, taken with its destination ID |
 
 A request on the host-memory port reaches the link in the cycle it is
 raised, and its response returns in the cycle MegaPad gives it, so the
 endpoint adds no cycle to an access. When the link is busy for a cycle the
-endpoint holds the request and presents it until MegaPad takes it.
+endpoint holds the request and presents it until MegaPad takes it. The
+further words of a write burst pass straight through as MegaPad takes them,
+and a response that ends the burst early returns the port to idle.
 
 ## The boot fetch: `lm1_link_boot`
 
 MegaPad loads LM-1's runtime image into a range it lends read-only and names
 it by address and length. When LM-1 leaves reset, `lm1_link_boot` reads the
-image through the host-memory port, one 64-bit word at a time, and hands
-each word with its offset to the load port, which is to write LM-1's own
-memory. After the last word it raises `boot_done` and passes the
-host-memory port through to the runtime.
+image through the host-memory port in bursts of up to `BURST_WORDS` 64-bit
+words, eight by default, and hands each word with its offset to the load
+port, which is to write LM-1's own memory. After the last word it raises
+`boot_done` and passes the host-memory port through to the runtime.
 
 A length of zero means no image, and `boot_done` rises at once. A response
 other than OK stops the fetch and raises `boot_failed`; the runtime's port

@@ -8,8 +8,13 @@
 // the MegaPad repository).
 //
 // Link channels are valid/ready handshakes:
-//   memory request   (to MegaPad):   addr, wdata, wen, size; one outstanding
-//   memory response  (from MegaPad): rdata, code
+//   memory request   (to MegaPad):   addr, wdata, wen, size, len; one
+//                                    outstanding
+//   memory response  (from MegaPad): rdata, code, last
+// A request with len = n asks for a burst of n + 1 consecutive 64-bit words.
+// A read burst is one request and n + 1 responses.  A write burst is n + 1
+// request messages, each with its word of data, and one response.  A
+// response other than OK ends a burst.
 //   doorbell in      (from MegaPad): src, the ID of the participant
 //   doorbell out     (to MegaPad):   dst, the ID to signal
 //
@@ -45,11 +50,13 @@ module lm1_link #(
     output logic [63:0] lk_rq_wdata,
     output logic        lk_rq_wen,
     output logic [1:0]  lk_rq_size,
+    output logic [7:0]  lk_rq_len,
     output logic        lk_rq_cancel,
     input  logic        lk_rs_valid,
     output logic        lk_rs_ready,
     input  logic [63:0] lk_rs_rdata,
     input  logic [1:0]  lk_rs_code,
+    input  logic        lk_rs_last,
 
     // ---- Link: doorbells ----
     input  logic        lk_dbt_valid,   // MegaPad -> LM-1
@@ -87,10 +94,13 @@ module lm1_link #(
     input  logic [63:0] hm_req_wdata,
     input  logic        hm_req_we,
     input  logic [1:0]  hm_req_size,
+    input  logic [7:0]  hm_req_len,     // words beyond the first
     input  logic        hm_cancel,      // abandon the outstanding request
     output logic        hm_resp_valid,
+    input  logic        hm_resp_ready,
     output logic [63:0] hm_resp_data,
     output logic [1:0]  hm_resp_code,
+    output logic        hm_resp_last,
 
     // ---- Local: doorbells ----
     output logic        dbi_valid,      // a participant signalled LM-1
@@ -135,9 +145,10 @@ module lm1_link #(
     // Memory request and response
     // ---------------------------------------------------------------
     typedef enum logic [1:0] {
-        ST_IDLE = 2'd0,     // no request outstanding
-        ST_SEND = 2'd1,     // a latched request waits for the link
-        ST_WAIT = 2'd2      // the link holds the request; await its response
+        ST_IDLE  = 2'd0,    // no request outstanding
+        ST_SEND  = 2'd1,    // a latched first message waits for the link
+        ST_WDATA = 2'd2,    // a write burst sends its further words
+        ST_WAIT  = 2'd3     // await the response, or the rest of them
     } state_t;
 
     state_t      state;
@@ -145,29 +156,48 @@ module lm1_link #(
     logic [63:0] held_wdata;
     logic        held_we;
     logic [1:0]  held_size;
+    logic [7:0]  held_len;
+    logic [7:0]  left;          // words of a write burst still to send
     logic        cancel_lat;
 
     // New work is taken while LM-1 runs and no stop has been asked.
     logic open;
     assign open = core_rst_n && !sb_stop_req;
 
-    assign hm_req_ready = open && (state == ST_IDLE);
+    // The first message of a request is taken when idle, even if the link
+    // is busy that cycle.  A write burst's further words pass straight
+    // through as the link takes them.
+    logic take_first, take_data;
+    assign take_first = hm_req_valid && open && (state == ST_IDLE);
+    assign take_data  = hm_req_valid && (state == ST_WDATA) && lk_rq_ready;
 
-    logic take;
-    assign take = hm_req_valid && hm_req_ready;
+    assign hm_req_ready = (open && state == ST_IDLE) ||
+                          (state == ST_WDATA && lk_rq_ready);
 
-    assign lk_rq_valid = (state == ST_SEND) || take;
+    assign lk_rq_valid = (state == ST_SEND) || take_first ||
+                         (state == ST_WDATA && hm_req_valid);
     assign lk_rq_addr  = (state == ST_SEND) ? held_addr  : hm_req_addr;
     assign lk_rq_wdata = (state == ST_SEND) ? held_wdata : hm_req_wdata;
     assign lk_rq_wen   = (state == ST_SEND) ? held_we    : hm_req_we;
     assign lk_rq_size  = (state == ST_SEND) ? held_size  : hm_req_size;
+    assign lk_rq_len   = (state == ST_SEND) ? held_len
+                       : (state == ST_IDLE) ? hm_req_len : 8'd0;
 
-    assign lk_rs_ready  = (state == ST_WAIT);
-    assign lk_rq_cancel = (state == ST_WAIT) && (hm_cancel || cancel_lat);
+    // A response can arrive while a write burst still has words to send:
+    // MegaPad ends a burst at its first failure.
+    logic answering;
+    assign answering = (state == ST_WAIT) || (state == ST_WDATA);
 
-    assign hm_resp_valid = (state == ST_WAIT) && lk_rs_valid;
+    assign lk_rs_ready  = answering && hm_resp_ready;
+    assign lk_rq_cancel = answering && (hm_cancel || cancel_lat);
+
+    assign hm_resp_valid = answering && lk_rs_valid;
     assign hm_resp_data  = lk_rs_rdata;
     assign hm_resp_code  = lk_rs_code;
+    assign hm_resp_last  = lk_rs_last;
+
+    logic resp_end;
+    assign resp_end = hm_resp_valid && hm_resp_ready && lk_rs_last;
 
     always_ff @(posedge clk) begin
         if (!core_rst_n) begin
@@ -176,29 +206,50 @@ module lm1_link #(
             held_wdata <= 64'd0;
             held_we    <= 1'b0;
             held_size  <= 2'd3;
+            held_len   <= 8'd0;
+            left       <= 8'd0;
             cancel_lat <= 1'b0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     cancel_lat <= 1'b0;
-                    if (take) begin
+                    if (take_first) begin
                         held_addr  <= hm_req_addr;
                         held_wdata <= hm_req_wdata;
                         held_we    <= hm_req_we;
                         held_size  <= hm_req_size;
-                        state      <= lk_rq_ready ? ST_WAIT : ST_SEND;
+                        held_len   <= hm_req_len;
+                        left       <= hm_req_len;
+                        if (!lk_rq_ready)
+                            state <= ST_SEND;
+                        else if (hm_req_we && hm_req_len != 8'd0)
+                            state <= ST_WDATA;
+                        else
+                            state <= ST_WAIT;
                     end
                 end
                 ST_SEND: begin
                     if (hm_cancel)
                         cancel_lat <= 1'b1;
                     if (lk_rq_ready)
-                        state <= ST_WAIT;
+                        state <= (held_we && held_len != 8'd0) ? ST_WDATA
+                                                               : ST_WAIT;
+                end
+                ST_WDATA: begin
+                    if (hm_cancel)
+                        cancel_lat <= 1'b1;
+                    if (resp_end) begin
+                        state <= ST_IDLE;
+                    end else if (take_data) begin
+                        left <= left - 8'd1;
+                        if (left == 8'd1)
+                            state <= ST_WAIT;
+                    end
                 end
                 ST_WAIT: begin
                     if (hm_cancel)
                         cancel_lat <= 1'b1;
-                    if (lk_rs_valid)
+                    if (resp_end)
                         state <= ST_IDLE;
                 end
                 default: state <= ST_IDLE;

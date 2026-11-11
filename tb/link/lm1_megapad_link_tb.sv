@@ -36,7 +36,8 @@ module lm1_megapad_link_tb;
     logic        lk_rq_valid, lk_rq_ready, lk_rq_wen, lk_rq_cancel;
     logic [63:0] lk_rq_addr, lk_rq_wdata;
     logic [1:0]  lk_rq_size;
-    logic        lk_rs_valid, lk_rs_ready;
+    logic [7:0]  lk_rq_len;
+    logic        lk_rs_valid, lk_rs_ready, lk_rs_last;
     logic [63:0] lk_rs_rdata;
     logic [1:0]  lk_rs_code;
     logic        lk_dbt_valid, lk_dbt_ready, lk_dbr_valid, lk_dbr_ready;
@@ -78,9 +79,10 @@ module lm1_megapad_link_tb;
         .lk_rq_valid(lk_rq_valid), .lk_rq_ready(lk_rq_ready),
         .lk_rq_addr(lk_rq_addr), .lk_rq_wdata(lk_rq_wdata),
         .lk_rq_wen(lk_rq_wen), .lk_rq_size(lk_rq_size),
-        .lk_rq_cancel(lk_rq_cancel),
+        .lk_rq_len(lk_rq_len), .lk_rq_cancel(lk_rq_cancel),
         .lk_rs_valid(lk_rs_valid), .lk_rs_ready(lk_rs_ready),
         .lk_rs_rdata(lk_rs_rdata), .lk_rs_code(lk_rs_code),
+        .lk_rs_last(lk_rs_last),
         .lk_dbt_valid(lk_dbt_valid), .lk_dbt_ready(lk_dbt_ready),
         .lk_dbt_src(lk_dbt_src),
         .lk_dbr_valid(lk_dbr_valid), .lk_dbr_ready(lk_dbr_ready),
@@ -205,7 +207,8 @@ module lm1_megapad_link_tb;
     logic        hm_req_valid, hm_req_ready, hm_req_we, hm_cancel;
     logic [63:0] hm_req_addr, hm_req_wdata;
     logic [1:0]  hm_req_size;
-    logic        hm_resp_valid;
+    logic [7:0]  hm_req_len;
+    logic        hm_resp_valid, hm_resp_ready, hm_resp_last;
     logic [63:0] hm_resp_data;
     logic [1:0]  hm_resp_code;
 
@@ -213,7 +216,8 @@ module lm1_megapad_link_tb;
     logic        rt_cancel = 1'b0;
     logic [63:0] rt_req_addr = 64'd0, rt_req_wdata = 64'd0;
     logic [1:0]  rt_req_size = 2'd3;
-    logic        rt_resp_valid;
+    logic [7:0]  rt_req_len = 8'd0;
+    logic        rt_resp_valid, rt_resp_last;
     logic [63:0] rt_resp_data;
     logic [1:0]  rt_resp_code;
 
@@ -231,9 +235,10 @@ module lm1_megapad_link_tb;
         .lk_rq_valid(lk_rq_valid), .lk_rq_ready(lk_rq_ready),
         .lk_rq_addr(lk_rq_addr), .lk_rq_wdata(lk_rq_wdata),
         .lk_rq_wen(lk_rq_wen), .lk_rq_size(lk_rq_size),
-        .lk_rq_cancel(lk_rq_cancel),
+        .lk_rq_len(lk_rq_len), .lk_rq_cancel(lk_rq_cancel),
         .lk_rs_valid(lk_rs_valid), .lk_rs_ready(lk_rs_ready),
         .lk_rs_rdata(lk_rs_rdata), .lk_rs_code(lk_rs_code),
+        .lk_rs_last(lk_rs_last),
         .lk_dbt_valid(lk_dbt_valid), .lk_dbt_ready(lk_dbt_ready),
         .lk_dbt_src(lk_dbt_src),
         .lk_dbr_valid(lk_dbr_valid), .lk_dbr_ready(lk_dbr_ready),
@@ -250,9 +255,10 @@ module lm1_megapad_link_tb;
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
         .hm_req_addr(hm_req_addr), .hm_req_wdata(hm_req_wdata),
         .hm_req_we(hm_req_we), .hm_req_size(hm_req_size),
-        .hm_cancel(hm_cancel),
-        .hm_resp_valid(hm_resp_valid), .hm_resp_data(hm_resp_data),
-        .hm_resp_code(hm_resp_code),
+        .hm_req_len(hm_req_len), .hm_cancel(hm_cancel),
+        .hm_resp_valid(hm_resp_valid), .hm_resp_ready(hm_resp_ready),
+        .hm_resp_data(hm_resp_data), .hm_resp_code(hm_resp_code),
+        .hm_resp_last(hm_resp_last),
         .dbi_valid(dbi_valid), .dbi_ready(dbi_ready), .dbi_src(dbi_src),
         .dbo_valid(dbo_valid), .dbo_ready(dbo_ready), .dbo_dst(dbo_dst)
     );
@@ -263,15 +269,17 @@ module lm1_megapad_link_tb;
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
         .hm_req_addr(hm_req_addr), .hm_req_wdata(hm_req_wdata),
         .hm_req_we(hm_req_we), .hm_req_size(hm_req_size),
-        .hm_cancel(hm_cancel),
-        .hm_resp_valid(hm_resp_valid), .hm_resp_data(hm_resp_data),
-        .hm_resp_code(hm_resp_code),
+        .hm_req_len(hm_req_len), .hm_cancel(hm_cancel),
+        .hm_resp_valid(hm_resp_valid), .hm_resp_ready(hm_resp_ready),
+        .hm_resp_data(hm_resp_data), .hm_resp_code(hm_resp_code),
+        .hm_resp_last(hm_resp_last),
         .rt_req_valid(rt_req_valid), .rt_req_ready(rt_req_ready),
         .rt_req_addr(rt_req_addr), .rt_req_wdata(rt_req_wdata),
         .rt_req_we(rt_req_we), .rt_req_size(rt_req_size),
-        .rt_cancel(rt_cancel),
-        .rt_resp_valid(rt_resp_valid), .rt_resp_data(rt_resp_data),
-        .rt_resp_code(rt_resp_code),
+        .rt_req_len(rt_req_len), .rt_cancel(rt_cancel),
+        .rt_resp_valid(rt_resp_valid), .rt_resp_ready(1'b1),
+        .rt_resp_data(rt_resp_data), .rt_resp_code(rt_resp_code),
+        .rt_resp_last(rt_resp_last),
         .ld_valid(ld_valid), .ld_ready(1'b1),
         .ld_offset(ld_offset), .ld_data(ld_data),
         .boot_done(boot_done), .boot_failed(boot_failed)
@@ -279,11 +287,14 @@ module lm1_megapad_link_tb;
 
     logic [63:0] loaded [0:15];
     int          loaded_n = 0;
+    int          link_requests = 0;     // request messages the bridge took
     always_ff @(posedge clk) begin
         if (ld_valid && loaded_n < 16) begin
             loaded[loaded_n] <= ld_data;
             loaded_n <= loaded_n + 1;
         end
+        if (lk_rq_valid && lk_rq_ready)
+            link_requests <= link_requests + 1;
     end
 
     // ------------------------------------------------------------------
@@ -370,6 +381,42 @@ module lm1_megapad_link_tb;
         @(negedge clk);
     endtask
 
+    // A read burst on the runtime's port.
+    logic [63:0] b_data [0:15];
+    logic        b_last [0:15];
+    logic [1:0]  b_code [0:15];
+    int          b_n;
+    task automatic rt_burst_read(input logic [63:0] addr, input logic [7:0] len);
+        logic done;
+        int   guard = 0;
+        @(negedge clk);
+        rt_req_valid = 1'b1; rt_req_addr = addr; rt_req_we = 1'b0;
+        rt_req_size = 2'd3; rt_req_len = len;
+        #1;
+        while (!rt_req_ready && guard < 2000) begin
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+        @(negedge clk);
+        rt_req_valid = 1'b0; rt_req_len = 8'd0;
+        b_n = 0;
+        done = 1'b0;
+        #1;
+        while (!done && guard < 8000) begin
+            if (rt_resp_valid) begin
+                b_data[b_n] = rt_resp_data;
+                b_code[b_n] = rt_resp_code;
+                b_last[b_n] = rt_resp_last;
+                done = rt_resp_last;
+                b_n++;
+            end
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+    endtask
+
     int prev_n;
 
     initial begin
@@ -411,6 +458,8 @@ module lm1_megapad_link_tb;
               loaded[1] == 64'hC0DE_0000_0000_0002 &&
               loaded[2] == 64'hC0DE_0000_0000_0003 &&
               loaded[3] == 64'hC0DE_0000_0000_0004);
+        check("the four-word image crosses the link as one burst",
+              link_requests == 1);
         runtime_ready = 1'b1;
         reg_read(R_STATUS);
         check("MegaPad reads READY", rd[2] == 1'b1);
@@ -441,6 +490,27 @@ module lm1_megapad_link_tb;
         check("a read of MegaPad's Bank 0 is refused", r_code == 2'd1);
         reg_read(R_FAULT_INFO);
         check("as outside external memory", rd[7:4] == 4'd3);
+        reg_write(R_STATUS, 64'h10);
+
+        $display("\nBursts");
+        xmem[17'h01010] = 64'hE000_0000_0000_0000;
+        xmem[17'h01011] = 64'hE000_0000_0000_0001;
+        xmem[17'h01012] = 64'hE000_0000_0000_0002;
+        prev_n = phy_launches;
+        rt_burst_read(64'h0010_8080, 8'd2);
+        check("a read burst of three words arrives in order",
+              b_n == 3 && b_code[2] == 2'd0 &&
+              b_data[0] == 64'hE000_0000_0000_0000 &&
+              b_data[2] == 64'hE000_0000_0000_0002);
+        check("only the third is marked last",
+              !b_last[0] && !b_last[1] && b_last[2]);
+        check("each word is its own access at external memory",
+              phy_launches == prev_n + 3);
+        prev_n = phy_launches;
+        rt_burst_read(64'h0010_8FF0, 8'd3);
+        check("a burst that runs past the lent page is refused whole",
+              b_n == 1 && b_code[0] == 2'd1 && b_last[0] &&
+              phy_launches == prev_n);
         reg_write(R_STATUS, 64'h10);
 
         $display("\nDoorbells");
