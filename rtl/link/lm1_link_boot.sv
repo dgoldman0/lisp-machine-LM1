@@ -1,22 +1,32 @@
 // ============================================================================
-// LM-1 Link Boot — fetch the image MegaPad names, then hand the port over
+// LM-1 Link Boot — fetch the image MegaPad names, then hand the ports over
 //
 // MegaPad loads LM-1's runtime image into a range it lends read-only and
 // names it on the sideband by address and length.  When LM-1 leaves reset
 // this module reads the image through the host-memory port in bursts of up
-// to BURST_WORDS 64-bit words and hands each word to the load port, which
-// writes LM-1's own memory.  When the last word is loaded it raises
-// boot_done and passes the host-memory port through to the runtime.
+// to BURST_WORDS 64-bit words and writes each word into LM-1's memory, from
+// LOAD_BASE on, through the memory write port.  When the last word is
+// written it raises boot_done and hands both ports over: the host-memory
+// port to the runtime, and the memory write port to the link, which writes
+// MegaPad's stores into the memory LM-1 lends through it.
 //
 // A length of zero means no image: boot_done rises at once.  A response
-// other than OK stops the fetch and raises boot_failed; LM-1 then stays out
-// of its runtime until MegaPad resets it.
+// other than OK, or a word the memory fails, stops the fetch and raises
+// boot_failed; a burst still under way is cancelled and its remaining
+// responses taken and dropped.  LM-1 then keeps both ports from the runtime
+// and the link until MegaPad resets it.
 //
 // The image is read in whole words, so a length that is no multiple of 8 is
 // rounded up, and the range MegaPad lends covers the rounded length.
+//
+// The link can have no write to pass while the fetch runs: its ranges are
+// lent by the runtime, which starts after the fetch, and LM-1's reset clears
+// them, so every write MegaPad makes before then is refused unwritten.
 // ============================================================================
 module lm1_link_boot #(
-    parameter int BURST_WORDS = 8       // words per request, 1 to 256
+    parameter int          BURST_WORDS = 8,     // words per request, 1 to 256
+    // The address in LM-1's memory of the image's first byte, a multiple of 8.
+    parameter logic [63:0] LOAD_BASE   = 64'd0
 ) (
     input  logic        clk,
     input  logic        rst_n,          // LM-1's own reset (lm1_link.core_rst_n)
@@ -54,15 +64,25 @@ module lm1_link_boot #(
     output logic [1:0]  rt_resp_code,
     output logic        rt_resp_last,
 
-    // ---- Load port: image words for LM-1's own memory ----
-    output logic        ld_valid,
-    input  logic        ld_ready,
-    output logic [63:0] ld_offset,      // byte offset of the word in the image
-    output logic [63:0] ld_data,
+    // ---- The link's writes (lm1_link's mw_* port), passed through after boot ----
+    input  logic        lw_valid,
+    output logic        lw_ready,
+    input  logic [63:0] lw_addr,
+    input  logic [63:0] lw_data,
+    output logic        lw_error,
+
+    // ---- LM-1's memory write port ----
+    // A word taken (mw_valid and mw_ready) is visible to LM-1's own accesses
+    // from the next cycle; mw_error with mw_ready means it was not written.
+    output logic        mw_valid,
+    input  logic        mw_ready,
+    output logic [63:0] mw_addr,
+    output logic [63:0] mw_data,
+    input  logic        mw_error,
 
     // ---- Status ----
     output logic        boot_done,      // the whole image is loaded
-    output logic        boot_failed     // a fetch was answered with an error
+    output logic        boot_failed     // a fetch or a write of it failed
 );
 
     localparam logic [1:0]  LK_OK    = 2'd0;
@@ -74,7 +94,7 @@ module lm1_link_boot #(
         B_START = 3'd0,     // first cycle out of reset: sample the length
         B_REQ   = 3'd1,     // ask for the next burst
         B_BEAT  = 3'd2,     // await one of its words
-        B_LOAD  = 3'd3,     // hand the word to the load port
+        B_LOAD  = 3'd3,     // write the word into LM-1's memory
         B_DONE  = 3'd4,
         B_FAIL  = 3'd5
     } bstate_t;
@@ -88,8 +108,8 @@ module lm1_link_boot #(
     assign boot_done   = (bstate == B_DONE);
     assign boot_failed = (bstate == B_FAIL);
 
-    // The fetch owns the port until the image is in; the runtime owns it
-    // afterwards.
+    // The fetch owns both ports until the image is in; the runtime owns the
+    // host-memory port afterwards, and the link the memory write port.
     logic fetching;
     assign fetching = !boot_done;
 
@@ -104,8 +124,11 @@ module lm1_link_boot #(
     assign hm_req_we     = fetching ? 1'b0 : rt_req_we;
     assign hm_req_size   = fetching ? SZ_DWORD : rt_req_size;
     assign hm_req_len    = fetching ? burst_len : rt_req_len;
-    assign hm_cancel     = fetching ? 1'b0 : rt_cancel;
-    assign hm_resp_ready = fetching ? (bstate == B_BEAT) : rt_resp_ready;
+    // A fetch that fails while its burst still has words to come cancels the
+    // burst and takes what remains, so the link returns to idle.
+    assign hm_cancel     = fetching ? (bstate == B_FAIL) : rt_cancel;
+    assign hm_resp_ready = fetching ? (bstate == B_BEAT || bstate == B_FAIL)
+                                    : rt_resp_ready;
 
     assign rt_req_ready  = !fetching && hm_req_ready;
     assign rt_resp_valid = !fetching && hm_resp_valid;
@@ -113,9 +136,11 @@ module lm1_link_boot #(
     assign rt_resp_code  = hm_resp_code;
     assign rt_resp_last  = hm_resp_last;
 
-    assign ld_valid  = (bstate == B_LOAD);
-    assign ld_offset = offset;
-    assign ld_data   = word;
+    assign mw_valid = fetching ? (bstate == B_LOAD) : lw_valid;
+    assign mw_addr  = fetching ? (LOAD_BASE + offset) : lw_addr;
+    assign mw_data  = fetching ? word : lw_data;
+    assign lw_ready = !fetching && mw_ready;
+    assign lw_error = mw_error;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -143,15 +168,19 @@ module lm1_link_boot #(
                     end
                 end
                 B_LOAD: begin
-                    if (ld_ready) begin
-                        offset <= offset + 64'd8;
-                        remain <= remain - 64'd1;
-                        if (remain == 64'd1)
-                            bstate <= B_DONE;
-                        else if (word_last)
-                            bstate <= B_REQ;
-                        else
-                            bstate <= B_BEAT;
+                    if (mw_ready) begin
+                        if (mw_error) begin
+                            bstate <= B_FAIL;
+                        end else begin
+                            offset <= offset + 64'd8;
+                            remain <= remain - 64'd1;
+                            if (remain == 64'd1)
+                                bstate <= B_DONE;
+                            else if (word_last)
+                                bstate <= B_REQ;
+                            else
+                                bstate <= B_BEAT;
+                        end
                     end
                 end
                 B_DONE: ;

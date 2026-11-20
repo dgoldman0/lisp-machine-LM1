@@ -3,9 +3,11 @@
 //
 // LM-1 is a chiplet beside MegaPad.  MegaPad lends it ranges of external
 // memory, and LM-1 reads and writes them across the link at MegaPad's own
-// addresses.  This module is LM-1's end of that link, built to MegaPad's
-// chiplet link specification, contract version 1 (docs/chiplet-link.md in
-// the MegaPad repository).
+// addresses.  LM-1 in turn lends MegaPad ranges of its own memory, into
+// which MegaPad's tile engines store their accumulator images.  This module
+// is LM-1's end of that link, built to MegaPad's chiplet link
+// specification, contract version 1 (docs/chiplet-link.md in the MegaPad
+// repository).
 //
 // Link channels are valid/ready handshakes:
 //   memory request   (to MegaPad):   addr, wdata, wen, size, len; one
@@ -15,6 +17,11 @@
 // A read burst is one request and n + 1 responses.  A write burst is n + 1
 // request messages, each with its word of data, and one response.  A
 // response other than OK ends a burst.
+//   write            (from MegaPad): addr, data, len, zeros; one outstanding
+//   write answer     (to MegaPad):   code
+// MegaPad's write covers len + 1 units of 64 bytes from addr, LM-1's own
+// address, followed by zeros units of zeros.  It is len + 1 messages, each
+// with its unit, and LM-1 takes addr, len and zeros from the first.
 //   doorbell in      (from MegaPad): src, the ID of the participant
 //   doorbell out     (to MegaPad):   dst, the ID to signal
 //
@@ -25,6 +32,10 @@
 // Local side:
 //   - a host-memory port, through which the boot loader and the runtime
 //     reach lent memory;
+//   - a lend port, through which LM-1's runtime lends MegaPad ranges of
+//     LM-1's memory and withdraws them;
+//   - a memory write port, through which MegaPad's writes reach LM-1's
+//     memory one 64-bit word at a time;
 //   - doorbell ports, meant for a tile's hardware message queue;
 //   - the reset for LM-1's own logic and the stop handshake with the runtime.
 //
@@ -32,13 +43,51 @@
 // response returns in the cycle it arrives, so the endpoint adds no cycle to
 // an access.
 //
+// MegaPad's writes.  LM-1 admits a write when its address is aligned to 64
+// bytes and one range lent with the write right contains every byte the
+// write covers, its zero units included.  The check runs once, on the
+// write's first message, so the whole write is admitted or refused, and a
+// refused write leaves LM-1's memory untouched.  An admitted write passes
+// through a buffer of one unit: the held unit's eight words go to the memory
+// write port, the next unit is taken from the link in the cycle the held
+// unit's last word is taken, and the zero units follow as words of zeros.
+// The answer is
+//   OK          every word is written.  The memory write port makes a word
+//               it has taken visible to LM-1's own accesses from the next
+//               cycle, and the answer leaves in the cycle after the last
+//               word, so every byte can be read by then.
+//   REFUSED     the write is misaligned or lies outside every lent range.
+//   MEM_ERROR   the memory failed a word; the words before it are written.
+//   CANCELLED   MegaPad cancelled the write; the words taken before the
+//               cancel are written.
+// A refusal, an error or a cancel ends the write at once, before its last
+// unit when one remains, and MegaPad sends no more of it.  A cancel that
+// comes before LM-1 has taken the write's first message is answered
+// CANCELLED too: MegaPad awaits one answer for every write it has begun.
+// A word offered to the memory write port stays offered until the port
+// takes it, so a cancel takes effect at a word's boundary.
+//
+// The lend port installs a range in one step, from its base, exclusive limit
+// and write right; a write right of zero withdraws it.  The port takes an
+// operation only while no write is held, so the ranges never change under a
+// write, and a withdrawal completes only after MegaPad's writes into the
+// range have ended: once the port has taken it, nothing more lands there.
+// LM-1's own reset clears every range.
+//
 // Clocking: the link is specified at the level of messages.  This module
 // places both ends on one clock; a link layer between them carries the same
 // handshakes across the die boundary.
 // ============================================================================
 module lm1_link #(
     // Identity word 1: the device name, first character in the low byte.
-    parameter logic [63:0] DEVICE_NAME = 64'h0000_0000_0031_4D4C   // "LM1"
+    parameter logic [63:0] DEVICE_NAME = 64'h0000_0000_0031_4D4C,  // "LM1"
+    // Ranges LM-1 lends MegaPad at once, 1 to 255.  A range serves one
+    // function's writes, and the one function that writes into LM-1 today
+    // is the tile engines' TACC.STORE.  A second range lets the runtime lend
+    // a replacement before it withdraws the range it replaces, so that
+    // function never goes without one.  Each range is two 64-bit registers
+    // and two comparators; lend_ranges reports the count to the runtime.
+    parameter int          RANGES      = 2
 ) (
     input  logic        clk,
     input  logic        por_n,          // power-on reset; the sideband's only reset
@@ -57,6 +106,18 @@ module lm1_link #(
     input  logic [63:0] lk_rs_rdata,
     input  logic [1:0]  lk_rs_code,
     input  logic        lk_rs_last,
+
+    // ---- Link: MegaPad's writes into memory LM-1 lends, and the answer ----
+    input  logic         lk_wq_valid,
+    output logic         lk_wq_ready,
+    input  logic [63:0]  lk_wq_addr,    // LM-1's address, aligned to 64 bytes
+    input  logic [511:0] lk_wq_data,    // one unit, its first byte in the low bits
+    input  logic [7:0]   lk_wq_len,     // units beyond the first
+    input  logic [7:0]   lk_wq_zeros,   // units of zeros after the data
+    input  logic         lk_wq_cancel,  // abandon the outstanding write
+    output logic         lk_wa_valid,
+    input  logic         lk_wa_ready,
+    output logic [1:0]   lk_wa_code,
 
     // ---- Link: doorbells ----
     input  logic        lk_dbt_valid,   // MegaPad -> LM-1
@@ -104,6 +165,22 @@ module lm1_link #(
     output logic [1:0]  hm_resp_code,
     output logic        hm_resp_last,
 
+    // ---- Local: the ranges LM-1 lends MegaPad ----
+    input  logic        lend_valid,     // install or withdraw one range
+    output logic        lend_ready,     // taken only while no write is held
+    input  logic [7:0]  lend_index,     // an index of RANGES or beyond is ignored
+    input  logic [63:0] lend_base,
+    input  logic [63:0] lend_limit,     // exclusive
+    input  logic        lend_write,     // admit MegaPad's writes; 0 withdraws
+    output logic [7:0]  lend_ranges,    // the ranges the table holds
+
+    // ---- Local: MegaPad's writes into LM-1's memory ----
+    output logic        mw_valid,       // held until mw_ready
+    input  logic        mw_ready,
+    output logic [63:0] mw_addr,        // LM-1's address of a 64-bit word
+    output logic [63:0] mw_data,
+    input  logic        mw_error,       // with mw_ready: the memory failed the word
+
     // ---- Local: doorbells ----
     output logic        dbi_valid,      // a participant signalled LM-1
     input  logic        dbi_ready,
@@ -115,6 +192,16 @@ module lm1_link #(
 
     // Contract version 1 below the ASCII tag "CHIP".
     localparam logic [63:0] ID_WORD0 = 64'h4348_4950_0000_0001;
+
+    // Codes on the link's responses and answers.
+    localparam logic [1:0] LK_OK        = 2'd0;
+    localparam logic [1:0] LK_REFUSED   = 2'd1;
+    localparam logic [1:0] LK_MEM_ERROR = 2'd2;
+    localparam logic [1:0] LK_CANCELLED = 2'd3;
+
+    if (RANGES < 1 || RANGES > 255) begin : g_bad_ranges
+        $error("lm1_link: RANGES must lie from 1 to 255");
+    end
 
     // ---------------------------------------------------------------
     // Sideband
@@ -261,6 +348,220 @@ module lm1_link #(
     end
 
     // ---------------------------------------------------------------
+    // MegaPad's writes into memory LM-1 lends
+    // ---------------------------------------------------------------
+    typedef enum logic [2:0] {
+        W_IDLE   = 3'd0,    // no write held; its first message is taken here
+        W_CHECK  = 3'd1,    // the first unit is held; the write is checked
+        W_UNIT   = 3'd2,    // the held unit's words go to memory
+        W_NEXT   = 3'd3,    // the held unit is written; the next is awaited
+        W_ZERO   = 3'd4,    // the zero units' words go to memory
+        W_ANSWER = 3'd5     // the answer waits for MegaPad
+    } wstate_t;
+
+    wstate_t      wstate;
+    logic [511:0] w_unit;       // the buffer of one unit
+    logic [2:0]   w_word;       // the word of the unit now offered
+    logic [63:0]  w_addr;       // LM-1's address of that word
+    logic [7:0]   w_units;      // data units still to take from the link
+    logic [7:0]   w_zeros;      // zero units still to write
+    logic [1:0]   w_code;
+    logic         w_cancel;     // MegaPad has cancelled the held write
+
+    logic [63:0]       rng_base  [RANGES];
+    logic [63:0]       rng_limit [RANGES];
+    logic [RANGES-1:0] rng_write;
+
+    // The admission check, on the header the first message brought: while
+    // the state is W_CHECK, w_units still holds len and w_zeros zeros.  A
+    // write covers at most 511 units, so its end needs 65 bits only where
+    // the address runs past the top of the 64-bit space.
+    logic [9:0]  w_span;        // units the write covers
+    logic [64:0] w_end;         // the address after its last byte
+    assign w_span = {2'b00, w_units} + 10'd1 + {2'b00, w_zeros};
+    assign w_end  = {1'b0, w_addr} + {49'd0, w_span, 6'd0};
+
+    logic w_lent;
+    always_comb begin
+        w_lent = 1'b0;
+        for (int i = 0; i < RANGES; i++)
+            if (rng_write[i] && w_addr >= rng_base[i] &&
+                w_end <= {1'b0, rng_limit[i]})
+                w_lent = 1'b1;
+    end
+
+    logic w_admit;
+    assign w_admit = (w_addr[5:0] == 6'd0) && w_lent;
+
+    logic w_cancel_now;
+    assign w_cancel_now = w_cancel || lk_wq_cancel;
+
+    logic mw_go;
+    assign mw_go = mw_valid && mw_ready;
+
+    // The held unit's last word is taken without fault, so the buffer frees
+    // in this cycle and can take the next unit at the same edge.
+    logic w_unit_ends;
+    assign w_unit_ends = (wstate == W_UNIT) && mw_go && !mw_error &&
+                         (w_word == 3'd7);
+
+    assign lk_wq_ready = core_rst_n && !w_cancel_now &&
+                         ((wstate == W_IDLE) || (wstate == W_NEXT) ||
+                          (w_unit_ends && w_units != 8'd0));
+
+    logic wq_go;
+    assign wq_go = lk_wq_valid && lk_wq_ready;
+
+    assign lk_wa_valid = core_rst_n && (wstate == W_ANSWER);
+    assign lk_wa_code  = w_code;
+
+    assign mw_valid = core_rst_n &&
+                      ((wstate == W_UNIT) || (wstate == W_ZERO));
+    assign mw_addr  = w_addr;
+    assign mw_data  = (wstate == W_UNIT) ? w_unit[w_word*64 +: 64] : 64'd0;
+
+    assign lend_ready  = core_rst_n && (wstate == W_IDLE);
+    assign lend_ranges = 8'(RANGES);
+
+    logic lend_go;
+    assign lend_go = lend_valid && lend_ready;
+
+    always_ff @(posedge clk) begin
+        if (!core_rst_n) begin
+            wstate   <= W_IDLE;
+            w_unit   <= '0;
+            w_word   <= 3'd0;
+            w_addr   <= 64'd0;
+            w_units  <= 8'd0;
+            w_zeros  <= 8'd0;
+            w_code   <= LK_OK;
+            w_cancel <= 1'b0;
+            for (int i = 0; i < RANGES; i++) begin
+                rng_base[i]  <= 64'd0;
+                rng_limit[i] <= 64'd0;
+            end
+            rng_write <= '0;
+        end else begin
+            // ---------------- The ranges ----------------
+            for (int i = 0; i < RANGES; i++) begin
+                if (lend_go && lend_index == 8'(i)) begin
+                    rng_base[i]  <= lend_base;
+                    rng_limit[i] <= lend_limit;
+                    rng_write[i] <= lend_write;
+                end
+            end
+
+            // A cancel holds for the rest of the write it reaches.
+            if (wstate == W_IDLE)
+                w_cancel <= 1'b0;
+            else if (lk_wq_cancel)
+                w_cancel <= 1'b1;
+
+            // ---------------- The write ----------------
+            case (wstate)
+                W_IDLE: begin
+                    if (wq_go) begin
+                        w_unit  <= lk_wq_data;
+                        w_addr  <= lk_wq_addr;
+                        w_units <= lk_wq_len;
+                        w_zeros <= lk_wq_zeros;
+                        w_word  <= 3'd0;
+                        wstate  <= W_CHECK;
+                    end else if (lk_wq_cancel) begin
+                        // MegaPad cancelled a write before its first
+                        // message reached LM-1.
+                        w_code <= LK_CANCELLED;
+                        wstate <= W_ANSWER;
+                    end
+                end
+
+                W_CHECK: begin
+                    if (w_cancel_now) begin
+                        w_code <= LK_CANCELLED;
+                        wstate <= W_ANSWER;
+                    end else if (w_admit) begin
+                        wstate <= W_UNIT;
+                    end else begin
+                        w_code <= LK_REFUSED;
+                        wstate <= W_ANSWER;
+                    end
+                end
+
+                W_UNIT: begin
+                    if (mw_go) begin
+                        if (mw_error) begin
+                            w_code <= LK_MEM_ERROR;
+                            wstate <= W_ANSWER;
+                        end else begin
+                            w_addr <= w_addr + 64'd8;
+                            w_word <= w_word + 3'd1;
+                            if (w_cancel_now) begin
+                                w_code <= LK_CANCELLED;
+                                wstate <= W_ANSWER;
+                            end else if (w_word == 3'd7) begin
+                                if (w_units != 8'd0) begin
+                                    // The next unit, taken at this edge when
+                                    // MegaPad offers it; w_word wraps to 0.
+                                    if (wq_go) begin
+                                        w_unit  <= lk_wq_data;
+                                        w_units <= w_units - 8'd1;
+                                    end else begin
+                                        wstate <= W_NEXT;
+                                    end
+                                end else if (w_zeros != 8'd0) begin
+                                    wstate <= W_ZERO;
+                                end else begin
+                                    w_code <= LK_OK;
+                                    wstate <= W_ANSWER;
+                                end
+                            end
+                        end
+                    end
+                end
+
+                W_NEXT: begin
+                    if (w_cancel_now) begin
+                        w_code <= LK_CANCELLED;
+                        wstate <= W_ANSWER;
+                    end else if (wq_go) begin
+                        w_unit  <= lk_wq_data;
+                        w_units <= w_units - 8'd1;
+                        wstate  <= W_UNIT;
+                    end
+                end
+
+                W_ZERO: begin
+                    if (mw_go) begin
+                        if (mw_error) begin
+                            w_code <= LK_MEM_ERROR;
+                            wstate <= W_ANSWER;
+                        end else begin
+                            w_addr <= w_addr + 64'd8;
+                            w_word <= w_word + 3'd1;
+                            if (w_word == 3'd7)
+                                w_zeros <= w_zeros - 8'd1;
+                            if (w_cancel_now) begin
+                                w_code <= LK_CANCELLED;
+                                wstate <= W_ANSWER;
+                            end else if (w_word == 3'd7 && w_zeros == 8'd1) begin
+                                w_code <= LK_OK;
+                                wstate <= W_ANSWER;
+                            end
+                        end
+                    end
+                end
+
+                W_ANSWER: begin
+                    if (lk_wa_valid && lk_wa_ready)
+                        wstate <= W_IDLE;
+                end
+
+                default: wstate <= W_IDLE;
+            endcase
+        end
+    end
+
+    // ---------------------------------------------------------------
     // Doorbells
     // ---------------------------------------------------------------
     // Incoming doorbells are delivered while LM-1 runs.  Outgoing ones stop
@@ -273,7 +574,9 @@ module lm1_link #(
     assign lk_dbr_dst   = dbo_dst;
     assign dbo_ready    = open && lk_dbr_ready;
 
-    // LM-1 has stopped when the runtime says so and nothing is in flight.
-    assign sb_stopped = sb_stop_req && runtime_stopped && (state == ST_IDLE);
+    // LM-1 has stopped when the runtime says so and nothing is in flight in
+    // either direction: no request of its own and no write of MegaPad's.
+    assign sb_stopped = sb_stop_req && runtime_stopped &&
+                        (state == ST_IDLE) && (wstate == W_IDLE);
 
 endmodule

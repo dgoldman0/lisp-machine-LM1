@@ -6,8 +6,10 @@
 # lm1_link_tb runs always: LM-1's link against a behavioural MegaPad.
 #
 # lm1_megapad_link_tb runs when MEGAPAD_ROOT names a MegaPad checkout: LM-1's
-# link against MegaPad's own RTL (port bridge, mailbox, external-memory
-# arbiter and controller).  It is the test that both sides of the link share.
+# link, with a cluster of LM-1's as the memory it writes, against MegaPad's
+# own RTL (port bridge, mailbox, external-memory arbiter and controller, and
+# the tile engines' image stage).  It is the test that both sides of the
+# link share.
 #
 # Build products go to tb/build/link, or to LM1_LINK_BUILD when it is set.
 #
@@ -26,6 +28,21 @@ WARN="-Wno-UNUSEDSIGNAL -Wno-UNDRIVEN -Wno-UNUSEDPARAM -Wno-UNOPTFLAT \
       -Wno-GENUNNAMED -Wno-VARHIDDEN -Wno-BLKSEQ"
 
 LINK_SRC="$ROOT/rtl/link/lm1_link.sv $ROOT/rtl/link/lm1_link_boot.sv"
+
+# One cluster of LM-1's, package first.
+CLUSTER_SRC="$ROOT/rtl/core/lm1_pkg.sv \
+    $ROOT/rtl/tech/lm1_clock_gate.sv $ROOT/rtl/tech/lm1_sram_sp.sv \
+    $ROOT/rtl/tech/lm1_sram_dp.sv \
+    $ROOT/rtl/core/lm1_decoder.sv $ROOT/rtl/core/lm1_regfile.sv \
+    $ROOT/rtl/core/lm1_alu.sv $ROOT/rtl/core/lm1_branch.sv \
+    $ROOT/rtl/core/lm1_lsu.sv $ROOT/rtl/core/lm1_icache.sv \
+    $ROOT/rtl/core/lm1_tmpl_table.sv $ROOT/rtl/core/lm1_ic_table.sv \
+    $ROOT/rtl/core/lm1_msg_queue.sv $ROOT/rtl/core/lm1_perf_counters.sv \
+    $ROOT/rtl/core/lm1_control.sv $ROOT/rtl/core/lm1_cpu.sv \
+    $ROOT/rtl/gc/lm1_gc_scanner.sv $ROOT/rtl/gc/lm1_gc_copier.sv \
+    $ROOT/rtl/gc/lm1_gc_fixup.sv $ROOT/rtl/gc/lm1_gc_engine_top.sv \
+    $ROOT/rtl/tile/lm1_tile.sv \
+    $ROOT/rtl/cluster/lm1_crossbar.sv $ROOT/rtl/cluster/lm1_cluster.sv"
 
 STATUS=0
 
@@ -61,7 +78,8 @@ if [ -n "$MEGAPAD_ROOT" ]; then
         "$MP/soc/mp64_chiplet_port.v" \
         "$MP/mem/mp64_extmem_arb.v" \
         "$MP/mem/mp64_extmem.v" \
-        $LINK_SRC "$ROOT/tb/link/lm1_megapad_link_tb.sv"
+        "$MP/soc/mp64_tacc_transfer.v" \
+        $CLUSTER_SRC $LINK_SRC "$ROOT/tb/link/lm1_megapad_link_tb.sv"
 else
     echo "MEGAPAD_ROOT is unset: the bench against MegaPad's RTL was not run."
 fi

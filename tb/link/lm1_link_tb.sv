@@ -2,10 +2,12 @@
 // lm1_link_tb.sv — LM-1's host link against a behavioural MegaPad
 //
 // Drives lm1_link and lm1_link_boot from a model of MegaPad's side of the
-// link.  Covers the identity record in reset, the boot fetch, a failed
-// fetch, the runtime's requests with their latency and response codes,
-// cancellation, doorbells in both directions, the stop handshake and a
-// return to reset.
+// link, with a behavioural LM-1 memory behind the memory write port.
+// Covers the identity record in reset, the boot fetch, a failed fetch, the
+// runtime's requests with their latency and response codes, cancellation,
+// doorbells in both directions, MegaPad's writes into the ranges LM-1 lends
+// (admission, zero units, refusals, memory errors, slow memory, cancels and
+// withdrawals), the stop handshake and a return to reset.
 // ============================================================================
 
 module lm1_link_tb;
@@ -35,6 +37,12 @@ module lm1_link_tb;
     logic        lk_rs_valid, lk_rs_ready, lk_rs_last;
     logic [63:0] lk_rs_rdata;
     logic [1:0]  lk_rs_code;
+    logic         lk_wq_valid, lk_wq_ready, lk_wq_cancel;
+    logic [63:0]  lk_wq_addr;
+    logic [511:0] lk_wq_data;
+    logic [7:0]   lk_wq_len, lk_wq_zeros;
+    logic         lk_wa_valid, lk_wa_ready;
+    logic [1:0]   lk_wa_code;
     logic        lk_dbt_valid, lk_dbt_ready, lk_dbr_valid, lk_dbr_ready;
     logic [7:0]  lk_dbt_src, lk_dbr_dst;
     logic        sb_present, sb_rst_n, sb_stop_req, sb_stopped, sb_ready;
@@ -61,8 +69,14 @@ module lm1_link_tb;
     logic [63:0] rt_resp_data;
     logic [1:0]  rt_resp_code;
 
-    logic        ld_valid, ld_ready;
-    logic [63:0] ld_offset, ld_data;
+    logic        lend_valid, lend_ready, lend_write;
+    logic [7:0]  lend_index, lend_ranges;
+    logic [63:0] lend_base, lend_limit;
+
+    logic        lw_valid, lw_ready, lw_error;   // the link's writes
+    logic [63:0] lw_addr, lw_data;
+    logic        mw_valid, mw_ready, mw_error;   // LM-1's memory write port
+    logic [63:0] mw_addr, mw_data;
     logic        boot_done, boot_failed;
 
     logic        dbi_valid, dbi_ready, dbo_valid, dbo_ready;
@@ -77,6 +91,12 @@ module lm1_link_tb;
         .lk_rs_valid(lk_rs_valid), .lk_rs_ready(lk_rs_ready),
         .lk_rs_rdata(lk_rs_rdata), .lk_rs_code(lk_rs_code),
         .lk_rs_last(lk_rs_last),
+        .lk_wq_valid(lk_wq_valid), .lk_wq_ready(lk_wq_ready),
+        .lk_wq_addr(lk_wq_addr), .lk_wq_data(lk_wq_data),
+        .lk_wq_len(lk_wq_len), .lk_wq_zeros(lk_wq_zeros),
+        .lk_wq_cancel(lk_wq_cancel),
+        .lk_wa_valid(lk_wa_valid), .lk_wa_ready(lk_wa_ready),
+        .lk_wa_code(lk_wa_code),
         .lk_dbt_valid(lk_dbt_valid), .lk_dbt_ready(lk_dbt_ready),
         .lk_dbt_src(lk_dbt_src),
         .lk_dbr_valid(lk_dbr_valid), .lk_dbr_ready(lk_dbr_ready),
@@ -97,11 +117,19 @@ module lm1_link_tb;
         .hm_resp_valid(hm_resp_valid), .hm_resp_ready(hm_resp_ready),
         .hm_resp_data(hm_resp_data), .hm_resp_code(hm_resp_code),
         .hm_resp_last(hm_resp_last),
+        .lend_valid(lend_valid), .lend_ready(lend_ready),
+        .lend_index(lend_index), .lend_base(lend_base),
+        .lend_limit(lend_limit), .lend_write(lend_write),
+        .lend_ranges(lend_ranges),
+        .mw_valid(lw_valid), .mw_ready(lw_ready), .mw_addr(lw_addr),
+        .mw_data(lw_data), .mw_error(lw_error),
         .dbi_valid(dbi_valid), .dbi_ready(dbi_ready), .dbi_src(dbi_src),
         .dbo_valid(dbo_valid), .dbo_ready(dbo_ready), .dbo_dst(dbo_dst)
     );
 
-    lm1_link_boot u_boot (
+    localparam logic [63:0] LOAD_BASE = 64'h100;
+
+    lm1_link_boot #(.LOAD_BASE(LOAD_BASE)) u_boot (
         .clk(clk), .rst_n(core_rst_n),
         .boot_addr(boot_addr), .boot_len(boot_len),
         .hm_req_valid(hm_req_valid), .hm_req_ready(hm_req_ready),
@@ -118,8 +146,10 @@ module lm1_link_tb;
         .rt_resp_valid(rt_resp_valid), .rt_resp_ready(rt_resp_ready),
         .rt_resp_data(rt_resp_data), .rt_resp_code(rt_resp_code),
         .rt_resp_last(rt_resp_last),
-        .ld_valid(ld_valid), .ld_ready(ld_ready),
-        .ld_offset(ld_offset), .ld_data(ld_data),
+        .lw_valid(lw_valid), .lw_ready(lw_ready), .lw_addr(lw_addr),
+        .lw_data(lw_data), .lw_error(lw_error),
+        .mw_valid(mw_valid), .mw_ready(mw_ready), .mw_addr(mw_addr),
+        .mw_data(mw_data), .mw_error(mw_error),
         .boot_done(boot_done), .boot_failed(boot_failed)
     );
 
@@ -216,18 +246,67 @@ module lm1_link_tb;
     end
 
     // ------------------------------------------------------------------
-    // Image words taken by the load port
+    // LM-1's memory: 4 KiB at LM-1's addresses 0x000-0xFFF behind the boot
+    // module's memory write port.  It takes a word in every cycle, or in
+    // every third one while mem_slow is set, and fails a word outside it,
+    // an unaligned one and the one at mem_fail.
     // ------------------------------------------------------------------
-    logic [63:0] loaded      [0:63];
-    logic [63:0] loaded_offs [0:63];
-    int          loaded_n = 0;
+    localparam int          LMEM_WORDS = 512;
+    localparam logic [63:0] LMEM_BYTES = 64'(LMEM_WORDS * 8);
+    localparam logic [63:0] FILL       = 64'hEEEE_EEEE_EEEE_EEEE;
+    logic [63:0] lmem [0:LMEM_WORDS-1];
+    logic        mem_slow;
+    logic [63:0] mem_fail;
+    int          ncyc = 0;              // falling edges so far
+    int          mem_writes = 0;        // words written
+    int          last_write_cyc = 0;    // ncyc before the edge of the last
+    always @(negedge clk) ncyc = ncyc + 1;
+
+    assign mw_ready = !mem_slow || (ncyc % 3 == 0);
+    assign mw_error = (mw_addr >= LMEM_BYTES) || (mw_addr[2:0] != 3'd0) ||
+                      (mw_addr == mem_fail);
     always_ff @(posedge clk) begin
-        if (ld_valid && ld_ready && loaded_n < 64) begin
-            loaded[loaded_n]      <= ld_data;
-            loaded_offs[loaded_n] <= ld_offset;
-            loaded_n <= loaded_n + 1;
+        if (mw_valid && mw_ready && !mw_error) begin
+            lmem[mw_addr[11:3]] <= mw_data;
+            mem_writes          <= mem_writes + 1;
+            last_write_cyc      <= ncyc;
         end
     end
+
+    // The word a write tagged tag puts at word i of its unit u.
+    function automatic logic [63:0] word_of(input logic [15:0] tag, input int u,
+                                            input int i);
+        return {tag, 16'(u), 16'h00C0, 16'(i)};
+    endfunction
+    function automatic logic [511:0] unit_of(input logic [15:0] tag, input int u);
+        logic [511:0] v;
+        for (int i = 0; i < 8; i++)
+            v[i*64 +: 64] = word_of(tag, u, i);
+        return v;
+    endfunction
+    // Whether LM-1's memory holds, from addr, n units of tag and then z
+    // units of zeros.
+    function automatic logic holds(input logic [63:0] addr, input int n,
+                                   input int z, input logic [15:0] tag);
+        logic ok = 1'b1;
+        for (int u = 0; u < n + z; u++)
+            for (int i = 0; i < 8; i++)
+                if (lmem[(addr[11:0] >> 3) + 12'(u * 8 + i)] !=
+                    ((u < n) ? word_of(tag, u, i) : 64'd0))
+                    ok = 1'b0;
+        return ok;
+    endfunction
+    // Whether n words from addr still hold the fill.
+    function automatic logic untouched(input logic [63:0] addr, input int n);
+        logic ok = 1'b1;
+        for (int i = 0; i < n; i++)
+            if (lmem[(addr[11:0] >> 3) + 12'(i)] != FILL)
+                ok = 1'b0;
+        return ok;
+    endfunction
+    task automatic fill_lmem();
+        for (int i = 0; i < LMEM_WORDS; i++) lmem[i] = FILL;
+    endtask
 
     // ------------------------------------------------------------------
     // Tasks
@@ -355,7 +434,72 @@ module lm1_link_tb;
         @(negedge clk);
     endtask
 
-    int prev_n;
+    // MegaPad's writer, driving the channel as its port bridge does: one
+    // unit offered at a time with the header on each, nothing more offered
+    // once the write is answered, and cancel held from cancel_at cycles in
+    // (never when negative) until the answer.  gap holds each further unit
+    // back that many cycles.  The write ends unanswered if LM-1 returns to
+    // reset.
+    logic [1:0] w_code;
+    logic       w_answered;
+    int         w_taken;        // units LM-1 took
+    int         w_cycles;       // falling edges from the first offer to the end
+    int         w_answer_cyc;   // ncyc before the edge that took the answer
+    task automatic mp_write(input logic [63:0] addr, input int len,
+                            input int zeros, input logic [15:0] tag,
+                            input int cancel_at, input int gap);
+        int u, cyc, hold;
+        u = 0; cyc = 0; hold = 0;
+        w_answered = 1'b0; w_taken = 0;
+        @(negedge clk);
+        lk_wq_addr = addr; lk_wq_len = 8'(len); lk_wq_zeros = 8'(zeros);
+        lk_wa_ready = 1'b1;
+        while (!w_answered && sb_rst_n && cyc < 5000) begin
+            if (cancel_at >= 0 && cyc >= cancel_at)
+                lk_wq_cancel = 1'b1;
+            lk_wq_valid = (u <= len) && !lk_wq_cancel && (hold == 0);
+            lk_wq_data  = unit_of(tag, u);
+            #1;
+            if (lk_wa_valid) begin
+                w_answered   = 1'b1;
+                w_code       = lk_wa_code;
+                w_answer_cyc = ncyc;
+            end
+            if (lk_wq_valid && lk_wq_ready) begin
+                u++;
+                w_taken++;
+                hold = gap;
+            end else if (hold > 0) begin
+                hold--;
+            end
+            @(negedge clk);
+            cyc++;
+        end
+        w_cycles = cyc;
+        lk_wq_valid = 1'b0; lk_wq_cancel = 1'b0; lk_wa_ready = 1'b0;
+    endtask
+
+    // LM-1's runtime installs or withdraws a range.
+    int lend_cyc;               // ncyc before the edge that took it
+    task automatic lend(input logic [7:0] idx, input logic [63:0] base,
+                        input logic [63:0] limit, input logic wr);
+        int guard = 0;
+        @(negedge clk);
+        lend_valid = 1'b1; lend_index = idx; lend_base = base;
+        lend_limit = limit; lend_write = wr;
+        #1;
+        while (!lend_ready && guard < 5000) begin
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+        lend_cyc = ncyc;
+        @(negedge clk);                 // the rising edge between took it
+        lend_valid = 1'b0;
+    endtask
+
+    int prev_n, prev_w;
+    logic seen_stopped;
 
     initial begin
         por_n = 1'b0;
@@ -363,15 +507,21 @@ module lm1_link_tb;
         sb_id_req = 1'b0; sb_id_index = 8'd0;
         sb_boot_addr = 64'd0; sb_boot_len = 64'd0; sb_boot_arg = 64'd0;
         lk_dbt_valid = 1'b0; lk_dbt_src = 8'd0; lk_dbr_ready = 1'b0;
+        lk_wq_valid = 1'b0; lk_wq_cancel = 1'b0; lk_wq_addr = 64'd0;
+        lk_wq_data = 512'd0; lk_wq_len = 8'd0; lk_wq_zeros = 8'd0;
+        lk_wa_ready = 1'b0;
+        lend_valid = 1'b0; lend_index = 8'd0; lend_base = 64'd0;
+        lend_limit = 64'd0; lend_write = 1'b0;
         runtime_stopped = 1'b0; runtime_ready = 1'b0;
         rt_req_valid = 1'b0; rt_req_addr = 64'd0; rt_req_wdata = 64'd0;
         rt_req_we = 1'b0; rt_req_size = 2'd3; rt_cancel = 1'b0;
         rt_req_len = 8'd0; rt_resp_ready = 1'b1;
         lk_rs_last = 1'b1;
-        ld_ready = 1'b1;
+        mem_slow = 1'b0; mem_fail = '1;
         dbi_ready = 1'b0; dbo_valid = 1'b0; dbo_dst = 8'd0;
         lk_rs_code = 2'd0; lk_rs_rdata = 64'd0;
         for (int i = 0; i < 1024; i++) hostmem[i] = 64'd0;
+        fill_lmem();
         repeat (4) @(posedge clk);
         por_n = 1'b1;
         repeat (2) @(posedge clk);
@@ -388,6 +538,9 @@ module lm1_link_tb;
         check("a word beyond the record reads zero", idw == 64'd0);
         check("the link asks for nothing in reset",
               lk_rq_valid == 1'b0 && sb_ready == 1'b0);
+        check("in reset LM-1 takes no write and lends nothing",
+              lk_wq_ready == 1'b0 && lk_wa_valid == 1'b0 &&
+              lend_ready == 1'b0 && mw_valid == 1'b0);
 
         $display("\nBoot fetch");
         hostmem[10'h200] = 64'h1111_1111_0000_0001;
@@ -402,11 +555,12 @@ module lm1_link_tb;
         @(posedge clk);
         check("the fetch completes", boot_done && !boot_failed);
         check("the boot argument reaches the runtime", boot_arg == 64'h2040);
-        check("a length of 20 bytes loads three words", loaded_n == 3);
-        check("the words arrive in order with their offsets",
-              loaded[0] == 64'h1111_1111_0000_0001 && loaded_offs[0] == 0 &&
-              loaded[1] == 64'h2222_2222_0000_0002 && loaded_offs[1] == 8 &&
-              loaded[2] == 64'h3333_3333_0000_0003 && loaded_offs[2] == 16);
+        check("a length of 20 bytes writes three words", mem_writes == 3);
+        check("the words land in order from the load base",
+              lmem[LOAD_BASE[11:3]]     == 64'h1111_1111_0000_0001 &&
+              lmem[LOAD_BASE[11:3] + 1] == 64'h2222_2222_0000_0002 &&
+              lmem[LOAD_BASE[11:3] + 2] == 64'h3333_3333_0000_0003 &&
+              lmem[LOAD_BASE[11:3] + 3] == FILL);
         runtime_ready = 1'b1;
         @(posedge clk);
         check("READY follows the runtime", sb_ready == 1'b1);
@@ -495,6 +649,142 @@ module lm1_link_tb;
         @(posedge clk);
         dbo_valid <= 1'b0; lk_dbr_ready <= 1'b0;
 
+        // --------------------------------------------------------------
+        $display("\nMegaPad's writes into memory LM-1 lends");
+        check("the table reports two ranges", lend_ranges == 8'd2);
+        prev_w = mem_writes;
+        mp_write(64'h400, 0, 0, 16'hA000, -1, 0);
+        check("before LM-1 lends a range a write is refused",
+              w_answered && w_code == 2'd1);
+        check("after its first message, with nothing written",
+              w_taken == 1 && mem_writes == prev_w && untouched(64'h400, 8));
+
+        lend(8'd0, 64'h400, 64'h800, 1'b1);     // sixteen units
+        prev_w = mem_writes;
+        mp_write(64'h400, 3, 0, 16'hA100, -1, 0);
+        check("a write of four units into the lent range is answered OK",
+              w_answered && w_code == 2'd0 && w_taken == 4);
+        check("its 32 words are in LM-1's memory in order",
+              mem_writes == prev_w + 32 && holds(64'h400, 4, 0, 16'hA100));
+        check("the memory around it is untouched",
+              untouched(64'h3F8, 1) && untouched(64'h500, 8));
+        check("the answer leaves after the last word is written",
+              w_answer_cyc > last_write_cyc);
+        check("the units pass back to back: 35 cycles from the first offer",
+              w_cycles == 35);
+
+        prev_w = mem_writes;
+        mp_write(64'h540, 0, 3, 16'hA200, -1, 0);
+        check("an FP64 image, one unit and three of zeros, is answered OK",
+              w_answered && w_code == 2'd0 && w_taken == 1);
+        check("LM-1 writes the unit and then the zeros, 32 words",
+              mem_writes == prev_w + 32 && holds(64'h540, 1, 3, 16'hA200) &&
+              untouched(64'h640, 1));
+        mp_write(64'h680, 1, 2, 16'hA300, -1, 0);
+        check("two units and two of zeros are answered OK",
+              w_answered && w_code == 2'd0 && w_taken == 2 &&
+              holds(64'h680, 2, 2, 16'hA300));
+        mp_write(64'h700, 3, 0, 16'hA400, -1, 0);
+        check("a write that ends at the range's limit is admitted",
+              w_code == 2'd0 && holds(64'h700, 4, 0, 16'hA400));
+
+        $display("\nRefusals write nothing");
+        fill_lmem();
+        prev_w = mem_writes;
+        mp_write(64'h420, 0, 0, 16'hB000, -1, 0);
+        check("a write not aligned to 64 bytes is refused",
+              w_code == 2'd1 && w_taken == 1);
+        mp_write(64'h7C0, 1, 0, 16'hB100, -1, 0);
+        check("a write that runs past the range is refused at its first unit",
+              w_code == 2'd1 && w_taken == 1);
+        mp_write(64'h780, 0, 2, 16'hB200, -1, 0);
+        check("so is one whose zero units run past it",
+              w_code == 2'd1 && w_taken == 1);
+        lend(8'd1, 64'h800, 64'h900, 1'b1);
+        mp_write(64'h7C0, 1, 0, 16'hB300, -1, 0);
+        check("a write across two ranges is refused: one must hold it all",
+              w_code == 2'd1);
+        lend(8'd5, 64'hC00, 64'hD00, 1'b1);
+        mp_write(64'hC00, 0, 0, 16'hB400, -1, 0);
+        check("a lend beyond the table's ranges lends nothing",
+              w_code == 2'd1);
+        check("no refused write touched LM-1's memory",
+              mem_writes == prev_w && untouched(64'h400, 256));
+        mp_write(64'h800, 1, 0, 16'hB500, -1, 0);
+        check("the second range takes a write of its own",
+              w_code == 2'd0 && holds(64'h800, 2, 0, 16'hB500));
+
+        $display("\nA failing memory, a slow memory, a slow writer");
+        fill_lmem();
+        mem_fail = 64'h448;
+        prev_w = mem_writes;
+        mp_write(64'h400, 1, 0, 16'hC000, -1, 0);
+        check("a word the memory fails ends the write with MEM_ERROR",
+              w_code == 2'd2 && w_taken == 2);
+        check("the words before it are written, none after",
+              mem_writes == prev_w + 9 && holds(64'h400, 1, 0, 16'hC000) &&
+              lmem[9'h88] == word_of(16'hC000, 1, 0) && untouched(64'h448, 8));
+        mem_fail = '1;
+        mem_slow = 1'b1;
+        mp_write(64'h400, 3, 1, 16'hC100, -1, 0);
+        check("a memory that takes a word every third cycle gets every word",
+              w_code == 2'd0 && holds(64'h400, 4, 1, 16'hC100));
+        check("and the write takes longer", w_cycles > 2 * 40);
+        mem_slow = 1'b0;
+        mp_write(64'h600, 2, 0, 16'hC200, -1, 12);
+        check("units offered twelve cycles apart are taken as they come",
+              w_code == 2'd0 && w_taken == 3 && holds(64'h600, 3, 0, 16'hC200));
+
+        $display("\nCancels");
+        fill_lmem();
+        prev_w = mem_writes;
+        mp_write(64'h400, 3, 0, 16'hD000, 5, 0);
+        check("a write cancelled during its first unit is answered CANCELLED",
+              w_answered && w_code == 2'd3 && w_taken == 1);
+        check("the words taken before the cancel are written, none after",
+              mem_writes > prev_w && mem_writes < prev_w + 8 &&
+              lmem[9'h80] == word_of(16'hD000, 0, 0) &&
+              untouched(64'h400 + 64'((mem_writes - prev_w) * 8),
+                        32 - (mem_writes - prev_w)));
+        fill_lmem();
+        prev_w = mem_writes;
+        mp_write(64'h400, 1, 0, 16'hD100, 15, 20);
+        check("a write cancelled while LM-1 awaits its next unit ends there",
+              w_code == 2'd3 && w_taken == 1 && mem_writes == prev_w + 8 &&
+              holds(64'h400, 1, 0, 16'hD100) && untouched(64'h440, 8));
+        prev_w = mem_writes;
+        mp_write(64'h400, 1, 0, 16'hD200, 0, 0);
+        check("a cancel before LM-1 takes the first message is answered too",
+              w_answered && w_code == 2'd3 && w_taken == 0 &&
+              mem_writes == prev_w);
+        mp_write(64'h400, 1, 0, 16'hD300, -1, 0);
+        check("after a cancel the next write is served",
+              w_code == 2'd0 && holds(64'h400, 2, 0, 16'hD300));
+
+        $display("\nWithdrawing a range");
+        fill_lmem();
+        mem_slow = 1'b1;
+        fork
+            mp_write(64'h400, 3, 0, 16'hE000, -1, 0);
+            begin
+                repeat (6) @(negedge clk);
+                lend(8'd0, 64'h400, 64'h800, 1'b0);
+            end
+        join
+        mem_slow = 1'b0;
+        check("a write admitted before the withdrawal completes OK",
+              w_code == 2'd0 && holds(64'h400, 4, 0, 16'hE000));
+        check("the withdrawal is taken only once that write has ended",
+              lend_cyc > w_answer_cyc);
+        prev_w = mem_writes;
+        mp_write(64'h400, 0, 0, 16'hE100, -1, 0);
+        check("after it a write into the range is refused",
+              w_code == 2'd1 && mem_writes == prev_w);
+        lend(8'd0, 64'h400, 64'h800, 1'b1);
+        mp_write(64'h400, 0, 0, 16'hE200, -1, 0);
+        check("lent again, the range takes writes",
+              w_code == 2'd0 && holds(64'h400, 1, 0, 16'hE200));
+
         $display("\nStop");
         @(posedge clk);
         sb_stop_req <= 1'b1;
@@ -514,11 +804,48 @@ module lm1_link_tb;
         #1;
         check("with the runtime stopped and nothing in flight it reports so",
               sb_stopped == 1'b1);
+        seen_stopped = 1'b0;
+        mem_slow = 1'b1;
+        fork
+            mp_write(64'h400, 1, 0, 16'hF000, -1, 0);
+            begin
+                repeat (4) @(negedge clk);
+                #1;
+                seen_stopped = sb_stopped;
+            end
+        join
+        mem_slow = 1'b0;
+        check("while one of MegaPad's writes is held it is not stopped",
+              seen_stopped == 1'b0 && w_code == 2'd0);
+        #1;
+        check("and stopped again once that write has ended",
+              sb_stopped == 1'b1);
         sb_stop_req <= 1'b0; runtime_stopped <= 1'b0;
         @(posedge clk);
         rt_access(64'h2000, 64'd0, 1'b0, 0);
         check("released from the stop, the port serves requests",
               r_code == 2'd0);
+
+        $display("\nReset during a write");
+        mem_slow = 1'b1;
+        fork
+            mp_write(64'h400, 3, 0, 16'hF100, -1, 0);
+            begin
+                repeat (10) @(negedge clk);
+                sb_rst_n = 1'b0;
+            end
+        join
+        mem_slow = 1'b0;
+        #1;
+        check("a write under way when LM-1 returns to reset gets no answer",
+              !w_answered && lk_wa_valid == 1'b0 && mw_valid == 1'b0);
+        sb_boot_len = 64'd0;
+        @(negedge clk);
+        sb_rst_n = 1'b1;
+        repeat (3) @(negedge clk);
+        mp_write(64'h400, 0, 0, 16'hF200, -1, 0);
+        check("LM-1's reset clears the ranges it lent",
+              w_answered && w_code == 2'd1);
 
         $display("\nA failed fetch");
         sb_rst_n <= 1'b0;
@@ -528,7 +855,7 @@ module lm1_link_tb;
               rt_req_ready == 1'b0 && sb_ready == 1'b0);
         sb_boot_addr <= 64'h9000;       // outside what the host lends
         sb_boot_len  <= 64'd16;
-        prev_n = loaded_n;
+        prev_w = mem_writes;
         @(posedge clk);
         sb_rst_n <= 1'b1;
         @(posedge clk);
@@ -536,8 +863,28 @@ module lm1_link_tb;
         @(posedge clk);
         check("a refused image ends the fetch as failed",
               boot_failed && !boot_done);
-        check("nothing is loaded from it", loaded_n == prev_n);
+        check("nothing is loaded from it", mem_writes == prev_w);
         check("the runtime's port stays closed", rt_req_ready == 1'b0);
+
+        $display("\nA word the memory fails ends the fetch");
+        sb_rst_n <= 1'b0;
+        repeat (2) @(posedge clk);
+        for (int i = 0; i < 20; i++)
+            hostmem[10'h240 + i] = 64'hFEED_0000 + 64'(i);
+        sb_boot_addr <= 64'h1200;
+        sb_boot_len  <= 64'd160;        // twenty words
+        mem_fail = LOAD_BASE + 64'd16;  // the third
+        prev_w = mem_writes;
+        @(posedge clk);
+        sb_rst_n <= 1'b1;
+        @(posedge clk);
+        while (!boot_done && !boot_failed) @(posedge clk);
+        repeat (40) @(posedge clk);
+        check("the fetch fails at the word the memory refused",
+              boot_failed && mem_writes == prev_w + 2);
+        check("the burst under way is cancelled and the link is idle again",
+              hstate == H_IDLE && lk_rq_valid == 1'b0);
+        mem_fail = '1;
 
         $display("\nNo image");
         sb_rst_n <= 1'b0;
@@ -556,18 +903,17 @@ module lm1_link_tb;
             hostmem[10'h240 + i] = 64'hF00D_0000 + 64'(i);
         sb_boot_addr <= 64'h1200;
         sb_boot_len  <= 64'd160;        // twenty words
-        prev_n = loaded_n;
+        prev_w = mem_writes;
         @(posedge clk);
         host_requests = 0;
         sb_rst_n <= 1'b1;
         @(posedge clk);
         while (!boot_done && !boot_failed) @(posedge clk);
         @(posedge clk);
-        check("twenty words load", boot_done && loaded_n == prev_n + 20);
+        check("twenty words load", boot_done && mem_writes == prev_w + 20);
         check("the first and the last are right",
-              loaded[prev_n] == 64'hF00D_0000 &&
-              loaded[prev_n + 19] == 64'hF00D_0013 &&
-              loaded_offs[prev_n + 19] == 64'd152);
+              lmem[LOAD_BASE[11:3]]      == 64'hF00D_0000 &&
+              lmem[LOAD_BASE[11:3] + 19] == 64'hF00D_0013);
         check("in three requests of eight, eight and four words",
               host_requests == 3);
 

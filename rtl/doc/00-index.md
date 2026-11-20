@@ -11,9 +11,9 @@ Comprehensive hardware documentation for the LM-1 Dynamic Object Processor.
 | 03 | [Core Pipeline](03-core-pipeline.md) | Multi-cycle FSM, FGMT threading, instruction cache, register file, ALU, branch, LSU — every datapath component |
 | 04 | [Memory Subsystem](04-memory.md) | SRAM hierarchy, address decoding, crossbar, sub-word access, memory port arbitration |
 | 05 | [Garbage Collection Hardware](05-gc-engines.md) | Scanner, copier, fixup engines, write barriers, card tables, forwarding pointers — how GC runs in hardware |
-| 06 | [SoC Integration](06-soc-integration.md) | Tile, cluster, crossbar, clock gating, message queues, NoC stubs, and the full chip hierarchy |
+| 06 | [SoC Integration](06-soc-integration.md) | Tile, cluster, crossbar, clock gating, message queues, the NoC stub, the cluster's memory write port, and the full chip hierarchy |
 | 07 | [Design Decisions & Comparisons](07-design-decisions.md) | Why multi-cycle over pipelined, why tagged words, how this differs from RISC-V/x86/GPU/Lisp Machine, tradeoffs made |
-| 08 | [Host Link](08-host-link.md) | LM-1's end of the link to MegaPad: memory requests into lent memory, doorbells, the sideband and the boot fetch |
+| 08 | [Host Link](08-host-link.md) | LM-1's end of the link to MegaPad: memory requests into lent memory, MegaPad's writes into memory LM-1 lends, doorbells, the sideband and the boot fetch |
 
 ## RTL File Map
 
@@ -36,11 +36,11 @@ rtl/
 ├── tile/
 │   └── lm1_tile.sv                # Tile wrapper — clock gating, ID, core instantiation
 ├── cluster/
-│   ├── lm1_cluster.sv             # 8-tile cluster — crossbar, shared SRAM, GC engines
+│   ├── lm1_cluster.sv             # 8-tile cluster — crossbar, shared SRAM, GC engines, memory write port
 │   └── lm1_crossbar.sv            # Round-robin arbiter for shared SRAM access
 ├── link/
-│   ├── lm1_link.sv                # Host link endpoint — memory requests, doorbells, sideband
-│   └── lm1_link_boot.sv           # Boot fetch — loads the image MegaPad names
+│   ├── lm1_link.sv                # Host link endpoint — memory requests, MegaPad's writes, doorbells, sideband
+│   └── lm1_link_boot.sv           # Boot fetch — loads the image MegaPad names into LM-1's memory
 ├── gc/
 │   ├── lm1_gc_engine_top.sv       # GC engine wrapper — command dispatch, memory arbiter
 │   ├── lm1_gc_scanner.sv          # Object graph scanner — finds live references
