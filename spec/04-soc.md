@@ -55,8 +55,8 @@ This document specifies the system-on-chip (SoC) organization of an LM-1 process
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │
 │                                                                  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐            │
-│  │  PCIe    │ │ Ethernet │ │ SIMD/Tensor Sidekick │            │
-│  │ Gen5 x16 │ │  100GbE  │ │   Tiles (optional)   │            │
+│  │  PCIe    │ │ Ethernet │ │ Host link to MegaPad │            │
+│  │ Gen5 x16 │ │  100GbE  │ │  (tile work: § 8)    │            │
 │  └──────────┘ └──────────┘ └──────────────────────┘            │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -371,35 +371,48 @@ HBM Address Space (32 GiB)
 
 ---
 
-## 8. Optional SIMD/Tensor Sidekick Tiles
+## 8. Numeric Work on MegaPad's Tile Engines
 
-For numeric workloads (array processing, ML inference), the LM-1 Full configuration includes **sidekick tiles** with wide SIMD/tensor units.
+**Status:** proposed on 2026-11-20; not built.
 
-### 8.1 Sidekick Tile Architecture
+LM-1 carries no numeric units beyond each core's scalar ALU. Its numeric work, such as scoring the candidates of a search with a small network or a weighted sum of features, runs on the tile engines of MegaPad, the chip LM-1 works beside, and the results arrive in LM-1's own memory. The SIMD/tensor sidekick tiles that earlier revisions of this section described are dropped: MegaPad already has seven tile engines, each a 64-byte SIMD unit with integer formats from 8 to 64 bits, FP16, BF16, FP32 and FP64, and a 2,048-bit accumulator (TACC), so sidekick tiles would duplicate them at about 40 mm² of LM-1's die (§ 12.2).
 
-| Parameter | Value |
-|-----------|-------|
-| ALU width | 256-bit SIMD (4×64, 8×32, 16×16, 32×8) |
-| Local SRAM | 512 KiB |
-| Threads | 1 (no FGMT — these are throughput units, not latency-hiding) |
-| ISA | Subset of LM-1 scalar + vector extension |
+The design of the borrowing is MegaPad's `docs/chiplet-interconnect-plan.md` § 7, and the link and its queues are specified in MegaPad's `docs/chiplet-link.md`. This section states LM-1's side.
 
-### 8.2 Invocation
+### 8.1 A Tile-Work Request
 
-DOP tiles invoke sidekick tiles by sending a **work descriptor** via the NoC:
+1. **Asking.** The runtime asks MegaPad for the tile-work function by its class on its control queue, and MegaPad grants a queue pair and working memory in MegaPad's external memory, lent to LM-1 for reading and writing.
+2. **Lending.** The runtime lends MegaPad a range of its own memory for the results ([05-memory-gc.md](05-memory-gc.md) § 11): it installs the range at the link's lend port, then announces it in a `LEND` entry that names the tile-work class.
+3. **Requesting.** A task writes its candidates into the working memory through the link's host-memory port, either as rows of features, a whole number of 64-byte tiles each, or as 8-byte indices into a table the kernel keeps on MegaPad. It puts a `RUN` entry on the pair's queue, naming the kernel by the number MegaPad gave it, the candidates, their count and the result area at LM-1's own addresses. It advances the queue's count and rings the core the pair names.
+4. **Scoring.** A MegaPad core runs the kernel on its tile engine. For each group of candidates it stores one 256-byte accumulator image into the result area across the link, and LM-1's end of the link admits the write only inside a range LM-1 lends (MegaPad's `docs/chiplet-link.md` § 3). It then writes its reply and rings LM-1.
+5. **Waking.** LM-1's runtime takes the reply, matches its tag to the waiting task, and wakes it. The task reads its scores from its own memory.
 
-```
-work_descriptor = {
-    op: VECTOR_ADD,
-    src1: ref_to_vector_a,
-    src2: ref_to_vector_b,
-    dst: ref_to_vector_c,
-    length: n
-}
-SEND q_sidekick, work_descriptor_ref
-```
+Kernel parameters, such as a network's weights, stay in MegaPad's memory and never cross the link: the software that loads a kernel on MegaPad registers it, and a program passes the kernel's number to the work it starts on LM-1.
 
-The sidekick tile DMAs the vector data, performs the operation, DMAs results back, and sends a completion message.
+### 8.2 Results
+
+Each image holds one group's results in the canonical layout of MegaPad's `docs/tile-engine.md`, lanes and bytes little-endian:
+
+| Kernel input format | Candidates per image | Result lane |
+|---------------------|:-------------------:|-------------|
+| 8-bit integers | 64 | 32-bit integer |
+| 16-bit integers | 32 | 64-bit integer |
+| FP16, BF16 | 32 | binary32 |
+| FP32 | 16 | binary64 |
+
+LM-1 reads a 32-bit lane with `LDW` (02-isa § 11.3) and makes it a fixnum, which always holds it. A search that orders candidates by score compares fixnums with `BR.FIX.LT` and needs no floating-point unit. A binary32 lane becomes an integer key that orders as the floats do in three bit operations, so float scores are compared the same way.
+
+### 8.3 Waiting
+
+A task that has sent a request blocks in `RECV` on its mailbox (02-isa § 8.2), and its core gives the hardware thread's pipeline slots to the tile's other threads (03-core § 4). The runtime may suspend the task and run another on that thread. A task may keep several requests in flight, for example scoring one batch while it builds the next.
+
+### 8.4 Cost
+
+The scores cost little: one image carries up to 64 of them, and the bench that joins LM-1's link endpoint to MegaPad's RTL stores an 8-bit image in 39 cycles from the image stage's request to its answer, both ends on one clock and with no link crossing. Each request adds MegaPad's hand-off, about 180 to 250 clocks by MegaPad's estimate. The features cost most: a 64-byte row is eight words LM-1 writes into MegaPad's external memory and the tile engine reads back, so kernels whose inputs stay fixed between requests keep them in a table on MegaPad and take candidates by index.
+
+### 8.5 One Engine
+
+A program written in Leviathan's language names no chip. On a machine without LM-1, its scoring calls the same kernels with the same parameters on MegaPad, and the scores are the same bit for bit for integer kernels; float kernels follow the tile engine's fixed reduction order.
 
 ---
 
@@ -556,9 +569,9 @@ Tiles performing GC work MAY run at the Low point, saving power while the scanne
 │      │      │      │      │ PHY0 │ PHY1 │ PCIe │ Eth  │
 ├──────┼──────┼──────┼──────┼──────┴──────┤      │      │
 │ C4   │ C5   │ C6   │ C7   │            │      │      │
-│      │      │      │      │   SIMD     │      │      │
-├──────┼──────┼──────┼──────┤  Sidekick  ├──────┴──────┤
-│ C8   │ C9   │ C10  │ C11  │  Region    │            │
+│      │      │      │      │            │      │      │
+├──────┼──────┼──────┼──────┤  Reserve   ├──────┴──────┤
+│ C8   │ C9   │ C10  │ C11  │            │            │
 │      │      │      │      │            │  Boot ROM  │
 ├──────┼──────┼──────┼──────┼──────┬─────┤  + Debug   │
 │ C12  │ C13  │ C14  │ C15  │ HBM  │ HBM │            │
@@ -566,19 +579,20 @@ Tiles performing GC work MAY run at the Low point, saving power while the scanne
 └──────┴──────┴──────┴──────┴──────┴─────┴────────────┘
 ```
 
-HBM PHYs on the die edges (top-left, top-right, bottom-left, bottom-right). Clusters fill the interior. I/O on one edge. Sidekick region is flexible.
+HBM PHYs on the die edges (top-left, top-right, bottom-left, bottom-right). Clusters fill the interior. I/O on one edge. The reserve region, once given to the sidekick tiles that § 8 drops, is flexible; the chiplet revision decides its use.
 
 ### 12.2 Die Area Estimate (5nm)
 
 | Component | Area (mm²) | % of Die |
 |-----------|:----------:|:--------:|
-| 256 DOP tiles (core + 256K SRAM) | 200 | 40% |
-| 32 cluster shared SRAMs (2M each) | 80 | 16% |
+| 256 DOP tiles (core + 256K SRAM) | 200 | 44% |
+| 32 cluster shared SRAMs (2M each) | 80 | 17% |
 | 32 × 3 movement engines | 15 | 3% |
 | NoC routers + links | 25 | 5% |
-| 4 HBM PHYs | 40 | 8% |
-| SIMD sidekick tiles (opt) | 40 | 8% |
+| 4 HBM PHYs | 40 | 9% |
 | PCIe + Ethernet + misc I/O | 20 | 4% |
-| Power delivery + clocking | 30 | 6% |
-| Boot ROM + debug + reserve | 50 | 10% |
-| **Total** | **~500** | **100%** |
+| Power delivery + clocking | 30 | 7% |
+| Boot ROM + debug + reserve | 50 | 11% |
+| **Total** | **~460** | **100%** |
+
+The SIMD sidekick tiles of earlier revisions took about 40 mm², 8% of a 500 mm² die. § 8 drops them, since numeric work runs on MegaPad's tile engines, and their area returns to the budget that the chiplet revision sets with LM-1's product scale.

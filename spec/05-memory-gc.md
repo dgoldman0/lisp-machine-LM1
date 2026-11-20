@@ -369,3 +369,19 @@ Each tile and cluster maintain hardware performance counters:
 | `gc_pause_cycles` | Total cycles spent in GC pauses (per tile) |
 
 These counters are readable via `TILE.COUNTER Rd, #counter_id` (a supplementary system instruction).
+
+---
+
+## 11. Memory Lent to MegaPad
+
+**Status:** proposed on 2026-11-20; not built.
+
+LM-1 lends MegaPad ranges of its own memory for writing. MegaPad's one writer into them is its tile engines' `TACC.STORE`, which stores 256-byte accumulator images there when LM-1 borrows the tile engines for numeric work ([04-soc.md](04-soc.md) § 8). The stores arrive through the host link and land through a cluster's memory write port. A lent range follows these rules.
+
+1. **Plain data only.** A range holds numbers and never a word LM-1 reads as a reference, so MegaPad's stores can never forge one. It lies outside the collected heap: in a region of a cluster's shared SRAM set apart from the old-generation region ([04-soc.md](04-soc.md) § 5.2), or in the bytes of a pinned bytevector. The collector neither scans nor moves it, so it has no place among the roots (§ 8), and MegaPad's stores need no barrier (§ 4). Tile-work results use a region set apart, whose address stays fixed while it is lent with no pin to track.
+2. **Placement.** The range lies in the shared SRAM of the cluster whose tiles run the tasks that read the results, 4 to 8 cycles from them, and the scheduler's cluster affinity ([06-runtime.md](06-runtime.md) § 4.3) keeps those tasks there. Until LM-1's top level maps the link's addresses onto its clusters, the link reaches one cluster's memory.
+3. **Alignment and size.** Base and limit are aligned to 64 bytes. The range holds as many 256-byte images as the runtime's tile-work requests in flight may return, and its size follows that demand rather than a fixed bound.
+4. **Lending and growing.** The runtime installs a range at the link's lend port before it announces the range to MegaPad in a `LEND` entry that names the function the range serves, so MegaPad never stores into a range LM-1 does not yet admit. To grow, it installs a larger range in the link's second range slot and announces it, then withdraws the old one: it sends `LEND` with rights of zero, waits for MegaPad's reply, which comes once MegaPad's writes into the range have ended, and only then withdraws the range at the port.
+5. **Allotting.** The runtime gives each request its own images within the range and frees them only after it has read that request's reply, a cancelled request's included, because MegaPad may store into them until it answers.
+6. **Answering.** LM-1's end of the link answers every write MegaPad begins, a cancelled one included. A write left unanswered makes MegaPad refuse every later write until the port is reset (MegaPad's `docs/chiplet-link.md` § 4).
+7. **Reset.** LM-1's reset clears every lent range at the link, so MegaPad's stores into them fault until the restarted runtime lends again.
