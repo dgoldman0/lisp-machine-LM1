@@ -99,6 +99,19 @@ An actor is a task with:
 
 Actors naturally map to hardware threads: one actor per hardware thread, with the thread's message queue as the mailbox.
 
+### 3.5 Tasks of Leviathan's Language
+
+**Status:** proposed on 2026-11-20.
+
+A task of Leviathan's language, Uroko, means the same whichever engine runs it (release plan decisions 31 and 32), so the runtime runs one under four rules, which a machine with one engine keeps as well:
+
+1. **Its inputs are lent.** MegaPad names each input object by a handle, and lends those handles with the request until its reply, so MegaPad neither re-points nor releases them meanwhile. The runtime reads their slots when the task starts.
+2. **Its inputs are read-only.** The runtime gives the task each input as a capability without write permission ([05-memory-gc.md](05-memory-gc.md) § 12.8), so the task writes nothing it reaches through them.
+3. **Its objects stay its own.** The objects the task makes are private to it while it runs. A store that would put one into a shared object traps ([05-memory-gc.md](05-memory-gc.md) § 4.5), and the runtime refuses it and ends the task with an error, so no object of the task's escapes but its result.
+4. **Its result is copied out.** When the task ends, the runtime copies its result, with everything the result reaches, into the shared heap, and stores the result's reference in the handle slot MegaPad lent the task for it, before it replies. MegaPad's handle then keeps the result live, and the task's other objects become garbage.
+
+On a machine with one engine, the task's objects live in a heap that lasts as long as the task, and the same four rules give the same result.
+
 ---
 
 ## 4. Scheduler
@@ -500,3 +513,19 @@ The global scheduler extends across chips:
 ### 11.3 Distributed GC
 
 Full-heap GC across chips uses the same algorithmic framework but with higher coordination latency. `FENCE.GC` becomes a cross-chip barrier. The runtime amortizes this cost by making cross-chip collections rare (promote very old objects to per-chip cold heaps that are collected independently).
+
+---
+
+## 12. The Managed-Data Service
+
+**Status:** proposed on 2026-11-20; not built.
+
+The runtime serves managed data for MegaPad ([05-memory-gc.md](05-memory-gc.md) § 12) as the function of class `MANAGED`, whose records and requests are specified in MegaPad's `docs/managed-data.md` § 9 and § 10.
+
+1. **Starting.** Once up, the runtime offers the class, asking for the shared heap's first block. When MegaPad's `ATTACH` arrives, it checks MegaPad's records, writes its own block (the hold word clear, its three time bounds, and the shape IDs of cons cells, vectors, bytevectors and strings), and replies.
+2. **Requests.** It serves `REGION`, `SHAPE` and `COLLECT` on each core's queue pair, and answers every `REGION` without a hold, also while it waits for windows to close. It sends `GROW` before its free space in the shared heap runs out, `RETURN` for blocks it has emptied, and `NOTICE` for an overdue window, corrupt data or a broken log.
+3. **Holds.** It takes holds as [05-memory-gc.md](05-memory-gc.md) § 12.3 describes, keeps each within `HOLD_LIMIT` by spreading collection work over several, and leaves `HOLD_GAP` between them.
+4. **Logs.** It drains MegaPad's store logs between holds, and drains each completely in every hold before it decides anything.
+5. **Shapes.** It interns each record kind MegaPad registers (§ 5.2), keeps its field kinds, refuses a store by LM-1 code that breaks one, and shows records to Lisp by them.
+6. **Tasks.** It turns the handles that name a task's inputs into capabilities, and copies the task's result into the shared heap, as § 3.5 describes.
+7. **Failure.** When it finds corrupt data, it sends a `NOTICE`, sets `FAILED` in the hold word, and stops collecting the shared heap, while its private work goes on.

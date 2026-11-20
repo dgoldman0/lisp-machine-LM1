@@ -369,6 +369,12 @@ HBM Address Space (32 GiB)
 └── 0x0007_8000_0000 ─ 0x0008_0000_0000  System / I/O (2 GiB)
 ```
 
+### 7.4 Addresses Shared with MegaPad
+
+**Status:** proposed on 2026-11-20.
+
+LM-1 reaches the memory MegaPad lends it at MegaPad's own addresses (MegaPad's `docs/chiplet-link.md`), and the shared heap of managed data lies there ([05-memory-gc.md](05-memory-gc.md) § 12). An address must name one memory on both chips, so LM-1's own memories, its tile and cluster SRAM and any main memory of its own, lie at addresses that MegaPad's memory does not use. The map in § 7.3 is the standalone one, whose code region begins at address zero, where MegaPad's memory lies; the chiplet revision moves LM-1's regions when it places LM-1's main memory (release plan D8). The shared-heap ranges of [05-memory-gc.md](05-memory-gc.md) § 12.1 then lie among MegaPad's addresses, and LM-1's private heap in its own memory, or, without memory of its own, in other ranges MegaPad lends.
+
 ---
 
 ## 8. Numeric Work on MegaPad's Tile Engines
