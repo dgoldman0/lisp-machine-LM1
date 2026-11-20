@@ -447,7 +447,7 @@ MegaPad keeps the objects it holds past a window in its **handle table**: 8-byte
 
 1. **Roots.** Every slot that holds a reference is a root of the shared heap, beside the roots of § 8. A collection that decides what is live, or moves shared objects, reads the directory and the slots during a hold. It may read every slot, or only the slots the store logs name (§ 12.4) together with those it already knows to refer to young objects, since MegaPad logs every reference it stores into a slot.
 2. **Updates.** When the collector moves an object, it rewrites every slot that refers to it during the same hold, keeping the reference's tag.
-3. **Nothing else.** The collector writes a slot only during a hold, and only to rewrite a reference. The runtime writes one slot more: the slot MegaPad lends a task for its result, into which it stores the result's reference when the task ends ([06-runtime.md](06-runtime.md) § 3.5), while MegaPad leaves that slot alone. MegaPad makes and frees slots, inside its windows.
+3. **Nothing else.** The collector writes a slot only during a hold, and only to rewrite a reference. The runtime writes one slot more: the slot MegaPad lends a task for its result, into which it stores the result's reference when the task ends ([06-runtime.md](06-runtime.md) § 3.5), while MegaPad leaves that slot alone. The collector counts that slot among its roots from the moment of the store, as it counts a slot MegaPad has logged. MegaPad makes and frees slots, inside its windows.
 
 ### 12.3 Holds: Waiting for Windows
 
