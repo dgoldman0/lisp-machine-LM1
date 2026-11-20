@@ -24,10 +24,11 @@ SoC (full chip)
       │    └── Clock Gate
       ├── Crossbar (8-port round-robin)
       ├── Shared SRAM (2 MiB, dual-port)
-      └── GC Engine Top
-           ├── Scanner
-           ├── Copier
-           └── Fixup
+      ├── GC Engine Top
+      │    ├── Scanner
+      │    ├── Copier
+      │    └── Fixup
+      └── Memory write port (the host link's writes)
 ```
 
 **Totals (full chip):**
@@ -152,14 +153,16 @@ Tile[0..7].xbar_resp_* ◀── Crossbar ◀── Shared SRAM Port A
 
 ### GC Engine Connection
 
-The GC engine top connects to shared SRAM port B:
+The GC engine top connects to shared SRAM port B, and the memory write port
+uses the cycles the engines leave free:
 
 ```
-GC Engine Top ──▶ Shared SRAM Port B (read/write)
+GC Engine Top     ──▶ Shared SRAM Port B (read/write, first)
+Memory write port ──▶ Shared SRAM Port B (write, when the engines leave it free)
 ```
 
 This dual-port arrangement (port A for CPU, port B for GC) is central to
-the concurrent GC design.
+the concurrent GC design. The memory write port is described below.
 
 ### GC Command Arbitration
 
@@ -518,11 +521,11 @@ a power management unit.
 
 ---
 
-## NoC and DMA Stubs
-
-The cluster exposes stub ports for future inter-cluster communication:
+## NoC Stub and Memory Write Port
 
 ### NoC Interface
+
+The cluster exposes a stub port for future inter-cluster communication:
 
 ```systemverilog
 input  logic         noc_in_valid,
@@ -533,25 +536,33 @@ output logic [63:0]  noc_out_data,    // = '0
 input  logic         noc_out_ready
 ```
 
-Currently: accepts and discards incoming NoC packets; never sends.
+Currently: accepts and discards incoming NoC packets; never sends. The NoC
+would connect clusters into a mesh or ring network.
 
-### DMA Interface
+### Memory Write Port
 
 ```systemverilog
-input  logic         dma_req_valid,
-output logic         dma_req_ready,   // = 1'b0 (never accepts)
-input  logic [63:0]  dma_req_addr,
-input  logic [63:0]  dma_req_data,
-input  logic         dma_req_we,
-output logic         dma_resp_valid,  // = 1'b0 (never responds)
-output logic [63:0]  dma_resp_data    // = '0
+input  logic         dma_wr_valid,
+output logic         dma_wr_ready,
+input  logic [63:0]  dma_wr_addr,     // byte address in the shared SRAM
+input  logic [63:0]  dma_wr_data,
+output logic         dma_wr_error     // with ready: nothing was written
 ```
 
-Currently: rejects all DMA requests.
+The host link writes the shared SRAM through this port, one 64-bit word
+per accepted cycle: first the runtime image that the boot fetch reads from
+MegaPad, then the stores MegaPad makes into memory LM-1 lends it
+([Host Link](08-host-link.md)). A word is written at the clock edge that
+takes it, so every access a tile or an engine makes from the next cycle
+reads it. An address that is not a multiple of 8, or that lies beyond the
+shared SRAM, is taken with `dma_wr_error` and writes nothing, so a write
+never wraps onto another word.
 
-These stubs define the interface contract for future implementation. The
-NoC would connect clusters into a mesh or ring network. DMA would allow
-bulk data transfer between cluster SRAMs or to/from external DRAM.
+The port shares SRAM port B with the GC movement engines, which go first:
+an engine neither waits for the port nor repeats an access it drops. Each
+engine follows every access with a cycle in which it awaits its answer, so
+the engines leave port B free at least every other cycle, and a word waits
+at most one cycle behind them. The tiles' port A is untouched.
 
 ---
 

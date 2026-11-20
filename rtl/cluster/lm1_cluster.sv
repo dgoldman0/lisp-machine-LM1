@@ -6,7 +6,8 @@
 //   - 8-port non-blocking crossbar
 //   - Cluster shared SRAM (2 MiB = 256K × 64-bit words)
 //   - GC movement engine top (scanner + copier + fixup)
-//   - DMA engine stub
+//   - a memory write port into the shared SRAM, through which the host
+//     link writes the boot image and MegaPad's stores into lent memory
 //   - NoC uplink stub
 //
 // Parameters:
@@ -51,16 +52,17 @@ module lm1_cluster
     /* verilator lint_on UNUSEDSIGNAL */
     output logic               noc_rx_ready,
 
-    // --- DMA port (stub — cluster ↔ HBM) ---
-    output logic               dma_req_valid,
-    output logic               dma_req_we,
-    output logic [XLEN-1:0]   dma_req_addr,
-    output logic [XLEN-1:0]   dma_req_wdata,
-    /* verilator lint_off UNUSEDSIGNAL */  // stub: DMA not implemented
-    input  logic               dma_req_ready,
-    input  logic [XLEN-1:0]   dma_resp_data,
-    input  logic               dma_resp_valid
-    /* verilator lint_on UNUSEDSIGNAL */
+    // --- Memory write port into the shared SRAM ---
+    // One 64-bit word per accepted cycle, at its byte address in the shared
+    // SRAM.  A word taken (valid and ready) is written at that clock edge,
+    // so every access the tiles and engines make from the next cycle reads
+    // it.  An address that is unaligned or beyond the SRAM is taken with
+    // dma_wr_error and writes nothing.
+    input  logic               dma_wr_valid,
+    output logic               dma_wr_ready,
+    input  logic [XLEN-1:0]   dma_wr_addr,
+    input  logic [XLEN-1:0]   dma_wr_data,
+    output logic               dma_wr_error
 );
 
     // ---------------------------------------------------------------
@@ -181,12 +183,28 @@ module lm1_cluster
     // Cluster Shared SRAM (2 MiB) — Dual-Port
     //
     // Port A: crossbar (tile access)
-    // Port B: GC movement engines (scanner/copier/fixup)
+    // Port B: GC movement engines (scanner/copier/fixup), and the memory
+    //         write port in the cycles the engines leave free
     // ---------------------------------------------------------------
     localparam int CLUSTER_MEM_DEPTH = 1 << CLUSTER_MEM_LOG2;
 
     logic [XLEN-1:0]   csram_rdata_b;  // GC engine read data from port B
     logic               gc_mem_rd_valid_r;  // 1-cycle latency for SRAM reads
+
+    // The memory write port.  The engines go first on port B, since they
+    // neither wait for it nor repeat an access it drops.  Each of their
+    // accesses is followed by at least one cycle in which the engine awaits
+    // its answer and leaves the port free, so a word waits at most one
+    // cycle behind them.
+    localparam logic [XLEN-1:0] CLUSTER_MEM_BYTES = XLEN'(CLUSTER_MEM_DEPTH) << 3;
+
+    logic dma_wr_in_mem;        // an aligned word inside the shared SRAM
+    logic dma_wr_go;            // the word is written at this edge
+    assign dma_wr_in_mem = (dma_wr_addr[2:0] == 3'b000) &&
+                           (dma_wr_addr < CLUSTER_MEM_BYTES);
+    assign dma_wr_ready  = !(gc_mem_rd_en || gc_mem_wr_en);
+    assign dma_wr_error  = !dma_wr_in_mem;
+    assign dma_wr_go     = dma_wr_valid && dma_wr_ready && dma_wr_in_mem;
 
     lm1_sram_dp #(
         .DATA_WIDTH (XLEN),
@@ -200,13 +218,14 @@ module lm1_cluster
         .a_addr  (csram_addr[CLUSTER_MEM_LOG2-1:0]),
         .a_wdata (csram_wdata),
         .a_rdata (csram_rdata),
-        // Port B — GC engines
-        .b_en    (gc_mem_rd_en | gc_mem_wr_en),
-        .b_we    (gc_mem_wr_en),
+        // Port B — GC engines, then the memory write port
+        .b_en    (gc_mem_rd_en | gc_mem_wr_en | dma_wr_go),
+        .b_we    (gc_mem_wr_en | dma_wr_go),
         .b_be    ({(XLEN/8){1'b1}}),
         .b_addr  (gc_mem_wr_en ? gc_mem_wr_addr[CLUSTER_MEM_LOG2+2:3]
-                               : gc_mem_rd_addr[CLUSTER_MEM_LOG2+2:3]),
-        .b_wdata (gc_mem_wr_data),
+                : gc_mem_rd_en ? gc_mem_rd_addr[CLUSTER_MEM_LOG2+2:3]
+                               : dma_wr_addr[CLUSTER_MEM_LOG2+2:3]),
+        .b_wdata (gc_mem_wr_en ? gc_mem_wr_data : dma_wr_data),
         .b_rdata (csram_rdata_b)
     );
 
@@ -347,13 +366,5 @@ module lm1_cluster
     assign noc_tx_valid = 1'b0;
     assign noc_tx_data  = '0;
     assign noc_rx_ready = 1'b1;   // always accept (discard)
-
-    // ---------------------------------------------------------------
-    // DMA port — stub
-    // ---------------------------------------------------------------
-    assign dma_req_valid = 1'b0;
-    assign dma_req_we    = 1'b0;
-    assign dma_req_addr  = '0;
-    assign dma_req_wdata = '0;
 
 endmodule

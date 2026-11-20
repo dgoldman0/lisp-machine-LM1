@@ -202,14 +202,12 @@ module lm1_fpga_top
         .noc_rx_data    ({XLEN{1'b0}}),
         .noc_rx_ready   (),
 
-        // DMA — stub
-        .dma_req_valid  (),
-        .dma_req_we     (),
-        .dma_req_addr   (),
-        .dma_req_wdata  (),
-        .dma_req_ready  (1'b1),
-        .dma_resp_data  ({XLEN{1'b0}}),
-        .dma_resp_valid (1'b0)
+        // Memory write port — no host link on the board
+        .dma_wr_valid   (1'b0),
+        .dma_wr_ready   (),
+        .dma_wr_addr    ({XLEN{1'b0}}),
+        .dma_wr_data    ({XLEN{1'b0}}),
+        .dma_wr_error   ()
     );
 
     // ---------------------------------------------------------------
