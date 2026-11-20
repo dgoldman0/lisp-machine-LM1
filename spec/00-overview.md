@@ -145,7 +145,9 @@ An LM-1 implementation may conform at one of three levels:
 |-------|-------------|
 | **LM-1 Minimal** | Full ISA (all 8 families), ≥1 tile, nursery allocation, software GC, software IC |
 | **LM-1 Standard** | + hardware IC unit, + hardware write barriers, + ≥1 movement engine, ≥16 tiles |
-| **LM-1 Full** | + capability mode, + SIMD/tensor sidekick tiles, + full QoS NoC, ≥256 tiles |
+| **LM-1 Full** | + capability mode, + full QoS NoC, ≥256 tiles |
+
+No level includes numeric units beyond the scalar ALU. Numeric work runs on the tile engines of MegaPad, the chip LM-1 works beside, and its results arrive in memory LM-1 lends ([04-soc.md](04-soc.md) § 8).
 
 ## 7. Document Conventions
 
