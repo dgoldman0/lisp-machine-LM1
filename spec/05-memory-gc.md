@@ -493,7 +493,8 @@ Shape IDs keep their meaning across a restart of LM-1, so that a restarted LM-1 
 
 1. **Built-in shapes.** Cons cells, vectors, bytevectors, strings, boxed numbers and LM-1's other built-in kinds have shape IDs that LM-1's image fixes, the same at every boot of the image.
 2. **A range for the registry.** The image sets aside a range of shape IDs for the kinds MegaPad registers, and LM-1 states it in `SHAPE_RANGE` in its block at `ATTACH`. LM-1 gives a `SHAPE` request an ID from the range's lower part, and gives no other shape an ID from the range. The upper part belongs to MegaPad's stand-in, which registers kinds while it serves the heap in LM-1's place.
-3. **The registry.** MegaPad records each registered kind's ID and description in its shape registry (MegaPad's `docs/managed-data.md` § 9), from which a restarted LM-1 re-interns them. How LM-1 records the kinds it puts into the shared heap itself is open (MegaPad's `docs/managed-data.md` § 16).
+3. **The registry.** MegaPad records each registered kind's ID and description in its shape registry (MegaPad's `docs/managed-data.md` § 9), from which a restarted LM-1 re-interns them.
+4. **Kinds LM-1 introduces** (stage 2). LM-1 also puts objects of kinds of its own into the shared heap: records of kinds it interns itself, objects of a task's result, and, through Lisp's stores, closures, symbols and foreign pointers. Before the first object of such a kind reaches the shared heap, LM-1 asks MegaPad to enter the kind with a `KIND` request, which names its description and whether a restarted LM-1 can adopt objects of it, so that MegaPad stays the registry's one writer (decided 2026-11-21).
 
 ### 12.7 The Memory That Holds References
 
@@ -514,6 +515,8 @@ When the collector finds corrupt data in the shared heap or in MegaPad's records
 
 LM-1's service can also end without `FAILED`: LM-1 traps or hangs, overruns a bound, breaks a queue, or is reset for any reason, the loss of its own power included. From stage 1, MegaPad then stops and resets LM-1, unless it is held in reset already, and classifies the state the records show (MegaPad's `docs/managed-data.md` § 11). Where they show the heap sound, MegaPad's never-free engine adopts the heap and serves it until LM-1 takes it back (§ 12.11). Elsewhere, and at every failure before stage 1, the heap is lost. LM-1's part is the write order of § 12.3, which keeps the records truthful wherever its writes stop.
 
+From stage 1, MegaPad asks LM-1 to stop before it resets it, and LM-1 answers only between moves (decided 2026-11-21). During a hold that has begun flipping, LM-1 finishes the hold's moves and rewrites, so that `MOVE` reads `FIXED`, and then sets `STOPPED`; at any other time it sets `STOPPED` at once and begins no new hold. A stop that LM-1 answers therefore never leaves the shared heap in the middle of a move, so a planned reset, such as one that follows a sandbox job or tile work missing its deadline, keeps the heap before stage 3. Only a failure LM-1 cannot answer, such as a crash, can leave a hold `FLIPPING`.
+
 ### 12.10 Conformance
 
 MegaPad's `docs/managed-data.md` § 15 lists the link conformance tests for managed data (release plan Part 8g). LM-1's C++ chiplet module (Part 8d) implements the collector's side of managed data first and passes them from its first day; both RTL sides pass them later. The recovery tests there come with the stages that build what they test.
@@ -533,7 +536,7 @@ A restarted LM-1 takes back a shared heap that MegaPad's stand-in has served, wi
 
 MegaPad has already failed the tasks that were in flight at the failure (MegaPad's `docs/managed-data.md` § 13).
 
-LM-1 adopts only objects whose meaning lies wholly inside the shared heap: cons cells, vectors, bytevectors, strings, records of registered shapes, and boxed numbers. Closures, symbols, foreign pointers and word values that carry LM-1's compiled entry (release plan decision 32) depend on LM-1's private state, and need a rule for re-binding them; until one exists, LM-1 refuses to resume a heap that holds one. How it knows that before it resumes is open, with the registry's question (MegaPad's `docs/managed-data.md` § 16). The stand-in can serve such a heap, since it never interprets objects.
+LM-1 adopts only objects whose meaning lies wholly inside the shared heap: cons cells, vectors, bytevectors, strings, records of registered shapes, and boxed numbers. Closures, symbols, foreign pointers and word values that carry LM-1's compiled entry (release plan decision 32) depend on LM-1's private state, and need a rule for re-binding them; until one exists, LM-1 refuses to resume a heap that holds one. It knows before it resumes, because each of those kinds was entered in the registry as one a restarted LM-1 cannot adopt (§ 12.6), and it replies `NO_RESUME` to a heap whose registry holds such a kind. The stand-in can serve such a heap, since it never interprets objects.
 
 By estimate, from the link timing of MegaPad's `docs/chiplet-interconnect-plan.md` § 3 and § 8 at MegaPad's 100 MHz clock, steps 2 to 4 take about a thousand link accesses and one `GROW`, under a millisecond. The full mark is bounded by the link, since LM-1 keeps one request outstanding: an object with a header and five tagged fields costs 50 to 180 MegaPad clocks to read. With a handle table about the size of the object count:
 
