@@ -518,14 +518,15 @@ Full-heap GC across chips uses the same algorithmic framework but with higher co
 
 ## 12. The Managed-Data Service
 
-**Status:** proposed on 2026-11-20; not built.
+**Status:** decided on 2026-11-20; not built.
 
 The runtime serves managed data for MegaPad ([05-memory-gc.md](05-memory-gc.md) § 12) as the function of class `MANAGED`, whose records and requests are specified in MegaPad's `docs/managed-data.md` § 9 and § 10.
 
-1. **Starting.** Once up, the runtime offers the class, asking for the shared heap's first block. When MegaPad's `ATTACH` arrives, it checks MegaPad's records, writes its own block (the hold word clear, its three time bounds, and the shape IDs of cons cells, vectors, bytevectors and strings), and replies.
+1. **Starting.** Once up, the runtime offers the class, asking for the shared heap's first block. When MegaPad's `ATTACH` arrives, it checks MegaPad's records and writes its own block: the hold word clear, its three time bounds, the shape IDs of cons cells, vectors, bytevectors and strings, and, from stage 0 of recovery, `MOVE` reading `NONE` and the range of shape IDs set aside for the kinds MegaPad registers ([05-memory-gc.md](05-memory-gc.md) § 12.6). It then replies.
 2. **Requests.** It serves `REGION`, `SHAPE` and `COLLECT` on each core's queue pair, and answers every `REGION` without a hold, also while it waits for windows to close. It sends `GROW` before its free space in the shared heap runs out, `RETURN` for blocks it has emptied, and `NOTICE` for an overdue window, corrupt data or a broken log.
 3. **Holds.** It takes holds as [05-memory-gc.md](05-memory-gc.md) § 12.3 describes, keeps each within `HOLD_LIMIT` by spreading collection work over several, and leaves `HOLD_GAP` between them.
 4. **Logs.** It drains MegaPad's store logs between holds, and drains each completely in every hold before it decides anything.
 5. **Shapes.** It interns each record kind MegaPad registers (§ 5.2), keeps its field kinds, refuses a store by LM-1 code that breaks one, and shows records to Lisp by them.
 6. **Tasks.** It turns the handles that name a task's inputs into capabilities, and copies the task's result into the shared heap, as § 3.5 describes.
-7. **Failure.** When it finds corrupt data, it sends a `NOTICE`, sets `FAILED` in the hold word, and stops collecting the shared heap, while its private work goes on.
+7. **Failure.** When it finds corrupt data, it sends a `NOTICE`, sets `FAILED` in the hold word, and stops collecting the shared heap, while its private work goes on. MegaPad classifies every other end of its service from the records ([05-memory-gc.md](05-memory-gc.md) § 12.9).
+8. **Resume** (stage 2). When MegaPad's `ATTACH` carries the resume flag, the runtime takes back the shared heap that the control block names, as [05-memory-gc.md](05-memory-gc.md) § 12.11 describes, and replies `NO_RESUME` when its image cannot take that heap back. Until that `ATTACH`, it leaves the heap and its records untouched.
