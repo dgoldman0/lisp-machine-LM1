@@ -295,7 +295,7 @@ For most Lisp code, the memory model is invisible:
 
 ### 6.4 Ordering with MegaPad
 
-LM-1 reaches memory MegaPad lends through the host link's host-memory port, one request at a time, and MegaPad answers each request only after its access has completed at MegaPad's external-memory controller, which serves one access at a time for every client (MegaPad's `docs/chiplet-link.md` § 4 and § 5). LM-1's accesses to that memory and MegaPad's therefore fall in one order that both chips observe, and LM-1 issues a request there only after the one before it has been answered. The hold protocol of § 12.3 depends on this order, so an implementation that pipelines host-memory requests keeps it for the accesses that protocol makes.
+LM-1 reaches memory MegaPad lends through the host link's host-memory port, one request at a time, and MegaPad answers each request only after its access has completed at MegaPad's external-memory controller, which serves one access at a time for every client (MegaPad's `docs/chiplet-link.md` § 4 and § 5). LM-1's accesses to that memory and MegaPad's therefore fall in one order that both chips observe, and LM-1 issues a request there only after the one before it has been answered. The hold protocol and the write order of § 12.3 depend on this order, so an implementation that pipelines host-memory requests keeps it for the accesses they make.
 
 ---
 
@@ -424,7 +424,7 @@ LM-1 lends MegaPad ranges of its own memory for writing. MegaPad's one writer in
 
 ## 12. Managed Data: Objects MegaPad Holds
 
-**Status:** decided on 2026-11-20; not built. Recovery after an LM-1 failure is decided in stages, and its design stays in MegaPad's `docs/managed-data-recovery.md` until this section absorbs it. It already binds this section's collector: a moved object is copied in full before anything points to it, a hold moves objects only into space that was free when it began, a word records the hold's progress, marks stay out of object headers, and shapes keep fixed IDs.
+**Status:** decided on 2026-11-20; not built. What managed data keeps when LM-1 fails (§ 12.9, § 12.11) is built in stages, and each item that belongs to a stage names it, or marks itself as one of three fixes; MegaPad's `docs/managed-data.md` § 11 lists the stages. The items of stage 0, the write order of § 12.3 and the shape IDs of § 12.6, bind the collector from its first build.
 
 MegaPad's Forth code uses LM-1 objects as managed data (release plan Part 9d): it creates them, reads them directly, writes them only through its library's words, and keeps them past short windows as handles, and LM-1's collector frees whatever nothing uses. MegaPad's `docs/managed-data.md` specifies MegaPad's side, the records both chips keep, and the requests that cross the link. This section states what LM-1 owes it. Nothing here depends on where LM-1's own main memory is placed (release plan D8).
 
@@ -457,10 +457,14 @@ MegaPad uses references only inside **windows**. A window belongs to one MegaPad
 2. **Taking a hold.** The collector stores `HELD` in the hold word and waits for the store's answer. It then reads every core's window word and waits until none reads `OPEN`, reading a core's word again when that core rings. It sets `ACTIVE`, does its work, stores the hold word with `HELD` and `ACTIVE` clear and the epoch one higher, then reads every window word again and rings each core that reads `WAITING`.
 3. **Order.** These accesses go through the host-memory port one at a time, each answered after it completes at MegaPad's external-memory controller, which orders them with MegaPad's own accesses (§ 6.4). That order makes the handshake sound: a core stores its window word before it loads the hold word, the collector stores the hold word before it loads the window words, so one of them always sees the other.
 4. **Answering while waiting.** The collector keeps answering `REGION` requests while it waits for windows, and answers each without a hold. A core may wait for one inside its window, so a collector that stopped answering would wait for ever.
-5. **Bounds.** A hold stays `ACTIVE` at most `HOLD_LIMIT`, and the next one begins at least `HOLD_GAP` after it ends. The runtime states both, with `WINDOW_LIMIT`, in its block at `ATTACH`. Work that does not fit is spread over several holds: marking runs between them (§ 5.2), and each hold evacuates only the regions it can finish.
+5. **Bounds.** A hold stays `ACTIVE` at most `HOLD_LIMIT`, and the next one begins at least `HOLD_GAP` after it ends. The runtime states both, with `WINDOW_LIMIT`, in its block at `ATTACH`. Work that does not fit is spread over several holds: marking runs between them (§ 5.2), and each hold evacuates only the regions it can finish. The collector sets `ACTIVE` as soon as no window word it waits for reads `OPEN` (fix): MegaPad treats a hold that stays `HELD` without `ACTIVE`, with no window open, for more than twice `HOLD_LIMIT` as overdue (MegaPad's `docs/managed-data.md` § 3).
 6. **Overdue windows.** A window still open `WINDOW_LIMIT` after `HELD` was set is MegaPad's fault. The collector waits on, and reports the core in a `NOTICE`.
 7. **LM-1's own threads.** A move of shared objects also stops, at safepoints (§ 7), every LM-1 thread that may hold references into the regions being moved, as any move does.
 8. **The engines.** The movement engines of [04-soc.md](04-soc.md) § 5.3 reach only a cluster's shared SRAM, and the shared heap lies across the link. Work on it goes through the host-memory port, done by the runtime or by engines given a path to that port, which the chiplet revision decides; the traffic it adds to MegaPad's memory is part of the release plan's D8 sizing study.
+9. **Writes land whole.** Each write LM-1 makes to memory MegaPad lends lands whole at MegaPad's external-memory controller: an access already admitted runs to its end when LM-1 is reset, and a burst stops between words (MegaPad's `docs/chiplet-link.md` § 4 and § 6). With the order of § 6.4, wherever LM-1's work stops, through a trap, a hang, a reset or the loss of its own power, the records show its writes up to one point and none after it. Items 10 to 12 fix what the records then show, so that MegaPad can tell from them alone whether the shared heap is sound (MegaPad's `docs/managed-data.md` § 11).
+10. **Copy, then flip** (stage 0). A hold that moves shared objects writes each object's copy whole before it writes the forwarding pointer over the object's old header ([01-object-model.md](01-object-model.md) § 3.6), in a request of its own, and it rewrites a reference to the new address only after that pointer. The forwarding pointer is then the one word that selects the new copy. The hold copies only into space that was free when it began, holding no object and lying in no core's region, so it never slides objects into space it has emptied (§ 5.3). **Flipping**, the part of a hold in which forwarding pointers exist, happens at most once in a hold.
+11. **The move word** (stage 0). Before a hold writes its first forwarding pointer, the collector writes the move set, which lists the hold's source and destination ranges, in space that was free when the hold began; then `MOVE_SET`, naming the move set; then `MOVE`, reading `FLIPPING` with the hold's epoch. After its last rewrite, the handle slots' included, it writes `MOVE` reading `FIXED` with the same epoch, and only then ends the hold. A hold that moves nothing leaves `MOVE` as it stands. MegaPad's `docs/managed-data.md` § 9 gives the layouts.
+12. **Nothing to restart in headers** (stage 0). The collector keeps its marks outside shared objects' headers. A restarted LM-1 gives the GC bits of a header no meaning from before its restart, except the `0xFF` that marks a forwarding pointer.
 
 ### 12.4 MegaPad's Stores Reach the Collector's Records
 
@@ -470,7 +474,7 @@ MegaPad cannot write LM-1's card tables or remembered sets, which lie in LM-1's 
 2. **When.** The collector may drain a log at any time, a hold not needed. During each hold it drains every log to the `TAIL` it reads there before it moves, frees, or concludes a mark. An entry it can read names a store that has landed, because MegaPad writes the word, then the entry, and only then `TAIL`. It reads `TAIL` before the ring's address and capacity, since a core may move to a larger ring.
 3. **What is not logged.** MegaPad logs no store of a fixnum, special, raw word or byte, since none makes a reference. It logs no store into an object in its own current allocation region either, because the collector traces those objects whole (§ 12.5).
 4. **The invariant.** With replay, Invariant 4 holds for MegaPad's stores: an old shared object refers to a young one only through a store LM-1 made with a barrier or a store MegaPad logged, and the collector replays every logged store before it collects.
-5. **A full log.** A core whose log is full rings LM-1 and waits for `LOG_HEAD` to move. The collector drains the log without a hold, and rings the core when it has.
+5. **A full log.** A core whose log is full rings LM-1 and waits for `LOG_HEAD` to move. The collector drains the log without a hold, and rings the core when it has. The core waits so for at most the deadline MegaPad gives a request, after which MegaPad counts LM-1's service as ended (fix; MegaPad's `docs/managed-data.md` § 3).
 
 ### 12.5 Objects MegaPad Makes
 
@@ -484,6 +488,12 @@ MegaPad makes objects in **allocation regions**, parts of the shared heap that t
 ### 12.6 Shapes MegaPad Registers
 
 MegaPad registers each record kind once with a `SHAPE` request, naming the number of tagged fields and raw words, each one's kind, and a name. The runtime interns the shape ([06-runtime.md](06-runtime.md) § 5.2), keeps the field kinds with it, and returns its ID; the same description always gets the same ID. A store by LM-1 code that breaks a shared record's declared field kind is refused, and the runtime shows records to Lisp by their kinds. At `ATTACH`, LM-1 states the shape IDs of cons cells, vectors, bytevectors and strings.
+
+Shape IDs keep their meaning across a restart of LM-1, so that a restarted LM-1 can read the heap it takes back (§ 12.11). These rules are stage 0:
+
+1. **Built-in shapes.** Cons cells, vectors, bytevectors, strings, boxed numbers and LM-1's other built-in kinds have shape IDs that LM-1's image fixes, the same at every boot of the image.
+2. **A range for the registry.** The image sets aside a range of shape IDs for the kinds MegaPad registers, and LM-1 states it in `SHAPE_RANGE` in its block at `ATTACH`. LM-1 gives a `SHAPE` request an ID from the range's lower part, and gives no other shape an ID from the range. The upper part belongs to MegaPad's stand-in, which registers kinds while it serves the heap in LM-1's place.
+3. **The registry.** MegaPad records each registered kind's ID and description in its shape registry (MegaPad's `docs/managed-data.md` § 9), from which a restarted LM-1 re-interns them. How LM-1 records the kinds it puts into the shared heap itself is open (MegaPad's `docs/managed-data.md` § 16).
 
 ### 12.7 The Memory That Holds References
 
@@ -500,8 +510,40 @@ MegaPad can store any word into its own memory, so a word in the shared heap wit
 
 ### 12.9 Failure
 
-When the collector finds corrupt data in the shared heap or in MegaPad's records, it reports it in a `NOTICE`, sets `FAILED` in the hold word, and stops collecting the shared heap, while LM-1's private work goes on. MegaPad then treats every handle as stale and returns the function's memory. Managed data is not kept across a failure or a reset of LM-1.
+When the collector finds corrupt data in the shared heap or in MegaPad's records, it reports it in a `NOTICE`, sets `FAILED` in the hold word, and stops collecting the shared heap, while LM-1's private work goes on. `FAILED` tells MegaPad that nothing vouches for the heap, and MegaPad loses it: every handle goes stale, and MegaPad returns the heap's memory to KDOS once LM-1 has been reset, since until then LM-1 may still hold references into it.
+
+LM-1's service can also end without `FAILED`: LM-1 traps or hangs, overruns a bound, breaks a queue, or is reset for any reason, the loss of its own power included. From stage 1, MegaPad then stops and resets LM-1, unless it is held in reset already, and classifies the state the records show (MegaPad's `docs/managed-data.md` § 11). Where they show the heap sound, MegaPad's never-free engine adopts the heap and serves it until LM-1 takes it back (§ 12.11). Elsewhere, and at every failure before stage 1, the heap is lost. LM-1's part is the write order of § 12.3, which keeps the records truthful wherever its writes stop.
 
 ### 12.10 Conformance
 
-MegaPad's `docs/managed-data.md` § 15 lists the link conformance tests for managed data (release plan Part 8g). LM-1's C++ chiplet module (Part 8d) implements the collector's side of managed data first and passes them from its first day; both RTL sides pass them later.
+MegaPad's `docs/managed-data.md` § 15 lists the link conformance tests for managed data (release plan Part 8g). LM-1's C++ chiplet module (Part 8d) implements the collector's side of managed data first and passes them from its first day; both RTL sides pass them later. The recovery tests there come with the stages that build what they test.
+
+### 12.11 Resume
+
+**Status:** stage 2, with the resolving traversal in stage 3.
+
+A restarted LM-1 takes back a shared heap that MegaPad's stand-in has served, with no full mark before it resumes. It counts every object that exists when its first hold begins as old. With no young objects there is no old-to-young reference to record, so empty card tables and remembered sets are already correct, and every later store is logged and barriered as usual. Free space is the one thing it rebuilds, by an ordinary full mark between holds.
+
+1. **The request.** MegaPad releases LM-1 with its image, grants its offer of the managed-data function with new queue pairs, and sends `ATTACH` with the resume flag, naming the existing control block (MegaPad's `docs/managed-data.md` § 10 and § 13). LM-1 touches the heap and its records only once that `ATTACH` names them.
+2. **Checks.** LM-1 checks MegaPad's records as at any `ATTACH`, and also: `STATE` reads `STAND-IN`; the block list names blocks that overlap neither each other nor the records; the shape registry's descriptions are sound, as a `SHAPE` request's must be, its IDs lie in `SHAPE_RANGE`, and no ID appears twice; the hold word has `HELD` and `ACTIVE` clear, and `MOVE` reads `NONE` or `FIXED`, two checks that stage 3 changes (below); and every core's region, and every `NEXT` region, lies inside a listed block. A failed check makes it reply `BAD_RECORD`, and MegaPad loses the heap. It replies `NO_RESUME` for a sound heap its image cannot take back: one whose recorded built-in shape IDs or `SHAPE_RANGE` differ from its image's, whose blocks are more than it can install as shared-heap ranges (§ 12.1), or that may hold an object it cannot adopt (below). The stand-in then serves on.
+3. **Installing.** It installs the shared heap's ranges from the block list, re-interns each recorded kind under its recorded ID, writes its time bounds, and replies `OK`. It then gives new registry IDs above every ID the registry holds in its part of `SHAPE_RANGE`.
+4. **The first hold.** It takes a hold at once. In it, it sets each core's `LOG_HEAD` to `TAIL`, retires every region, grants each core that makes objects a region in a new block it gets with `GROW`, and ends the hold one epoch past the recorded `EPOCH`.
+5. **New space only.** Until its first full mark ends, it counts the blocks it took back as full, and makes regions only in blocks it adds with `GROW`.
+6. **The first full mark.** It marks the shared heap from the handle table, between holds, and checks every object it walks (§ 12.5, § 12.8). A check that fails sets `FAILED` (§ 12.9), and the heap is lost at that point. When the mark ends, free space in the blocks it took back is whatever it did not mark.
+
+MegaPad has already failed the tasks that were in flight at the failure (MegaPad's `docs/managed-data.md` § 13).
+
+LM-1 adopts only objects whose meaning lies wholly inside the shared heap: cons cells, vectors, bytevectors, strings, records of registered shapes, and boxed numbers. Closures, symbols, foreign pointers and word values that carry LM-1's compiled entry (release plan decision 32) depend on LM-1's private state, and need a rule for re-binding them; until one exists, LM-1 refuses to resume a heap that holds one. How it knows that before it resumes is open, with the registry's question (MegaPad's `docs/managed-data.md` § 16). The stand-in can serve such a heap, since it never interprets objects.
+
+By estimate, from the link timing of MegaPad's `docs/chiplet-interconnect-plan.md` § 3 and § 8 at MegaPad's 100 MHz clock, steps 2 to 4 take about a thousand link accesses and one `GROW`, under a millisecond. The full mark is bounded by the link, since LM-1 keeps one request outstanding: an object with a header and five tagged fields costs 50 to 180 MegaPad clocks to read. With a handle table about the size of the object count:
+
+| Live objects | Full mark |
+|---:|---|
+| 10,000 | 6–21 ms |
+| 100,000 | 60–210 ms |
+| 1,000,000 | 0.6–2.1 s |
+| 10,000,000 | 6–21 s |
+
+MegaPad never waits on this mark, and garbage in the blocks taken back stays until it ends. If LM-1 has no memory of its own (release plan D8), its mark bitmap lies in lent memory, which roughly doubles these times. These figures come from reading and arithmetic, and no document gives LM-1's restart time.
+
+From stage 3, a heap whose records show a hold cut while it flipped (MegaPad's `docs/managed-data.md` § 11, row 7) is taken back after the resolving traversal that section defines. LM-1 makes the traversal inside the interrupted hold, before it ends that hold, and replies `BAD_RECORD` if the traversal fails. How MegaPad keeps the cores held out until then is designed with stage 3 (MegaPad's `docs/managed-data.md` § 16).
