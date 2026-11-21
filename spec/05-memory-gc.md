@@ -424,7 +424,7 @@ LM-1 lends MegaPad ranges of its own memory for writing. MegaPad's one writer in
 
 ## 12. Managed Data: Objects MegaPad Holds
 
-**Status:** proposed on 2026-11-20; not built.
+**Status:** decided on 2026-11-20, except what follows a failure, which is still being studied; not built.
 
 MegaPad's Forth code uses LM-1 objects as managed data (release plan Part 9d): it creates them, reads them directly, writes them only through its library's words, and keeps them past short windows as handles, and LM-1's collector frees whatever nothing uses. MegaPad's `docs/managed-data.md` specifies MegaPad's side, the records both chips keep, and the requests that cross the link. This section states what LM-1 owes it. Nothing here depends on where LM-1's own main memory is placed (release plan D8).
 
