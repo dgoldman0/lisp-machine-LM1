@@ -80,6 +80,7 @@ All values in registers and memory are 64-bit words. The low 3 bits form the **p
   - **Shape cache hint** (bits 58:51, 8 bits): A hash of the object's shape/class. Used by `CALL.IC` to speed up the first-level shape check without loading the header. Updated lazily; a mismatch is not an error, just a miss.
   - **GC generation bits** (bits 60:59, 2 bits): Encodes which generation/region the object belongs to. Used by `ST.WB` to quickly decide if a write barrier card-mark is needed.
   - **Capability/safety bits** (bits 63:61, 3 bits): Reserved for capability mode (see [02-isa.md § 2.8](02-isa.md)).
+- **No metadata in shared memory:** A reference stored in the shared heap that LM-1 keeps with MegaPad, or in a slot of MegaPad's handle table, carries zero in bits 63:51 ([05-memory-gc.md](05-memory-gc.md) § 12.1), so two references to one shared object are equal words.
 
 **Alignment:** All heap objects MUST be aligned to 8 bytes (3 low bits zero in the actual address). This is naturally enforced by `ALLOC`.
 
@@ -149,8 +150,23 @@ Tag `111` marks an **object header word**. Headers appear only as the first word
 | `01101` | **Hash table** |
 | `01110` | **Foreign pointer** (opaque, not traced by GC) |
 | `01111` | **Shape descriptor** (class/layout metadata) |
-| `10000`–`11110` | *Reserved* |
+| `10000` | **Record** (tagged fields, then raw words; § 4.7) |
+| `10001`–`11110` | *Reserved* |
 | `11111` | **Extended** (next word holds extended size and subtype) |
+
+#### Traced and Raw Words
+
+Every word after an object's header is **traced**, a tagged word that the collector classifies by its tag, unless the header's subtype makes it **raw**: a word the collector never reads as a reference, which may hold any bit pattern. The raw words are:
+
+| Subtype | Raw words |
+|:-:|--|
+| `00011` Bytevector / String | Every word after the length word (§ 4.6) |
+| `00110` Bignum | The limbs |
+| `01000` Double-float | The binary64 bits |
+| `01110` Foreign pointer | The address |
+| `10000` Record | The words after its tagged fields (§ 4.7) |
+
+Scanning, copying and fixup therefore walk objects by their headers.
 
 ### 3.6 Forwarding Pointers
 
@@ -180,7 +196,7 @@ Offset 16: cdr     (tagged word)
 
 Total: 3 words = 24 bytes. Cons-ref (tag `011`) points to offset 0 of this object.
 
-**Note:** Implementations MAY use a **headerless cons** optimization where the cons-ref tag alone identifies the layout, saving the header word. In this mode, cons cells are 2 words = 16 bytes, and the GC uses the cons-ref tag to identify them during scanning. This optimization is RECOMMENDED for LM-1 Standard and above.
+**Note:** Implementations MAY use a **headerless cons** optimization where the cons-ref tag alone identifies the layout, saving the header word. In this mode, cons cells are 2 words = 16 bytes, and the GC uses the cons-ref tag to identify them during scanning. This optimization is RECOMMENDED for LM-1 Standard and above. Cons cells in the shared heap ([05-memory-gc.md](05-memory-gc.md) § 12) always carry headers, because MegaPad reads and makes them there and the collector walks MegaPad's allocation regions by their headers.
 
 ### 4.2 Standard Instance
 
@@ -221,6 +237,33 @@ Offset 16: value        (tagged word — global value cell)
 Offset 24: plist        (ref to list or nil)
 Offset 32: package      (ref to package or nil)
 ```
+
+### 4.6 Bytevector and String
+
+```
+Offset 0:  header       (hdr-sub = 00011, size = 1 + ceil(n/8), shape = <bytevector-shape-id> or <string-shape-id>)
+Offset 8:  length       (fixnum — n, the number of bytes)
+Offset 16: bytes        (raw; byte i at offset 16 + i, the last word zero-padded)
+```
+
+A string is a bytevector with the string shape, and its bytes are UTF-8. The words after the length are raw (§ 3.5).
+
+### 4.7 Record
+
+A record holds t tagged fields and r raw words, in a layout its shape fixes:
+
+```
+Offset 0:          header      (hdr-sub = 10000, size = 1 + t + r, shape = <record-kind-shape-id>)
+Offset 8:          count       (fixnum — t, the number of tagged fields)
+Offset 16:         field[0]    (tagged word)
+...
+Offset 8*t+8:      field[t-1]  (tagged word)
+Offset 8*t+16:     raw[0]      (raw word)
+...
+Offset 8*(t+r)+8:  raw[r-1]    (raw word)
+```
+
+The count lets the collector find the raw words from the object alone, without reading the shape. Raw words hold numbers whole, such as 64-bit cells that wrap, so a record keeps them without boxes. Records are the record kinds of Leviathan's language, which MegaPad's code also makes in the shared heap; each record kind is registered as a shape that names its fields' kinds ([05-memory-gc.md](05-memory-gc.md) § 12.6).
 
 ## 5. Tag Manipulation Rules
 
@@ -272,11 +315,11 @@ All of these are single-instruction via the `TST` family.
 
 The following invariants MUST hold at all times for any conforming implementation:
 
-1. **Tag integrity.** Every word in a register or memory location has a valid primary tag.
+1. **Tag integrity.** Every word in a register, on a stack, and in a traced word of an object (§ 3.5) has a valid primary tag. Raw words hold any bit pattern.
 2. **Pointer alignment.** Every ref points to an 8-byte-aligned address.
 3. **Header validity.** The first word of every live heap object is a valid header (tag `111`) or a forwarding pointer during GC.
-4. **No pointer forgery.** Non-ref words MUST NOT be used as pointers. The hardware MAY enforce this in capability mode.
-5. **GC visibility.** The GC can determine, for any word, whether it contains a pointer, by checking bit 0 (non-fixnum) and then bits 2:1 (ref class). This is the *precise pointer identification* guarantee.
+4. **No pointer forgery.** Non-ref words MUST NOT be used as pointers. The hardware MAY enforce this in capability mode. Memory MegaPad lends is the exception that the hardware always guards: MegaPad can store any word there, so a reference LM-1 loads from the shared heap must name the shared heap, or the load traps ([05-memory-gc.md](05-memory-gc.md) § 12.8).
+5. **GC visibility.** The GC can determine, for any traced word, whether it contains a pointer, by checking bit 0 (non-fixnum) and then bits 2:1 (ref class). This is the *precise pointer identification* guarantee.
 
 ## 7. Rationale Notes
 

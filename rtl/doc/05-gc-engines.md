@@ -600,6 +600,16 @@ of the work is done by the engines in the background.
   (since the forwarding pointer overwrites the size field). This is
   correct but O(N) for an N-word forwarded object.
 
+- **Raw words are read as tagged**: The scanner tests every field of
+  every object with `is_any_ref()`, and the fixup engine tests every word
+  of its region without reading headers. The spec makes some words raw
+  (`spec/01-object-model.md` §3.5): the bytes of a bytevector or string, a
+  bignum's limbs, a double-float's bits, a foreign pointer's address, and
+  a record's raw words, which hold whole 64-bit numbers. A raw word whose
+  low bits happen to read as a reference would be emitted by the scanner
+  and rewritten by the fixup engine. Both engines must walk objects by
+  their headers and skip raw words.
+
 ### Possible Extensions
 
 - **Concurrent scan + copy pipeline** with a hardware worklist

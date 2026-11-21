@@ -305,7 +305,9 @@ The barrier logic is performed in the store pipeline. The hardware checks:
 3. If yes, update the card table and/or remembered set.
 
 **Cycles:** 1–2 (fast path, card-mark hits store buffer)  
-**Traps:** `TRAP_BARRIER_OVERFLOW` (if remembered set or card table overflows local capacity)
+**Traps:** `TRAP_BARRIER_OVERFLOW` (if remembered set or card table overflows local capacity), `TRAP_SHARED_STORE`
+
+A store whose container lies in the shared heap that LM-1 keeps with MegaPad also checks its value, as do `ST`, `ST.CAR`, `ST.CDR` and `CAS.TAGGED` ([05-memory-gc.md](05-memory-gc.md) § 4.5).
 
 ### 5.5 `ST.CAR Rs, Rt` / `ST.CDR Rs, Rt`
 
@@ -703,7 +705,9 @@ These are conventional instructions for systems code, boot, and interfacing.
 | 0x31 | `TRAP_QUEUE_EMPTY` | Blocking receive from empty queue |
 | 0x40 | `TRAP_ENGINE_BUSY` | Movement engine queue full |
 | 0x50 | `TRAP_BARRIER_OVERFLOW` | Write barrier metadata overflow |
+| 0x51 | `TRAP_SHARED_STORE` | A store into a shared object of a reference outside the shared heap ([05-memory-gc.md](05-memory-gc.md) § 4.5) |
 | 0x60 | `TRAP_CAPABILITY_VIOLATION` | Capability check failure |
+| 0x61 | `TRAP_SHARED_REF` | A tagged load from the shared heap that yields a reference outside it ([05-memory-gc.md](05-memory-gc.md) § 12.8) |
 | 0x70 | `TRAP_STACK_UNDERFLOW` | Return with empty stack |
 | 0x80 | `TRAP_STACK_OVERFLOW` | Stack exceeds allocated region |
 | 0xFF | `TRAP_USER` | Explicit `TRAP` instruction |
