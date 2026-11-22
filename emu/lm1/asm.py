@@ -52,6 +52,14 @@ REGISTER_MAP["np"] = 26
 REGISTER_MAP["nl"] = 25
 
 
+# The raw loads and stores, which share one layout (spec/07-encoding.md
+# section 5.8): a load names Rd then its base, a store its base then Rt.
+_RAW_ACCESS: dict[str, int] = {
+    'LDR': Op.LDR, 'STR': Op.STR, 'LDW': Op.LDW, 'STW': Op.STW,
+    'LDH': Op.LDH, 'STH': Op.STH, 'LDB': Op.LDB, 'STB': Op.STB,
+}
+
+
 # ---------------------------------------------------------------------------
 # ASM error
 # ---------------------------------------------------------------------------
@@ -312,6 +320,9 @@ class Assembler:
         s = s.strip()
         if not s:
             raise ValueError("empty")
+        # A minus sign before any atom, such as -0x8000
+        if s.startswith('-') and len(s) > 1 and not s[1:].lstrip().startswith('-'):
+            return -self._eval_atom(s[1:], line_no)
         # Hex
         if s.startswith('0x') or s.startswith('0X'):
             return int(s, 16)
@@ -337,6 +348,18 @@ class Assembler:
         raise AsmError(line_no, f"unknown register: {s}")
 
     # -- Instruction assembly --
+
+    def _raw_access(self, op: int, args: list[str], ln: int) -> int:
+        """A raw load (rd, rs[, offset]) or store (rs, rt[, offset]): the
+        first register in bits 25:21, the second in bits 20:16, and the
+        signed byte offset in all sixteen bits below them, the field every
+        machine reads (spec/07-encoding.md section 5.8)."""
+        first = self._reg(args[0], ln)
+        second = self._reg(args[1], ln)
+        off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
+        if not -0x8000 <= off <= 0x7FFF:
+            raise AsmError(ln, f"offset {off} does not fit 16 signed bits")
+        return encode_i(op, first, second, off)
 
     def _assemble_instruction(self, mn: str, args: list[str],
                               pc: int, ln: int) -> int:
@@ -456,49 +479,10 @@ class Assembler:
             return encode_i(Op.TST_SHAPE, rd, rs1, shape)
 
         # ---------------------------------------------------------------
-        # Loads/stores (raw): LDR, STR
+        # Raw loads and stores: LDR, STR, LDW, STW, LDH, STH, LDB, STB
         # ---------------------------------------------------------------
-        if mn == 'LDR':
-            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_i(Op.LDR, rd, rs1, off)
-        if mn == 'STR':
-            # Format S: rs=base, rt=value, imm11=offset
-            rs = self._reg(args[0], ln)
-            rt = self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_s(Op.STR, rs, rt, 0, off)
-
-        # ---------------------------------------------------------------
-        # Sub-word loads/stores: LDB, LDH, LDW, STB, STH, STW
-        # ---------------------------------------------------------------
-        if mn == 'LDB':
-            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_i(Op.LDB, rd, rs1, off)
-        if mn == 'LDH':
-            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_i(Op.LDH, rd, rs1, off)
-        if mn == 'LDW':
-            rd, rs1 = self._reg(args[0], ln), self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_i(Op.LDW, rd, rs1, off)
-        if mn == 'STB':
-            rs = self._reg(args[0], ln)
-            rt = self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_s(Op.STB, rs, rt, 0, off)
-        if mn == 'STH':
-            rs = self._reg(args[0], ln)
-            rt = self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_s(Op.STH, rs, rt, 0, off)
-        if mn == 'STW':
-            rs = self._reg(args[0], ln)
-            rt = self._reg(args[1], ln)
-            off = self._eval_expr(args[2], ln) if len(args) > 2 else 0
-            return encode_s(Op.STW, rs, rt, 0, off)
+        if mn in _RAW_ACCESS:
+            return self._raw_access(_RAW_ACCESS[mn], args, ln)
 
         # ---------------------------------------------------------------
         # LI, LUI

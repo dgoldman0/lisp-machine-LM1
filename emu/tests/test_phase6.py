@@ -234,6 +234,80 @@ def test_asm_tailcall_direct():
 
 
 # ===================================================================
+# Batch: phase6_memory — raw loads and stores with offsets
+# ===================================================================
+
+_OFFSETS = (0, 8, -8, -1, 1023, 1024, 2047, 2048, 0x7FFF, -0x8000)
+
+
+@test("asm_raw_access_offsets_take_sixteen_bits", batch="phase6_memory")
+def test_asm_raw_access_offsets_take_sixteen_bits():
+    """Every raw load and store carries its signed byte offset in bits 15:0,
+    the field the machines read (spec/07-encoding.md section 5.8), so a
+    negative offset and one of 1,024 or more come back whole, and the
+    stores keep the base in bits 25:21 and the value in bits 20:16."""
+    for mn, op in (("STR", Op.STR), ("STW", Op.STW), ("STH", Op.STH), ("STB", Op.STB),
+                   ("LDR", Op.LDR), ("LDW", Op.LDW), ("LDH", Op.LDH), ("LDB", Op.LDB)):
+        for off in _OFFSETS:
+            word, = Assembler().assemble_to_words(f"{mn} r3, r4, {off}")
+            d = decode(word)
+            assert (d.opcode, d.rd, d.rs1, d.imm16) == (op, 3, 4, off), \
+                f"{mn} r3, r4, {off} decodes as rd={d.rd} rs1={d.rs1} imm16={d.imm16}"
+
+
+@test("asm_raw_access_offset_past_sixteen_bits_refused", batch="phase6_memory")
+def test_asm_raw_access_offset_past_sixteen_bits_refused():
+    """An offset that sixteen signed bits cannot hold is refused rather than
+    cut down to another offset."""
+    for line in ("STR r1, r2, 32768", "STB r1, r2, -32769", "LDR r1, r2, 0x10000"):
+        try:
+            Assembler().assemble(line)
+        except AsmError as e:
+            assert "16 signed bits" in str(e), str(e)
+        else:
+            raise AssertionError("%r assembled" % line)
+
+
+@test("asm_stores_at_negative_and_far_offsets", batch="phase6_memory")
+def test_asm_stores_at_negative_and_far_offsets():
+    """Stores at negative offsets and at offsets of 1,024 or more land where
+    the loads at the same offsets find them, and nowhere else."""
+    source = """
+        LI32 r1, 0x40000        ; the base
+        LI   r2, 0x1111
+        LI   r3, 0x2222
+        LI   r4, 0x3333
+        LI   r5, 0x44
+        LI   r6, 0x5555
+        STR  r1, r2, -8
+        STR  r1, r3, 1024
+        STW  r1, r4, -1028
+        STB  r1, r5, 2047
+        STH  r1, r6, -0x8000
+        STR  r1, r2, 0x7FF8
+        LDR  r10, r1, -8
+        LDR  r11, r1, 1024
+        LDW  r12, r1, -1028
+        LDB  r13, r1, 2047
+        LDH  r14, r1, -0x8000
+        LDR  r15, r1, 0x7FF8
+        LDR  r16, r1, 0         ; untouched
+        HALT
+    """
+    emu = _asm_and_run(source)
+    r = emu.thread.regs
+    assert (r[10], r[11], r[12], r[13], r[14], r[15]) == (
+        0x1111, 0x2222, 0x3333, 0x44, 0x5555, 0x1111), [hex(v) for v in r[10:16]]
+    assert r[16] == 0, "a store landed at the base itself"
+    mem = emu.mem
+    assert mem.load_word(0x40000 - 8) == 0x1111
+    assert mem.load_word(0x40000 + 1024) == 0x2222
+    assert mem.load_u32_data(0x40000 - 1028) == 0x3333
+    assert mem.load_byte(0x40000 + 2047) == 0x44
+    assert mem.load_u16(0x40000 - 0x8000) == 0x5555
+
+
+# ===================================================================
 # Batch: phase6_messaging — SEND, RECV and TRY.RECV name descriptors
 # ===================================================================
 
