@@ -221,20 +221,20 @@ Flow Executor::handle_trap(uint32_t code) {
     u64 *r = t_.regs;
     switch (code) {
     case EMU_TRAP_PUTCHAR: {
+        if (m_.host.put_char == nullptr) return raise(code);  // no console
         u64 val = r[1];
         u64 ch;
         if (is_fixnum(val)) ch = u64(untag_fixnum(val)) & 0xFF;
         else if ((val & 0xFF) == 0x35) ch = (val >> 8) & 0x1FFFFF;  // a character
         else ch = val & 0xFF;
-        if (m_.host.put_char == nullptr ||
-            m_.host.put_char(m_.host.context, tile_index(), uint32_t(ch)) != LM1C_HOST_OK)
+        if (m_.host.put_char(m_.host.context, tile_index(), uint32_t(ch)) != LM1C_HOST_OK)
             return m_.host_failure();
         return Flow::Next;
     }
     case EMU_TRAP_GETCHAR: {
+        if (m_.host.get_char == nullptr) return raise(code);  // no console
         int64_t ch = -1;
-        if (m_.host.get_char == nullptr ||
-            m_.host.get_char(m_.host.context, tile_index(), &ch) != LM1C_HOST_OK)
+        if (m_.host.get_char(m_.host.context, tile_index(), &ch) != LM1C_HOST_OK)
             return m_.host_failure();
         r[0] = tag_fixnum(ch < 0 ? -1 : ch);
         return Flow::Next;
@@ -278,6 +278,7 @@ Flow Executor::handle_trap(uint32_t code) {
     case EMU_TRAP_DEBUG_PRINT: {
         // r1 = address of a byte string, r2 = its length.  The string is
         // read in full before anything is written.
+        if (m_.host.put_char == nullptr) return raise(code);  // no console
         u64 addr = r[1], length = r[2];
         std::string text;
         for (u64 i = 0; i < length; ++i) {
@@ -286,8 +287,7 @@ Flow Executor::handle_trap(uint32_t code) {
             text.push_back(char(b));
         }
         for (unsigned char c : text) {
-            if (m_.host.put_char == nullptr ||
-                m_.host.put_char(m_.host.context, tile_index(), c) != LM1C_HOST_OK)
+            if (m_.host.put_char(m_.host.context, tile_index(), c) != LM1C_HOST_OK)
                 return m_.host_failure();
         }
         return Flow::Next;

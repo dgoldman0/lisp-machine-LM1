@@ -847,14 +847,14 @@ def test_configurations_it_refuses():
 
 @test("interface.host_callbacks_are_optional", batch="chiplet_interface")
 def test_host_callbacks_are_optional():
-    """Without a console the console traps stop the run as a host failure,
-    and without a block device TRAP 0x82 answers fixnum -1 in r0."""
+    """Without a console the console traps are unhandled ones and stand, and
+    without a block device TRAP 0x82 answers fixnum -1 in r0."""
     model = chiplet.Model("mem=64K")
     code = b"".join(w.to_bytes(4, "little") for w in (
         encode_x(Op.TRAP, 0x82), encode_x(Op.TRAP, 0x80), encode_x(Op.HALT_NOP, 0)))
     model.write(0, 0, code)
     result = model.run(0)
-    assert result.stop == chiplet.STOP_HOST and result.executed == 1
+    assert result.stop == chiplet.STOP_TRAP and result.trap == 0x80 and result.executed == 1
     assert model.reg(0, 0, 0) == tag_fixnum(-1) & WORD_MASK
     assert model.thread_get(0, 0, chiplet.THREAD_PC) == 4
 

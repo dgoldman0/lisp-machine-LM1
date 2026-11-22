@@ -73,9 +73,11 @@ typedef struct lm1c_result {
 /*
  * The emulator-level console and block traps reach the host through these
  * callbacks.  They are not part of LM-1's ISA: on the chip, I/O travels
- * the link to MegaPad.  A null put_char or get_char fails its trap with
- * LM1C_STOP_HOST; a null block_io means no block device is attached, and
- * TRAP 0x82 answers fixnum -1 in r0.
+ * the link to MegaPad.  With a null put_char or get_char there is no
+ * console, so its traps are unhandled ones and stand: TRAP 0x80, 0x81 and
+ * 0x9F end the run with LM1C_STOP_TRAP, as any emulator trap the model
+ * lacks does.  A null block_io means no block device is attached, and
+ * TRAP 0x82 answers fixnum -1 in r0, as the reference's emulator does.
  */
 typedef struct lm1c_host {
     void *context;
