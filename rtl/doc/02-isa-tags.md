@@ -160,7 +160,7 @@ All instructions are 32 bits wide. Four encoding formats:
 |--------|----------|--------|-----------|
 | 8 | ALLOC | I | Bump-allocate an object. Template from table, zero-fill payload. |
 | 9 | ALLOC.CONS | R | Allocate a 3-word cons cell (header + car + cdr). |
-| 10 | ALLOCV | I | Allocate a variable-length vector: a fixnum length (else `NOT_FIXNUM`), the length word and the elements, all zero-filled before the length is written. |
+| 10 | ALLOCV | I | Allocate a variable-length vector: a fixnum length (else `NOT_FIXNUM`) from 0 to 65,534 (else `BAD_LENGTH`), the length word and the elements, all zero-filled before the length is written. |
 | 11 | ALLOC.CLOSURE | I | Allocate a closure (code pointer + environment). |
 
 **Hardware allocation sequence** (implemented as a multi-state FSM):
@@ -313,7 +313,7 @@ The LM-1 implements a vectored trap system:
 | Range | Category | Examples |
 |-------|----------|----------|
 | 0x01–0x07 | Type errors | NOT_FIXNUM, DIVIDE_BY_ZERO, NOT_REF, NOT_CONS |
-| 0x10 | GC | NURSERY_OVERFLOW |
+| 0x10–0x11 | Allocation | NURSERY_OVERFLOW, BAD_LENGTH |
 | 0x20 | IC | IC_MISS |
 | 0x30, 0x32 | Queue | QUEUE_FULL, NO_ROUTE |
 | 0x40 | Engine | ENGINE_BUSY |

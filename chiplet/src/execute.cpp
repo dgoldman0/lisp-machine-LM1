@@ -624,6 +624,10 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         unsigned rd = unsigned(in.raw26 >> 21) & 0x1F;
         u64 length = r[(in.raw26 >> 16) & 0x1F];
         if (!is_fixnum(length)) return raise(TRAP_NOT_FIXNUM);
+        // A header's 16-bit size holds the length word and the elements, so
+        // a length runs from 0 to 65,534 (spec/02-isa.md section 4.3).
+        if (untag_fixnum(length) < 0 || untag_fixnum(length) > 0xFFFF - 1)
+            return raise(TRAP_BAD_LENGTH);
         // A header, the length word, then the elements.
         i64 n_words = 1 + untag_fixnum(length);
         return alloc_object(rd, (1 + i128(n_words)) * 8, in.raw26 & 0xFFFF, n_words,

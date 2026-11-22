@@ -16,6 +16,7 @@ TRAP_NOT_CLOSURE      = 0x07
 
 # Family 2 — allocation
 TRAP_NURSERY_OVERFLOW = 0x10
+TRAP_BAD_LENGTH       = 0x11   # ALLOCV of a length outside 0 to 65,534
 
 # Family 4 — dispatch
 TRAP_IC_MISS          = 0x20
@@ -54,6 +55,7 @@ _NAMES: dict[int, str] = {
     0x06: "TRAP_NOT_CONS",
     0x07: "TRAP_NOT_CLOSURE",
     0x10: "TRAP_NURSERY_OVERFLOW",
+    0x11: "TRAP_BAD_LENGTH",
     0x20: "TRAP_IC_MISS",
     0x30: "TRAP_QUEUE_FULL",
     0x32: "TRAP_NO_ROUTE",

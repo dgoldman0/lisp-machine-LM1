@@ -40,7 +40,7 @@ from .traps import (
     LM1Trap,
     TRAP_NOT_FIXNUM, TRAP_FIXNUM_OVERFLOW, TRAP_DIVIDE_BY_ZERO,
     TRAP_TYPE_MISMATCH,
-    TRAP_NURSERY_OVERFLOW, TRAP_NOT_REF,
+    TRAP_NURSERY_OVERFLOW, TRAP_BAD_LENGTH, TRAP_NOT_REF,
     TRAP_IC_MISS, TRAP_NOT_CLOSURE,
     TRAP_QUEUE_FULL, TRAP_NO_ROUTE,
     TRAP_UNIMPLEMENTED,
@@ -65,6 +65,10 @@ EMU_TRAP_SET_CARD_SHIFT = 0x93   # r1 = card shift (bits 5:0)
 EMU_TRAP_SET_GEN_BOUNDARY = 0x94 # r1 = generation boundary address
 EMU_TRAP_SET_QUEUE_BASE = 0x95   # r1 = queue base address
 EMU_TRAP_DEBUG_PRINT    = 0x9F   # Debug: print string (r1=addr, r2=len)
+
+# The longest vector ALLOCV makes: its payload, the length slot and the
+# elements, is the most a header's 16-bit size holds.
+ALLOCV_MAX_LENGTH = 0xFFFF - 1
 
 # Block I/O sub-functions (in r1)
 BLOCK_IO_READ  = 0
@@ -628,6 +632,10 @@ class Emulator:
             if not is_fixnum(length):
                 raise LM1Trap(TRAP_NOT_FIXNUM, "ALLOCV: length must be a fixnum")
             n_elems = untag_fixnum(length)
+            # A header's 16-bit size holds the length slot and the elements,
+            # until the extended header exists (spec/02-isa.md section 4.3).
+            if not 0 <= n_elems <= ALLOCV_MAX_LENGTH:
+                raise LM1Trap(TRAP_BAD_LENGTH, f"ALLOCV: length {n_elems}")
             # Vector layout: header + length_word + elements
             n_words = 1 + n_elems  # length word + elements
             total_bytes = (1 + n_words) * 8  # header + payload

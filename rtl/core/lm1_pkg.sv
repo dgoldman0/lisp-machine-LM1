@@ -278,6 +278,7 @@ package lm1_pkg;
     parameter logic [7:0] TRAP_NOT_CONS         = 8'h06;
     parameter logic [7:0] TRAP_NOT_CLOSURE      = 8'h07;
     parameter logic [7:0] TRAP_NURSERY_OVERFLOW = 8'h10;
+    parameter logic [7:0] TRAP_BAD_LENGTH       = 8'h11;  // ALLOCV outside 0..65,534
     parameter logic [7:0] TRAP_IC_MISS          = 8'h20;
     parameter logic [7:0] TRAP_QUEUE_FULL       = 8'h30;
     parameter logic [7:0] TRAP_NO_ROUTE         = 8'h32;  // a descriptor no route reaches

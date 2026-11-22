@@ -216,6 +216,8 @@ Allocate a variable-length object (vector, string, bytevector).
 if (Rs_length & 1) != 0:
     trap TRAP_NOT_FIXNUM
 len = Rs_length >> 1    // untag fixnum length
+if len < 0 or len > 65534:
+    trap TRAP_BAD_LENGTH
 size = len + 1          // payload words: the length slot and the elements
 if np + (size + 1) * 8 > nl:
     trap TRAP_NURSERY_OVERFLOW
@@ -226,10 +228,10 @@ Rd = np | TAG_REF
 np = np + (size + 1) * 8
 ```
 
-The header's size counts the payload, the length slot and the elements, as the vector layout of [01-object-model.md](01-object-model.md) § 4.3 has it. Every element starts as fixnum 0.
+The header's size counts the payload, the length slot and the elements, as the vector layout of [01-object-model.md](01-object-model.md) § 4.3 has it. Every element starts as fixnum 0. The size field holds 16 bits, so the longest vector has 65,534 elements, whose payload of 65,535 words fills it; a longer object needs the extended header of [01-object-model.md](01-object-model.md) § 3.5, which `ALLOCV` does not make yet. A length outside 0 to 65,534 traps `TRAP_BAD_LENGTH` and allocates nothing, before the nursery is checked.
 
 **Cycles:** 2 (fast path)  
-**Traps:** `TRAP_NURSERY_OVERFLOW`, `TRAP_NOT_FIXNUM` (if length is not a fixnum)
+**Traps:** `TRAP_NURSERY_OVERFLOW`, `TRAP_NOT_FIXNUM` (if length is not a fixnum), `TRAP_BAD_LENGTH` (if it lies outside 0 to 65,534)
 
 ### 4.4 `ALLOC.CLOSURE Rd, Rs_code, #env_size`
 
@@ -816,6 +818,7 @@ A trap's code picks its entry in the trap table, whose base `TRAP 0x90` sets: en
 | 0x06 | `TRAP_NOT_CONS` | Cons-expecting op on non-cons |
 | 0x07 | `TRAP_NOT_CLOSURE` | Closure call on non-closure |
 | 0x10 | `TRAP_NURSERY_OVERFLOW` | Nursery allocation failure |
+| 0x11 | `TRAP_BAD_LENGTH` | `ALLOCV` of a length outside 0 to 65,534 (§ 4.3) |
 | 0x20 | `TRAP_IC_MISS` | Inline cache miss |
 | 0x30 | `TRAP_QUEUE_FULL` | Send to full queue |
 | 0x32 | `TRAP_NO_ROUTE` | A queue descriptor naming a tile no route reaches (§ 8.1) |

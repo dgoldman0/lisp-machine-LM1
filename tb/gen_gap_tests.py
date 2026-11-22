@@ -24,6 +24,7 @@ Tests cover:
   50: CALL.REG calls the address in a register, with the frame every call makes
   51: reserved encodings trap TRAP_UNIMPLEMENTED; TRAP 0x70 and 0x7F vector
   52: ALLOC.CONS takes car and cdr registers, read before np moves; r0 gives nil
+  53: ALLOCV's lengths run from 0 to 65,534; others trap TRAP_BAD_LENGTH
 """
 
 import os
@@ -1473,6 +1474,76 @@ def gen_test_52():
 
 
 # ===========================================================================
+# Test 53: ALLOCV's lengths run from 0 to 65,534
+# ===========================================================================
+def gen_test_53():
+    source = f"""\
+    ; Test 53: a header's size holds 16 bits, so ALLOCV makes vectors of 0 to
+    ; 65,534 elements, whose payload, the length slot and the elements, the
+    ; size holds (spec/02-isa.md section 4.3).  A length outside that range
+    ; traps TRAP_BAD_LENGTH and allocates nothing.  The longest one is
+    ; 512 KiB, more than this nursery holds, so it traps
+    ; TRAP_NURSERY_OVERFLOW: its size, 65,536 words with the header, is
+    ; computed whole.  The handlers count each trap and skip the ALLOCV
+    ; with ERET.NEXT.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, length_handler
+    LI  r15, {TRAP_TABLE + 0x11 * 8}   ; TRAP_BAD_LENGTH
+    STR r15, r14, 0
+    LI  r14, overflow_handler
+    LI  r15, {TRAP_TABLE + 0x10 * 8}   ; TRAP_NURSERY_OVERFLOW
+    STR r15, r14, 0
+    LI  r20, 0
+    LI  r21, 0
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+
+    LI  r2, 0x77
+    LI32 r1, {tag_fixnum(65535)}
+    ALLOCV r2, r1, 2      ; one past the longest: TRAP_BAD_LENGTH
+    LI  r1, -2            ; fixnum -1
+    ALLOCV r2, r1, 2      ; negative: TRAP_BAD_LENGTH
+    LI  r1, 1
+    LI  r3, 41
+    SHL r1, r1, r3        ; fixnum 2**40
+    ALLOCV r2, r1, 2      ; TRAP_BAD_LENGTH
+    MOV r4, np            ; nothing allocated
+    LI32 r1, {tag_fixnum(65534)}
+    ALLOCV r2, r1, 2      ; the longest: TRAP_NURSERY_OVERFLOW here
+    MOV r5, np
+    LI  r1, {tag_fixnum(3)}
+    ALLOCV r6, r1, 2      ; three elements
+    LDR r7, r6, -1        ; its header: size 4, the length slot and three
+    LDR r8, r6, 7         ; the length slot
+    MOV r9, np
+    HALT
+
+length_handler:
+    LI  r23, 1
+    ADD r20, r20, r23
+    ERET.NEXT
+
+overflow_handler:
+    LI  r23, 1
+    ADD r21, r21, r23
+    ERET.NEXT
+"""
+    emit_test('53_allocv_length', source, {
+        'r2': 0x77,                       # no ALLOCV that trapped wrote Rd
+        'r4': NURSERY_BASE,
+        'r5': NURSERY_BASE,
+        'r6': make_ref(NURSERY_BASE),
+        'r7': 4 << 8,                     # template 2 is zero at reset: the size alone
+        'r8': tag_fixnum(3),
+        'r9': NURSERY_BASE + 5 * 8,
+        'r20': 3,                         # three lengths out of range
+        'r21': 1,                         # the longest overflowed this nursery
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -1500,4 +1571,5 @@ if __name__ == '__main__':
     gen_test_50()
     gen_test_51()
     gen_test_52()
+    gen_test_53()
     print("Done. All gap tests generated.")

@@ -65,6 +65,7 @@ constexpr uint32_t TRAP_TYPE_MISMATCH = 0x04;
 constexpr uint32_t TRAP_NOT_REF = 0x05;
 constexpr uint32_t TRAP_NOT_CLOSURE = 0x07;
 constexpr uint32_t TRAP_NURSERY_OVERFLOW = 0x10;
+constexpr uint32_t TRAP_BAD_LENGTH = 0x11;
 constexpr uint32_t TRAP_IC_MISS = 0x20;
 constexpr uint32_t TRAP_QUEUE_FULL = 0x30;
 constexpr uint32_t TRAP_NO_ROUTE = 0x32;

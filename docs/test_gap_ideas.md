@@ -78,24 +78,6 @@ uninitialized template slots.
 **Action:** Add a reset-sequencer that clears all 64 entries, or add a
 "template valid" bit and trap on access to invalid entries.
 
-### P0-11  ALLOCV lengths that no header can describe
-
-A header's size field holds 16 bits, so a vector of 65,535 or more
-elements needs the extended header (spec/01-object-model.md § 3.5), which
-the product design has yet to define, and spec/02-isa.md § 4.3 gives no
-answer for a negative length.  The RTL counts the vector's words in 16
-bits, so a length of 65,535 or more allocates a smaller, wrapped object,
-while both models allocate the full size and so trap
-`TRAP_NURSERY_OVERFLOW` in a nursery of today's sizes.  A length of -1
-makes all three allocate the header alone and write the length into the
-word after it, and other negative lengths make the RTL and the models
-allocate different wrong sizes.  No bench test covers either.
-
-**Where:** `lm1_control.sv` (`OP_ALLOCV`), `emu/lm1/execute.py` and
-`chiplet/src/execute.cpp` (ALLOCV).
-**Action:** give the spec ALLOCV's range of lengths, then trap outside it
-in all three.
-
 ### P0-12  Cluster accesses wait for neither the grant nor the response
 
 A core raises `xbar_req_valid` for the one cycle its LSU issues an access

@@ -17,10 +17,10 @@ from lm1.word import (
     is_cons_ref, is_ref, ref_address,
     make_header, HDR_CONS, HDR_VECTOR, HDR_CLOSURE,
     header_shape_id, header_subtype, header_size,
-    is_header,
+    is_header, WORD_MASK,
 )
 from lm1.execute import EMU_TRAP_PUTCHAR
-from lm1.traps import LM1Trap, TRAP_NURSERY_OVERFLOW
+from lm1.traps import LM1Trap, TRAP_NURSERY_OVERFLOW, TRAP_BAD_LENGTH
 
 
 # -------------------------------------------------------------------
@@ -419,6 +419,36 @@ def test_allocv_read_write():
     assert emu.thread.regs[10] == tag_fixnum(11)
     assert emu.thread.regs[11] == tag_fixnum(22)
     assert emu.thread.regs[12] == tag_fixnum(33)
+
+
+@test("allocv_length_range", batch="phase2_vector")
+def test_allocv_length_range():
+    """ALLOCV's lengths run from 0 to 65,534, the lengths whose payload a
+    header's 16-bit size holds (spec/02-isa.md section 4.3).  Outside that
+    range it traps TRAP_BAD_LENGTH, before the nursery is checked, writing
+    nothing; a length of 0 makes a vector of the length slot alone, and the
+    longest the size field holds overflows a nursery smaller than it."""
+    for length, trap in ((65535, TRAP_BAD_LENGTH), (-1, TRAP_BAD_LENGTH),
+                         (1 << 40, TRAP_BAD_LENGTH), (-(1 << 61), TRAP_BAD_LENGTH),
+                         (65534, TRAP_NURSERY_OVERFLOW), (0, None)):
+        emu = _emu()
+        t = emu.thread
+        t.regs[5] = tag_fixnum(length) & WORD_MASK
+        t.regs[1] = 0x77
+        np_before = t.np
+        try:
+            _load_and_run(emu, [_allocv_x(1, 5, 2), encode_x(Op.HALT_NOP, 0)])
+            got = None
+        except LM1Trap as exc:
+            got = exc.code
+        assert got == trap, f"length {length}: trap {got}, expected {trap}"
+        if trap is not None:
+            assert t.regs[1] == 0x77 and t.np == np_before, f"length {length} allocated"
+        else:
+            addr = ref_address(t.regs[1])
+            assert header_size(emu.mem.load_word(addr)) == 1
+            assert emu.mem.load_word(addr + 8) == tag_fixnum(0)
+            assert t.np == np_before + 16
 
 
 # ===================================================================

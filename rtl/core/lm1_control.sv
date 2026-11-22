@@ -1169,9 +1169,12 @@ module lm1_control
             OP_ALLOCV: begin
                 rf_rd1_addr = banked_addr(cur_thread, REG_NP);
                 rf_rd2_addr = banked_addr(cur_thread, REG_NL);
-                if (!is_fixnum(opb)) begin
+                if (!is_fixnum(opb) ||
+                    $signed(opb) < 0 || $signed(opb) > $signed(64'd131068)) begin
                     // The length must be a fixnum (spec/02-isa.md § 4.3)
-                    tc_n    = TRAP_NOT_FIXNUM;
+                    // from 0 to 65,534, whose payload of length + 1 words
+                    // the header's 16-bit size holds
+                    tc_n    = is_fixnum(opb) ? TRAP_BAD_LENGTH : TRAP_NOT_FIXNUM;
                     cyc_inc = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
@@ -1182,11 +1185,12 @@ module lm1_control
                     np_v  = rf_rd1_data;
                     nl_v  = rf_rd2_data;
                     len_s = $signed(opb) >>> 1;
-                    nw    = len_s[15:0] + 16'd1;
+                    nw    = len_s[15:0] + 16'd1;      // at most 65,535
                     anw_n = nw;
                     acon_n = 1'b0;
                     tmpl_rd_idx = dr.imm16[7:0];
-                    new_np = np_v + {45'b0, nw + 16'd1, 3'b0};
+                    // The object's words, header included, need 17 bits
+                    new_np = np_v + {44'b0, {1'b0, nw} + 17'd1, 3'b0};
                     if (new_np > nl_v) begin
                         tc_n    = TRAP_NURSERY_OVERFLOW;
                         cyc_inc = 1'b0;
