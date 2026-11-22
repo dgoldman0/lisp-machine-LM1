@@ -13,6 +13,8 @@ Tests cover:
   27: ALLOC.CONS with NIL args (r0 substitution)
   28: Nursery exact-boundary allocation
   29: Multiple templates + header verification
+  43: ST.WB marks the card holding the stored field
+  44: ST.CAR / ST.CDR are barriered stores
 """
 
 import os
@@ -730,6 +732,131 @@ def gen_test_29():
 
 
 # =========================================================================
+# TEST 43: ST.WB marks the card holding the stored field
+#
+# The barrier marks the card of the word it stores (spec/02-isa.md § 5.4,
+# spec/05-memory-gc.md § 4.2).  A 16-field object at the boundary, 0x7800,
+# has its header in card 0x1E0 and its field 12, at 0x7800 + 13*8 = 0x7868,
+# in card 0x1E1, so a young ref stored there marks card 0x1E1 alone.
+# =========================================================================
+def gen_test_43():
+    src = f"""
+    LI  sp, {STACK_TOP}
+    LI  fp, 0
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+
+    ; Install templates 0 (cons) and 1 (general object)
+    LI  r1, 0
+    LI  r2, 7
+    TRAP 0x91
+    LI  r1, 1
+    LI  r2, 7
+    TRAP 0x91
+
+    ; Configure GC CSRs
+    LI  r1, {CARD_TABLE_BASE}
+    TRAP 0x92
+    LI  r1, {CARD_SHIFT}
+    TRAP 0x93
+    LI  r1, {GEN_BOUNDARY_V}
+    TRAP 0x94
+
+    ; A young-gen cons for the cross-gen reference
+    LI  r1, 42
+    LI  r2, 0
+    ALLOC.CONS r9, r1, r2
+
+    ; A 16-field object in old-gen at the boundary
+    MOV r13, np
+    LI  np, {GEN_BOUNDARY_V}
+    ALLOC r10, 16, 1
+
+    ; Pre-clear the card table word for cards 0x1E0-0x1E7
+    LI  r14, 0x61E0
+    LI  r15, 0
+    STR r14, r15, 0
+
+    ; Store the young ref into field 12
+    ST.WB r10, r9, 12
+
+    ; byte 0 (the header's card) stays 0, byte 1 (field 12's card) is 0xFF
+    LDR r1, r14, 0
+
+    MOV np, r13
+    HALT
+"""
+    emit_test('43_card_field', src, {
+        'r1': 0xFF00,  # only field 12's card is marked
+    })
+
+
+# =========================================================================
+# TEST 44: ST.CAR / ST.CDR are barriered stores
+#
+# The spec gives ST.CAR and ST.CDR the barrier of ST.WB on field 0 or 1
+# (spec/02-isa.md § 5.5).  Old cons A at 0x7830 has its car (0x7838) at the
+# end of card 0x1E0 and its cdr (0x7840) at the start of card 0x1E1; old
+# cons B at 0x7880 lies in card 0x1E2.  Storing a young cons into A's cdr
+# and B's car marks cards 0x1E1 and 0x1E2.  The young cons itself, at
+# 0x7000 in card 0x1C0, takes a young ref into its car without a mark.
+# =========================================================================
+def gen_test_44():
+    src = f"""
+    LI  sp, {STACK_TOP}
+    LI  fp, 0
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+
+    ; Install template 0 (cons)
+    LI  r1, 0
+    LI  r2, 7
+    TRAP 0x91
+
+    ; Configure GC CSRs
+    LI  r1, {CARD_TABLE_BASE}
+    TRAP 0x92
+    LI  r1, {CARD_SHIFT}
+    TRAP 0x93
+    LI  r1, {GEN_BOUNDARY_V}
+    TRAP 0x94
+
+    ; A young-gen cons for the cross-gen references
+    LI  r1, 42
+    LI  r2, 0
+    ALLOC.CONS r9, r1, r2
+
+    ; Two old-gen conses of nils
+    MOV r13, np
+    LI  np, 0x7830
+    ALLOC.CONS r10, r0, r0
+    LI  np, 0x7880
+    ALLOC.CONS r11, r0, r0
+
+    ; Pre-clear the card table words for cards 0x1E0-0x1E7 and 0x1C0-0x1C7
+    LI  r14, 0x61E0
+    LI  r15, 0
+    STR r14, r15, 0
+    LI  r12, 0x61C0
+    STR r12, r15, 0
+
+    ST.CDR r10, r9        ; young ref into old A's cdr: marks card 0x1E1
+    ST.CAR r11, r9        ; young ref into old B's car: marks card 0x1E2
+    ST.CAR r9, r9         ; young ref into the young cons: filtered
+
+    LDR r1, r14, 0        ; card 0x1E0 = 0, 0x1E1 = 0xFF, 0x1E2 = 0xFF
+    LDR r4, r12, 0        ; card 0x1C0 = 0
+
+    MOV np, r13
+    HALT
+"""
+    emit_test('44_card_cons', src, {
+        'r1': 0xFFFF00,  # the cards of A's cdr and B's car are marked
+        'r4': 0x00,      # a young container's store marks nothing
+    })
+
+
+# =========================================================================
 # Generate all tests
 # =========================================================================
 if __name__ == '__main__':
@@ -744,4 +871,6 @@ if __name__ == '__main__':
     gen_test_27()
     gen_test_28()
     gen_test_29()
+    gen_test_43()
+    gen_test_44()
     print('Done.')

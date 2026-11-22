@@ -483,17 +483,21 @@ The write barrier is the mutator-side complement to the GC engines. It
 ensures that cross-generation pointer stores are tracked so the GC knows
 which old-generation objects may point to young-generation objects.
 
-### ST.WB Instruction
+### Barriered Stores: ST.WB, ST.CAR and ST.CDR
 
 `ST.WB` (Store With Barrier) is a tagged field store that additionally
-performs a barrier check:
+performs a barrier check, and `ST.CAR` and `ST.CDR` perform the same check
+for a cons cell's car and cdr:
 
 ```
 S_FIELD_MEM:   Store the value to memory (same as ST)
 S_FIELD_WAIT:  Wait for store completion
 S_BARRIER_CHECK:
-    if is_any_ref(stored_value) AND target_addr < gen_boundary:
-        // Old object references young object → mark card dirty
+    if is_any_ref(stored_value)
+       AND ref_address(stored_value) < gen_boundary   // value is young
+       AND target_addr >= gen_boundary:               // stored word is old
+        // Old object references young object → mark the card
+        // holding the stored word dirty
         card_addr = card_table_base + (target_addr >> card_shift)
         → S_BARRIER_MARK
     else:

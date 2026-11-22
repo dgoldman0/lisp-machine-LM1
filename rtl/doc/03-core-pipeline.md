@@ -106,8 +106,8 @@ This is the big dispatch state. The opcode determines the next state:
 | Simple imm | LI, LUI | Direct writeback → `S_FETCH` |
 | Raw memory | LDR, STR, LDB, STB, LDH, STH, LDW, STW | `S_MEM` → `S_MEM_WAIT` |
 | Tagged loads | LD, LD_CAR_CDR | ref check → `S_FIELD_MEM` → `S_FIELD_WAIT` |
-| Tagged stores | ST, ST_CAR_CDR | ref check → `S_FIELD_MEM` → `S_FIELD_WAIT` |
-| Write-barrier | ST_WB | `S_FIELD_MEM` → `S_FIELD_WAIT` → `S_BARRIER_CHECK` |
+| Tagged stores | ST | ref check → `S_FIELD_MEM` → `S_FIELD_WAIT` |
+| Write-barrier | ST_WB, ST_CAR_CDR | ref check → `S_FIELD_MEM` → `S_FIELD_WAIT` → `S_BARRIER_CHECK` |
 | Branches | BR, BR_COND | Evaluate → update `pc_n` → `S_FETCH` |
 | Calls | CALL_DIRECT | `S_PUSH_FRAME_0` (3 store states) → target |
 | Calls | CALL_IC, TAILCALL_IC | `S_HDR_READ` → `S_IC_DISPATCH` |
@@ -170,11 +170,13 @@ For cons operations, the check is `is_cons()` and the trap is `TRAP_NOT_CONS`.
 
 ### 7. Write Barrier — `S_BARRIER_CHECK` / `S_BARRIER_MARK`
 
-After a `ST.WB` store completes:
+After a `ST.WB`, `ST.CAR` or `ST.CDR` store completes, with `ta` holding
+the address of the stored word:
 
 ```
 S_BARRIER_CHECK:
-  If stored value is a reference AND target address < gen_boundary:
+  If the stored value is a reference with address < gen_boundary (young)
+  AND ta >= gen_boundary (the word, and so its container, is old):
       card_addr = card_table_base + (ta >> card_shift)
       → S_BARRIER_MARK (store 0xFF to card_addr via LSU_STORE_BYTE)
   Else:
@@ -293,8 +295,8 @@ The state register is 6 bits wide. Here is every state with its role:
 | LDR (hit) | 6 | + MEM + MEM_WAIT |
 | STR | 6 | + MEM + MEM_WAIT |
 | LD (tagged) | 6 | Ref check + FIELD_MEM + FIELD_WAIT |
-| ST.WB (no barrier) | 7 | + BARRIER_CHECK (filtered) |
-| ST.WB (barrier fires) | 9 | + BARRIER_MARK + BARRIER_MARK_W |
+| ST.WB, ST.CAR, ST.CDR (no barrier) | 7 | + BARRIER_CHECK (filtered) |
+| ST.WB, ST.CAR, ST.CDR (barrier fires) | 9 | + BARRIER_MARK + BARRIER_MARK_W |
 | CALL_DIRECT | 9 | + 5 frame-push states |
 | RET | 9 | + 5 frame-pop states |
 | CALL_IC (hit) | 11 | + HDR_READ + HDR_WAIT + IC_DISPATCH + frame |

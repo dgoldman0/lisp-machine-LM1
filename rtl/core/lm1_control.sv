@@ -827,12 +827,14 @@ module lm1_control
             //
             // Barrier fires when:
             //   1. Stored value (opb) is a ref (any_ref tag)
-            //   2. Container (opa) address >= gen_boundary (old-gen)
+            //   2. The stored word's address, and so its container,
+            //      is >= gen_boundary (old-gen)
             //   3. Stored ref (opb) address < gen_boundary (nursery)
             // This detects old→young cross-generation stores.
             //
-            // If barrier fires: compute card-table byte address,
-            // issue a byte store to mark the card dirty (0xFF).
+            // If barrier fires: compute the card-table byte address of
+            // the card holding the stored word, and issue a byte store
+            // to mark the card dirty (0xFF).
             OP_ST_WB: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
@@ -842,15 +844,18 @@ module lm1_control
                 end else begin
                     ta_n    = ref_address(opa) + {56'b0, dr.rs2 + 5'd1, 3'b0};
                     td_n    = opb;              // value being stored
-                    tt_n    = ref_address(opa);  // container address (for card calc)
                     cyc_inc = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;      // do the store first
-                    // After S_FIELD_MEM completes, opcode==ST_WB triggers
-                    // barrier check in S_BARRIER_CHECK path
+                    // After S_FIELD_MEM completes, S_FIELD_WAIT sends
+                    // ST.WB on to the barrier check in S_BARRIER_CHECK
                 end
             end
 
+            // ===== ST.CAR / ST.CDR =====
+            // Barriered stores to a cons cell's car or cdr, the same as
+            // ST.WB on field 0 or 1 (spec/02-isa.md § 5.5): S_FIELD_WAIT
+            // sends them on to S_BARRIER_CHECK too.
             OP_ST_CAR_CDR: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
@@ -1638,7 +1643,7 @@ module lm1_control
                     pc_n      = pc + 64'd8;
                     ns = S_FETCH;
                 end
-                OP_ST_WB: begin
+                OP_ST_WB, OP_ST_CAR_CDR: begin
                     // Store completed — now check barrier
                     ns = S_BARRIER_CHECK;
                 end
@@ -1652,15 +1657,19 @@ module lm1_control
         // ---------------------------------------------------------
         // BARRIER_CHECK: decide if card-table mark is needed
         //
+        // ST.WB, ST.CAR and ST.CDR come here after their store.
         // td = stored value (set in S_EXECUTE)
-        // tt = container ref address (set in S_EXECUTE for ST.WB)
+        // ta = address of the stored word (set in S_EXECUTE; the store
+        //      states only read it)
         //
         // Filter 1: skip if stored value is not a ref
         // Filter 2: skip if same generation (both nursery or both old)
         //
         // A cross-gen store is: container in old-gen AND stored ref
         // points to nursery.  With gen_boundary configured:
-        //   container_addr >= gen_boundary  AND  ref_addr < gen_boundary
+        //   word_addr >= gen_boundary  AND  ref_addr < gen_boundary
+        // The word lies inside its container, so it is old exactly when
+        // the container is.
         // ---------------------------------------------------------
         S_BARRIER_CHECK: begin
             if (!is_any_ref(td)) begin
@@ -1673,13 +1682,16 @@ module lm1_control
                     logic [XLEN-1:0] stored_addr;
                     stored_addr = ref_address(td);
                     if (gen_boundary != '0 &&
-                        tt >= gen_boundary &&
+                        ta >= gen_boundary &&
                         stored_addr < gen_boundary) begin
                         // Cross-gen old→young: FIRE barrier
-                        // Compute card-table byte address:
-                        //   card_index = (container_addr - 0) >> card_shift
+                        // Mark the card holding the stored word
+                        // (spec/02-isa.md § 5.4, spec/05-memory-gc.md
+                        // § 4.2), so a field past its header's card is
+                        // found by the collector's scan of that card:
+                        //   card_index = (word_addr - 0) >> card_shift
                         //   card_addr  = card_table_base + card_index
-                        ta_n = card_table_base + (tt >> card_shift);
+                        ta_n = card_table_base + (ta >> card_shift);
                         td_n = {56'hFF_FFFF_FFFF_FFFF, 8'hFF};  // dirty marker
                         ctr_barrier_fire_inc = 1'b1;
                         ns   = S_BARRIER_MARK;

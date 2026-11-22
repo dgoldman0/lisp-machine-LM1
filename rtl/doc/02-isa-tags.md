@@ -180,9 +180,9 @@ All instructions are 32 bits wide. Four encoding formats:
 | 17 | LD.CAR.CDR | R | `Rd = mem[cons_addr + 8]` (car) or `Rd = mem[cons_addr + 16]` (cdr) |
 | 18 | ST | S | `mem[ref_address(Rs1) + imm11*8] = Rd` — store tagged field |
 | 19 | ST.WB | S | Store with write barrier — checks if stored ref crosses GC generations |
-| 20 | ST.CAR.CDR | R | Store to car/cdr of a cons cell |
+| 20 | ST.CAR.CDR | R | Store to car/cdr of a cons cell, with the write barrier |
 
-**Write barrier** (`ST.WB`): After the store, the hardware checks if `Rd` is a reference (`is_any_ref`) and if the destination address is in a different GC generation than the source. If so, it marks the corresponding card table entry. The card table base, card shift (log₂ of card size), and generation boundary are configured via system traps.
+**Write barrier** (`ST.WB`, `ST.CAR`, `ST.CDR`): After the store, the hardware checks whether the stored value is a reference (`is_any_ref`) into the young generation, below the generation boundary, while the stored word, and so its container, lies at or above it. If so, it marks the card holding the stored word. The card table base, card shift (log₂ of card size), and generation boundary are configured via system traps.
 
 ### Family 4: Dispatch & Control Flow
 

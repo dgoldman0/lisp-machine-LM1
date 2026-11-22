@@ -100,7 +100,7 @@ This takes ~8–20 cycles depending on object size, versus hundreds of cycles fo
 
 The most distinctive feature of the LM-1 is its **hardware garbage collection support**:
 
-- **Write barriers** are checked automatically on every tagged store (`ST.WB` opcode). The hardware compares source and destination generations, and marks card table entries without software intervention.
+- **Write barriers** are checked automatically on every barriered store (`ST.WB`, `ST.CAR` and `ST.CDR`). The hardware compares source and destination generations, and marks the card holding the stored word without software intervention.
 - **Three dedicated GC engines** per cluster operate on the shared SRAM through a private dual-port:
   - **Scanner**: walks a memory region, reads object headers, identifies reference fields
   - **Copier**: relocates live objects to a new region, installs forwarding pointers
