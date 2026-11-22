@@ -160,6 +160,10 @@ package lm1_pkg;
     // FAA_FENCE: func == 0x1F means FENCE.GC, else FAA
     parameter logic [FUNC_W-1:0] FUNC_FENCE_GC = 5'h1F;
 
+    // ERET sub-functions: resume at the saved PC, or at the one after it
+    parameter logic [FUNC_W-1:0] FUNC_ERET      = 5'd0;
+    parameter logic [FUNC_W-1:0] FUNC_ERET_NEXT = 5'd1;
+
     // ---------------------------------------------------------------
     // SYS_INFO sub-functions  (in rs1 field, bits [20:16])
     // ---------------------------------------------------------------

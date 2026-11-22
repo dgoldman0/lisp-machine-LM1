@@ -20,6 +20,7 @@ Tests cover:
   46: An ALU fault saves its own PC, so ERET retries it
   47: ALLOCV and ALLOC.CLOSURE zero every payload word; ALLOCV's length is a fixnum
   48: FAA traps on a word or a delta that is not a fixnum
+  49: ERET.NEXT resumes after the faulting instruction; ERET retries it
 """
 
 import os
@@ -1125,6 +1126,102 @@ def gen_test_48():
 
 
 # ===========================================================================
+# Test 49: ERET.NEXT resumes after the faulting instruction
+# ===========================================================================
+def gen_test_49():
+    source = f"""\
+    ; Test 49: a handler that carries out the faulting instruction itself,
+    ; as a generic + or a bignum promotion does (spec/02-isa.md section
+    ; 14.3), returns with ERET.NEXT, which resumes at the saved PC + 4,
+    ; after the instruction that faulted (spec/03-core.md section 6.3).
+    ; Plain ERET still runs the faulting instruction again, and after an
+    ; explicit TRAP, whose saved PC is the next instruction's, ERET.NEXT
+    ; skips that one.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, add_handler
+    LI  r15, {TRAP_TABLE + 0x01 * 8}   ; TRAP_NOT_FIXNUM
+    STR r15, r14, 0
+    LI  r14, promote_handler
+    LI  r15, {TRAP_TABLE + 0x02 * 8}   ; TRAP_FIXNUM_OVERFLOW
+    STR r15, r14, 0
+    LI  r14, mend_handler
+    LI  r15, {TRAP_TABLE + 0x03 * 8}   ; TRAP_DIVIDE_BY_ZERO
+    STR r15, r14, 0
+    LI  r14, call_handler
+    LI  r15, {TRAP_TABLE + 0x42 * 8}   ; the code TRAP 0x42 raises
+    STR r15, r14, 0
+    LI  r20, 0                         ; handlers run
+
+    ; --- generic +: r1 is no fixnum, so the handler adds the raw words ---
+    LI  r1, 7
+    LI  r2, {tag_fixnum(5)}
+fault1:
+    ADD.FIX r3, r1, r2    ; the handler writes r3 = 17
+    LI  r4, 0x44          ; runs once, after the handler
+    MOV r5, r24           ; the saved PC the handler read
+
+    ; --- overflow: the handler leaves nil where a bignum would go ---
+    LI  r6, 1
+    LI  r7, 62
+    SHL r6, r6, r7        ; fixnum 2**61
+    ADD.FIX r8, r6, r6    ; 2**62 leaves the fixnum range
+    LI  r9, 0x99
+
+    ; --- plain ERET retries: the handler mends the divisor ---
+    LI  r10, {tag_fixnum(42)}
+    LI  r11, {tag_fixnum(0)}
+    DIV.FIX r12, r10, r11 ; traps, then runs again: fixnum 21
+
+    ; --- after an explicit TRAP, ERET.NEXT skips the next instruction ---
+    LI  r13, 0
+    TRAP 0x42
+    LI  r13, 0x13         ; skipped
+    LI  r16, 0x16
+    HALT
+
+add_handler:
+    TRAP.PC r24
+    ADD r3, r1, r2
+    LI  r23, 1
+    ADD r20, r20, r23
+    ERET.NEXT
+
+promote_handler:
+    LI  r8, {NIL}
+    LI  r23, 1
+    ADD r20, r20, r23
+    ERET.NEXT
+
+mend_handler:
+    LI  r11, {tag_fixnum(2)}
+    LI  r23, 1
+    ADD r20, r20, r23
+    ERET
+
+call_handler:
+    LI  r23, 1
+    ADD r20, r20, r23
+    ERET.NEXT
+"""
+    asm = Assembler()
+    asm.assemble(source)
+    emit_test('49_eret_next', source, {
+        'r3': 17,                 # the handler's sum, written once
+        'r4': 0x44,
+        'r5': asm.labels['fault1'],  # a fault saves its own PC
+        'r8': NIL,                # the overflow handler's result
+        'r9': 0x99,
+        'r11': tag_fixnum(2),
+        'r12': tag_fixnum(21),    # DIV.FIX ran again after plain ERET
+        'r13': 0,                 # skipped after TRAP 0x42
+        'r16': 0x16,
+        'r20': 4,                 # each handler ran once
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -1148,4 +1245,5 @@ if __name__ == '__main__':
     gen_test_46()
     gen_test_47()
     gen_test_48()
+    gen_test_49()
     print("Done. All gap tests generated.")

@@ -1233,15 +1233,19 @@ module lm1_control
                 end
             end
 
+            // ERET (func 0) resumes at the saved PC, so a fault runs again;
+            // ERET.NEXT (func 1) resumes at the saved PC + 4, after a
+            // faulting instruction the handler carried out itself
+            // (spec/03-core.md § 6.3).
             OP_ERET: begin
-                if (!in_trap) begin
+                if (!in_trap || dr.func > FUNC_ERET_NEXT) begin
                     tc_n    = TRAP_UNIMPLEMENTED;
                     cyc_inc = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     in_trap_n = 1'b0;
-                    pc_n      = trap_pc;
+                    pc_n      = (dr.func == FUNC_ERET_NEXT) ? trap_pc + 64'd4 : trap_pc;
                     ns        = S_FETCH;
                 end
             end

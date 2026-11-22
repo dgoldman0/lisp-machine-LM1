@@ -389,12 +389,16 @@ _COLLECTOR_WEIGHTS = [w * {Op.ALLOC_CONS: 4, Op.ALLOC: 2, Op.ALLOCV: 2, Op.ST_WB
                            Op.ST_CAR_CDR: 4, Op.CAS_TAGGED: 2, Op.LD: 2,
                            Op.LD_CAR_CDR: 2}.get(op, 1) for op, w in _OPS]
 
-# Trap handlers: one skips the instruction that trapped and goes on, one
-# retries it after changing a register.
+# Trap handlers: one jumps past the instruction that trapped and goes on,
+# still inside the handler, one returns past it with ERET.NEXT, as a handler
+# that carried the instruction out does, and one retries it after changing
+# a register.
 _SKIP_HANDLER = [encode_i(Op.SYS_INFO, 24, 4, 0),             # r24 = trap_pc
                  encode_i(Op.ADD_FIX_IMM, 24, 24, 4),          # past the instruction
                  encode_i(Op.JR, 24, 0, 0)]
+_NEXT_HANDLER = [encode_i(Op.LI, 24, 0, 0x55), encode_r(Op.ERET, 0, 0, 0, 1)]
 _RETRY_HANDLER = [encode_i(Op.LI, 24, 0, 0x77), encode_x(Op.ERET, 0)]
+_HANDLERS = {"skip": _SKIP_HANDLER, "next": _NEXT_HANDLER, "retry": _RETRY_HANDLER}
 _HANDLED = (0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x10, 0x20, 0x30, 0x42)
 
 
@@ -410,7 +414,8 @@ class _Stream:
         # Small nurseries, so that allocation overflows them and collects.
         self.nursery_size = rng.choice((0x180, 0x300, 0x600)) * threads
         self.code = [self.instruction() for _ in range(rng.randrange(16, S_CODE_WORDS))]
-        self.handler = "skip" if collector else rng.choices(("skip", "retry", None), (8, 1, 1))[0]
+        self.handler = "skip" if collector else rng.choices(
+            ("skip", "next", "retry", None), (5, 3, 1, 1))[0]
         # A small old-gen now and then, which promotions fill.
         self.oldgen_size = rng.choice((S_OLDGEN_SIZE, S_OLDGEN_SIZE, S_OLDGEN_SIZE, 0x400))
         self.card_table = collector or rng.random() < 0.5
@@ -509,6 +514,8 @@ class _Stream:
             return encode_i(op, pick(R_ANY + R_FIX), rng.randrange(16), 0)
         if op == Op.HALT_NOP:
             return encode_x(op, 0 if rng.random() < 0.2 else 1 << 21)
+        if op == Op.ERET:   # ERET, ERET.NEXT, or a func neither names
+            return encode_r(op, 0, 0, 0, rng.choice((0, 0, 1, 1, 2, 31)))
         if op == Op.SEND:
             return encode_s(op, pick((R_QUEUE,)), value, 0)
         if op == Op.RECV:
@@ -552,8 +559,7 @@ class _Stream:
     def _fill(self, tile, rng: random.Random) -> None:
         tile.mem.load_instructions(0, self.code)
         if self.handler:
-            tile.mem.load_instructions(
-                S_HANDLER, _SKIP_HANDLER if self.handler == "skip" else _RETRY_HANDLER)
+            tile.mem.load_instructions(S_HANDLER, _HANDLERS[self.handler])
         templates = tile.thread.header_templates
         templates[3] = make_header(0, 0, 42)
         # Objects an earlier collection left in old-gen, and young ones in

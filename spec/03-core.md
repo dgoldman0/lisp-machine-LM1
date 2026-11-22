@@ -194,6 +194,8 @@ From trap detection to first handler instruction: **3 cycles** (pipeline drain +
 
 `ERET` restores the PC from the trap-save register and resumes the thread there. A fault, the trap an instruction raises when its fast path fails, saves the faulting instruction's PC, so `ERET` runs that instruction again: once a handler has collected the nursery, installed an inline-cache entry or changed a register the instruction reads, the retry succeeds. An explicit `TRAP` saves the PC of the next instruction, so `ERET` resumes after it, as a return from a system call does.
 
+`ERET.NEXT` resumes at the saved PC + 4 instead. A handler that carries out the faulting instruction itself, as the runtime's generic `+` does for operands that are not fixnums and its bignum promotion does on overflow ([02-isa.md](02-isa.md) § 14.3), writes the instruction's result into its destination register and returns with `ERET.NEXT`, so the thread goes on after the instruction, with every other register as the handler left it. After an explicit `TRAP`, whose saved PC is already the next instruction's, `ERET.NEXT` skips that one. Both forms leave the handler, and either one outside a handler traps `TRAP_UNIMPLEMENTED`.
+
 ## 7. Core Area Budget (Illustrative)
 
 Rough die-area breakdown for one DOP core at a 5nm process:

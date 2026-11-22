@@ -599,10 +599,12 @@ Used with LI to construct 32-bit constants.
 
 ```
 opcode = 111100 (TRAP #code)
-opcode = 111101 (ERET)
+opcode = 111101 (ERET, ERET.NEXT — func selects which)
 opcode = 111110 (TILE.ID, THREAD.ID, CYCLE — func selects which)
 opcode = 111111 (HALT, NOP — func selects which)
 ```
+
+`ERET` and `ERET.NEXT` share their opcode and are told apart by Format R's `func`, bits 10:6: `00000` for `ERET`, which resumes at the saved PC, and `00001` for `ERET.NEXT`, which resumes at the saved PC + 4 ([03-core.md](03-core.md) § 6.3). The other payload bits are 0.
 
 ---
 
@@ -692,7 +694,8 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | PUSH.MULTI | 111001 | I | bank, mask |
 | POP.MULTI | 111010 | I | bank, mask |
 | TRAP | 111100 | X | trap code |
-| ERET | 111101 | X | — |
+| ERET | 111101 | R | func=0 |
+| ERET.NEXT | 111101 | R | func=1 |
 | TILE.ID etc | 111110 | X | func selects |
 | HALT / NOP | 111111 | X | func selects |
 

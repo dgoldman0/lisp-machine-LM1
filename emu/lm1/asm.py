@@ -33,6 +33,7 @@ from .decode import (
     FUNC_CARD_BASE, FUNC_CARD_SHIFT, FUNC_GEN_BOUNDARY,
     FUNC_QUEUE_BASE, FUNC_GC_STATUS,
     BR_T, BR_NIL, BR_FIX_LT, BR_FIX_EQ, BR_FIX_GT, BR_EQ,
+    FUNC_ERET, FUNC_ERET_NEXT,
 )
 from .word import make_header
 
@@ -692,7 +693,9 @@ class Assembler:
             code = self._eval_expr(args[0], ln)
             return encode_x(Op.TRAP, code & 0x03FF_FFFF)
         if mn == 'ERET':
-            return encode_x(Op.ERET, 0)
+            return encode_r(Op.ERET, 0, 0, 0, FUNC_ERET)
+        if mn == 'ERET.NEXT':
+            return encode_r(Op.ERET, 0, 0, 0, FUNC_ERET_NEXT)
         if mn == 'TILE.ID':
             rd = self._reg(args[0], ln)
             return encode_r(Op.SYS_INFO, rd, FUNC_TILE_ID, 0, 0)

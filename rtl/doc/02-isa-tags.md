@@ -255,7 +255,7 @@ These instructions issue commands through the GC engine interface. The command i
 | Opcode | Mnemonic | Purpose |
 |--------|----------|---------|
 | 60 | TRAP | Software trap (enter trap handler) + system configuration traps |
-| 61 | ERET | Exception return (return from trap handler) |
+| 61 | ERET | Exception return: func 0 to the saved PC, func 1 (ERET.NEXT) to the saved PC + 4 |
 | 62 | SYS.INFO | Read system info (tile ID, thread ID, perf counters) |
 | 63 | HALT/NOP | If `rd=0` → halt processor; else → no-op |
 

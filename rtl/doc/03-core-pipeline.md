@@ -675,7 +675,10 @@ without entering the trap handler path:
 A fault leaves `pc` at the faulting instruction when it enters
 `S_TRAP_LOOKUP`, so `ERET` runs that instruction again; an explicit `TRAP`
 advances `pc` first, so `ERET` resumes after it (spec/03-core.md § 6.3).
-If `ERET` is executed outside a trap handler, it traps `TRAP_UNIMPLEMENTED`.
+`ERET.NEXT`, `ERET` with func 1, sets `pc = trap_pc + 4` instead, for a
+handler that carried out the faulting instruction itself. If either is
+executed outside a trap handler, or `ERET` carries another func, it traps
+`TRAP_UNIMPLEMENTED`.
 
 ---
 

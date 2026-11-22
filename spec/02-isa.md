@@ -45,7 +45,7 @@ tag       — tag constant for type testing
 When a fast-path condition is not met, the instruction raises a **synchronous trap** with a defined trap code. The runtime's trap handler receives:
 
 - Trap code (identifying which slow path)
-- The PC that `ERET` resumes at: the faulting instruction's for a fault, so that `ERET` retries it, and the next instruction's for an explicit `TRAP` ([03-core.md](03-core.md) § 6.3)
+- The PC that `ERET` resumes at: the faulting instruction's for a fault, so that `ERET` retries it, and the next instruction's for an explicit `TRAP`; `ERET.NEXT` resumes at the instruction after the saved PC, for a handler that carried out the faulting instruction itself ([03-core.md](03-core.md) § 6.3)
 - All register state
 
 Trap codes are enumerated per instruction family below.
@@ -714,7 +714,8 @@ Every conditional branch tests one register, and every branch counts its offset 
 ### 11.6 System
 
 `TRAP #code` — explicit trap (syscall-like)  
-`ERET` — return from trap handler  
+`ERET` — return from trap handler to the saved PC  
+`ERET.NEXT` — return from trap handler to the saved PC + 4, after the instruction that faulted  
 `HALT` — halt the current hardware thread  
 `NOP` — no operation  
 `TILE.ID Rd` — read current tile ID  
@@ -795,6 +796,8 @@ With headerless cons:
     ; if either is not fixnum: traps to TRAP_NOT_FIXNUM → runtime does generic +
     ; if overflow: traps to TRAP_FIXNUM_OVERFLOW → runtime promotes to bignum
 ```
+
+The handler finds the `ADD.FIX` at the trap PC, computes the sum, writes it into the instruction's `Rd`, here `r3`, and returns with `ERET.NEXT`, which resumes after the `ADD.FIX` ([03-core.md](03-core.md) § 6.3). A plain `ERET` would run the `ADD.FIX` again, and it would trap again.
 
 ### 14.4 Generic function call `(foo obj arg1 arg2)`
 

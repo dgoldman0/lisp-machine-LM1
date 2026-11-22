@@ -14,6 +14,7 @@ from lm1.decode import (
     FUNC_CMP, FUNC_EQ,
     FUNC_PUSH, FUNC_POP,
     FUNC_TRAP_CAUSE, FUNC_TRAP_PC,
+    FUNC_ERET_NEXT,
     BR_T, BR_NIL, BR_FIX_EQ, BR_FIX_GT,
 )
 from lm1.word import (
@@ -259,7 +260,7 @@ def test_eret_resumes_correctly():
 def test_explicit_trap_resumes_after_itself():
     """ERET after an explicit TRAP resumes at the instruction after it, as
     a system call returns, while ERET after a fault retries the faulting
-    instruction.  A handler has no way to move trap_pc on itself."""
+    instruction."""
     emu = _emu()
     t = emu.thread
     handler_addr = 0x100
@@ -307,6 +308,61 @@ def test_nursery_overflow_runs_installed_handler():
     assert t.regs[20] == 0x77, "The installed handler did not run"
     assert t.trap_cause == TRAP_NURSERY_OVERFLOW and t.trap_pc == 8
     assert ref_address(t.regs[3]) == NURSERY_BASE
+
+
+@test("eret_next_resumes_after_the_fault", batch="phase3_trap")
+def test_eret_next_resumes_after_the_fault():
+    """ERET.NEXT resumes at the saved PC + 4, so a handler that carries out
+    the faulting instruction itself, as a generic + does, goes on after it
+    (spec/03-core.md section 6.3).  The fault still saves its own PC, and
+    ERET.NEXT leaves the handler as ERET does."""
+    emu = _emu()
+    t = emu.thread
+    handler_addr = 0x100
+    emu.mem.store_word(TRAP_TABLE + 0x01 * 8, handler_addr)   # TRAP_NOT_FIXNUM
+    t.trap_table_base = TRAP_TABLE
+    for i, insn in enumerate([
+        encode_r(Op.ARITH_RAW, 3, 1, 2, FUNC_ADD),             # r3 = r1 + r2, raw
+        encode_r(Op.ERET, 0, 0, 0, FUNC_ERET_NEXT),
+    ]):
+        emu.mem.store_u32(handler_addr + i * 4, insn)
+    _load_and_run(emu, [
+        encode_i(Op.LI, 1, 0, 7),                               # no fixnum
+        encode_i(Op.LI, 2, 0, tag_fixnum(5) & 0xFFFF),
+        encode_r(Op.ARITH_FIX, 3, 1, 2, FUNC_ADD_FIX),          # traps at 8
+        encode_i(Op.ADD_FIX_IMM, 4, 4, tag_fixnum(1) & 0xFFFF), # runs once
+        encode_x(Op.HALT_NOP, 0),
+    ], max_instructions=100)
+    assert t.halted, "ERET.NEXT went back to the ADD.FIX"
+    assert t.regs[3] == 17 and t.regs[4] == tag_fixnum(1)
+    assert t.trap_pc == 8 and t.trap_cause == 0x01 and not t.in_trap
+    assert emu.instruction_count == 7   # LI, LI, ADD.FIX, ADD, ERET.NEXT, ADD.FIX.IMM, HALT
+
+
+@test("eret_outside_handler_or_reserved_func_traps", batch="phase3_trap")
+def test_eret_outside_handler_or_reserved_func_traps():
+    """ERET.NEXT outside a handler traps as ERET does, and an ERET whose
+    func names neither ERET nor ERET.NEXT is reserved and traps
+    TRAP_UNIMPLEMENTED, leaving the handler's state as it was."""
+    emu = _emu()
+    try:
+        _load_and_run(emu, [encode_r(Op.ERET, 0, 0, 0, FUNC_ERET_NEXT),
+                            encode_x(Op.HALT_NOP, 0)], max_instructions=10)
+    except LM1Trap as trap:
+        assert trap.code == TRAP_UNIMPLEMENTED, f"Wrong trap: {trap.code:#x}"
+    else:
+        raise AssertionError("ERET.NEXT outside a handler returned")
+    emu = _emu()
+    t = emu.thread
+    t.in_trap, t.trap_pc = True, 0x200
+    try:
+        _load_and_run(emu, [encode_r(Op.ERET, 0, 0, 0, 2), encode_x(Op.HALT_NOP, 0)],
+                      max_instructions=10)
+    except LM1Trap as trap:
+        assert trap.code == TRAP_UNIMPLEMENTED, f"Wrong trap: {trap.code:#x}"
+    else:
+        raise AssertionError("ERET with func 2 returned")
+    assert t.in_trap and t.pc == 0, "the reserved ERET left the handler"
 
 
 # ===================================================================

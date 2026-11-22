@@ -34,6 +34,7 @@ from .decode import (
     FUNC_PUSH, FUNC_POP,
     FUNC_TILE_ID, FUNC_THREAD_ID, FUNC_CYCLE,
     FUNC_HALT, FUNC_NOP,
+    FUNC_ERET_NEXT,
 )
 from .traps import (
     LM1Trap,
@@ -462,13 +463,17 @@ class Emulator:
                 trap.resume_pc = next_pc
                 raise
 
-        # ---- ERET ----
+        # ---- ERET / ERET.NEXT ----
         elif op == Op.ERET:
-            # Restore PC from trap state and resume normal execution
+            # ERET resumes at the saved PC, so a fault runs again; ERET.NEXT
+            # resumes at the saved PC + 4, after a faulting instruction the
+            # handler carried out itself (spec/03-core.md section 6.3).
             if not t.in_trap:
                 raise LM1Trap(TRAP_UNIMPLEMENTED, "ERET outside of trap handler")
+            if inst.func > FUNC_ERET_NEXT:
+                raise LM1Trap(TRAP_UNIMPLEMENTED, f"ERET with func {inst.func}")
             t.in_trap = False
-            next_pc = t.trap_pc
+            next_pc = t.trap_pc + 4 if inst.func == FUNC_ERET_NEXT else t.trap_pc
 
         # ---- System info ----
         elif op == Op.SYS_INFO:

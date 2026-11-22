@@ -42,6 +42,9 @@ enum : uint32_t {
     EMU_TRAP_GC_ENGINE_CMD = 0x96, EMU_TRAP_DEBUG_PRINT = 0x9F
 };
 
+// ERET's func: 0 resumes at the saved PC, 1 (ERET.NEXT) after it.
+constexpr unsigned FUNC_ERET_NEXT = 1;
+
 struct Inst {
     unsigned op, rd, rs1, rs2, func;
     i64 imm16;     // sign-extended
@@ -452,9 +455,11 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         return f;
     }
     case OP_ERET:
-        if (!t_.in_trap) return raise(TRAP_UNIMPLEMENTED);
+        // ERET (func 0) resumes at the saved PC, so a fault runs again;
+        // ERET.NEXT (func 1) resumes after it (spec/03-core.md section 6.3).
+        if (!t_.in_trap || in.func > FUNC_ERET_NEXT) return raise(TRAP_UNIMPLEMENTED);
         t_.in_trap = false;
-        next_pc = t_.trap_pc;
+        next_pc = in.func == FUNC_ERET_NEXT ? t_.trap_pc + 4 : t_.trap_pc;
         return Flow::Next;
     case OP_SYS_INFO: {
         // Bits 25:21 name Rd, bits 20:16 select what is read.

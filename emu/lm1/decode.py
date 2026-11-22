@@ -150,6 +150,10 @@ FUNC_SCAN_POP_REF    = 14
 FUNC_HALT = 0
 FUNC_NOP  = 1
 
+# ERET sub-functions (func field): resume at the saved PC, or after it
+FUNC_ERET      = 0
+FUNC_ERET_NEXT = 1
+
 # ---------------------------------------------------------------------------
 # Decoded instruction
 # ---------------------------------------------------------------------------
