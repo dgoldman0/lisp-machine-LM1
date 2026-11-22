@@ -230,7 +230,7 @@ S_EXECUTE (ALLOC):
 
 S_ALLOC_HDR:   mem[aa] = header_word (with patched size)
 S_ALLOC_HDR_W: wait
-S_ALLOC_ZERO:  mem[aa + acnt*8] = 0  (zero one word)
+S_ALLOC_ZERO:  mem[ta] = 0  (zero one word; ta steps from aa + 8)
 S_ALLOC_ZERO_W: wait; acnt--; if acnt > 0 → S_ALLOC_ZERO
 S_ALLOC_INIT:  Type-specific init (cons car, closure code ptr)
 S_ALLOC_DONE:  Rd = make_ref(aa); NP += total_words * 8
@@ -238,7 +238,9 @@ S_ALLOC_DONE:  Rd = make_ref(aa); NP += total_words * 8
 ```
 
 The zero-fill loop runs one store per word. For a 4-word object, this is
-4 stores × 2 cycles = 8 cycles for the zero fill alone.
+4 stores × 2 cycles = 8 cycles for the zero fill alone. `acnt` counts the
+payload words left and is as wide as the header's 16-bit size field, so
+every payload word of any object a header can describe is zeroed.
 
 ### 10. Inline Cache Dispatch
 

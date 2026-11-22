@@ -18,6 +18,8 @@ Tests cover:
   42: Backward branches and BR.T edge cases
   45: MUL.FIX and DIV.FIX trap when the exact result leaves the fixnum range
   46: An ALU fault saves its own PC, so ERET retries it
+  47: ALLOCV and ALLOC.CLOSURE zero every payload word; ALLOCV's length is a fixnum
+  48: FAA traps on a word or a delta that is not a fixnum
 """
 
 import os
@@ -922,6 +924,171 @@ fix_handler:
     })
 
 
+# A handler that counts the trap in r20, keeps its cause in r22 and goes on
+# after the faulting instruction.  It uses r22 to r24.
+SKIP_HANDLER = """\
+skip_handler:
+    TRAP.CAUSE r22
+    LI  r23, 1
+    ADD r20, r20, r23
+    TRAP.PC r24
+    LI  r23, 4
+    ADD r24, r24, r23
+    JR  r24
+"""
+
+# The nursery's words before a program allocates, so that a word an
+# allocation leaves unzeroed shows.  0xBAD5 is odd, so no fixnum.
+NURSERY_FILL = 0xBAD5
+
+
+def nursery_garbage(words: int) -> str:
+    return f"    .org {NURSERY_BASE:#x}\n" + f"    .word {NURSERY_FILL:#x}\n" * words
+
+
+# ===========================================================================
+# Test 47: ALLOCV and ALLOC.CLOSURE zero their payload
+# ===========================================================================
+def gen_test_47():
+    source = f"""\
+    ; Test 47: ALLOCV zeroes every word of its vector and traps
+    ; TRAP_NOT_FIXNUM on a length that is not a fixnum (spec/02-isa.md
+    ; section 4.3), and ALLOC.CLOSURE zeroes all 31 environment slots of a
+    ; closure.  The nursery starts full of {NURSERY_FILL:#x} words.
+
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, skip_handler
+    LI  r15, {TRAP_TABLE + 0x01 * 8}   ; slot 0x01 = TRAP_NOT_FIXNUM
+    STR r15, r14, 0
+    LI  r20, 0
+
+    ; Template 2 makes vectors, template 1 closures
+    LI  r1, 2
+    LI32 r2, {make_header(2, 0, 2)}
+    TRAP 0x91
+    LI  r1, 1
+    LI32 r2, {make_header(4, 0, 1)}
+    TRAP 0x91
+
+    ; --- a vector of 40 elements: header, length, 40 elements ---
+    LI  r11, {tag_fixnum(40)}
+    ALLOCV r10, r11, 2
+    LI  r12, -8
+    AND r13, r10, r12     ; its address
+    LDR r4, r13, 0        ; the header
+    LDR r5, r13, 8        ; the length
+    LI  r12, {tag_fixnum(40)}   ; elements left
+    LI  r15, 16
+    ADD r13, r13, r15     ; element 0
+    LI  r3, 0
+vloop:
+    LDR r16, r13, 0
+    OR  r3, r3, r16       ; every element ORed into r3
+    LI  r15, 8
+    ADD r13, r13, r15
+    ADD.FIX.IMM r12, r12, -2   ; fixnum -1
+    BR.FIX.GT r12, vloop
+
+    ; --- a closure of 31 environment slots: header, code, 31 slots ---
+    LI  r21, 0x1234       ; its code entry
+    ALLOC.CLOSURE r17, r21, 31
+    LI  r12, -8
+    AND r13, r17, r12
+    LDR r7, r13, 0        ; the header
+    LDR r8, r13, 8        ; the code entry
+    LI  r12, {tag_fixnum(31)}   ; slots left
+    LI  r15, 16
+    ADD r13, r13, r15     ; slot 0
+    LI  r6, 0
+cloop:
+    LDR r16, r13, 0
+    OR  r6, r6, r16       ; every slot ORed into r6
+    LI  r15, 8
+    ADD r13, r13, r15
+    ADD.FIX.IMM r12, r12, -2   ; fixnum -1
+    BR.FIX.GT r12, cloop
+
+    ; --- a length that is not a fixnum: traps and allocates nothing ---
+    MOV r18, np
+    LI  r11, 7
+    ALLOCV r19, r11, 2
+    SUB r9, np, r18       ; 0: np unchanged
+    MOV r1, r20
+    MOV r2, r22
+    HALT
+
+{SKIP_HANDLER}
+{nursery_garbage(96)}"""
+    emit_test('47_alloc_zero', source, {
+        'r1': 1,                          # one trap
+        'r2': 0x01,                       # TRAP_NOT_FIXNUM
+        'r3': 0,                          # all 40 elements zero
+        'r4': make_header(2, 41, 2),      # size: the length and 40 elements
+        'r5': tag_fixnum(40),
+        'r6': 0,                          # all 31 slots zero
+        'r7': make_header(4, 32, 1),      # size: the code and 31 slots
+        'r8': 0x1234,
+        'r9': 0,                          # the trapped ALLOCV took no words
+    })
+
+
+# ===========================================================================
+# Test 48: FAA's tag check
+# ===========================================================================
+def gen_test_48():
+    source = f"""\
+    ; Test 48: FAA traps TRAP_NOT_FIXNUM when the word in memory or the
+    ; delta is not a fixnum (spec/02-isa.md section 8.5), and stores and
+    ; writes nothing then.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, skip_handler
+    LI  r15, {TRAP_TABLE + 0x01 * 8}   ; slot 0x01 = TRAP_NOT_FIXNUM
+    STR r15, r14, 0
+    LI  r20, 0
+    LI  r10, 0x2000
+
+    ; --- the word in memory is not a fixnum ---
+    LI  r11, 7
+    STR r10, r11, 0
+    LI  r12, {tag_fixnum(5)}
+    LI  r1, 0x77
+    FAA r1, r10, r12      ; traps
+    LDR r2, r10, 0        ; memory keeps 7
+
+    ; --- the delta is not a fixnum ---
+    LI  r11, {tag_fixnum(10)}
+    STR r10, r11, 0
+    LI  r13, 3
+    LI  r3, 0x77
+    FAA r3, r10, r13      ; traps
+    LDR r4, r10, 0        ; memory keeps fixnum 10
+
+    ; --- both fixnums ---
+    LI  r13, -8           ; fixnum -4
+    FAA r5, r10, r13      ; fixnum 10, the old word
+    LDR r6, r10, 0        ; fixnum 6
+    MOV r7, r20
+    MOV r8, r22
+    HALT
+
+{SKIP_HANDLER}"""
+    emit_test('48_faa_tags', source, {
+        'r1': 0x77,             # FAA trapped, r1 unwritten
+        'r2': 7,                # memory unchanged
+        'r3': 0x77,             # FAA trapped, r3 unwritten
+        'r4': tag_fixnum(10),   # memory unchanged
+        'r5': tag_fixnum(10),
+        'r6': tag_fixnum(6),
+        'r7': 2,                # two traps
+        'r8': 0x01,             # TRAP_NOT_FIXNUM
+    })
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -944,4 +1111,6 @@ if __name__ == '__main__':
     gen_test_42()
     gen_test_45()
     gen_test_46()
+    gen_test_47()
+    gen_test_48()
     print("Done. All gap tests generated.")

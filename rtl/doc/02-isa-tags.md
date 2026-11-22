@@ -160,7 +160,7 @@ All instructions are 32 bits wide. Four encoding formats:
 |--------|----------|--------|-----------|
 | 8 | ALLOC | I | Bump-allocate an object. Template from table, zero-fill payload. |
 | 9 | ALLOC.CONS | R | Allocate a 3-word cons cell (header + car + cdr). |
-| 10 | ALLOCV | I | Allocate a variable-length vector. |
+| 10 | ALLOCV | I | Allocate a variable-length vector: a fixnum length (else `NOT_FIXNUM`), the length word and the elements, all zero-filled before the length is written. |
 | 11 | ALLOC.CLOSURE | I | Allocate a closure (code pointer + environment). |
 
 **Hardware allocation sequence** (implemented as a multi-state FSM):

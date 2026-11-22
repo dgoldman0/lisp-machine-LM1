@@ -248,7 +248,7 @@ module lm1_control
 
     logic [XLEN-1:0] aa;                // alloc base address
     logic [15:0]     anw;               // alloc n_words
-    logic [4:0]      acnt;              // alloc zero-fill counter
+    logic [15:0]     acnt;              // alloc zero-fill counter: payload words left
     logic            acon;              // alloc is_cons
 
     logic [XLEN-1:0] trap_tbl;
@@ -279,7 +279,7 @@ module lm1_control
     logic            mdir_n;
     logic [XLEN-1:0] aa_n;
     logic [15:0]     anw_n;
-    logic [4:0]      acnt_n;
+    logic [15:0]     acnt_n;
     logic            acon_n;
     logic [XLEN-1:0] trap_tbl_n, trap_pc_n;
     logic [7:0]      trap_cause_n;
@@ -1039,7 +1039,7 @@ module lm1_control
                         ns      = S_TRAP_LOOKUP;
                     end else begin
                         aa_n      = np_v;
-                        acnt_n    = nw[4:0];
+                        acnt_n    = nw;
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
@@ -1068,7 +1068,7 @@ module lm1_control
                         ns      = S_TRAP_LOOKUP;
                     end else begin
                         aa_n      = np_v;
-                        acnt_n    = 5'd2;
+                        acnt_n    = 16'd2;
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
@@ -1084,7 +1084,13 @@ module lm1_control
             OP_ALLOCV: begin
                 rf_rd1_addr = banked_addr(cur_thread, REG_NP);
                 rf_rd2_addr = banked_addr(cur_thread, REG_NL);
-                begin
+                if (!is_fixnum(opb)) begin
+                    // The length must be a fixnum (spec/02-isa.md § 4.3)
+                    tc_n    = TRAP_NOT_FIXNUM;
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_TRAP_LOOKUP;
+                end else begin
                     logic [XLEN-1:0] np_v, nl_v, new_np;
                     logic signed [XLEN-1:0] len_s;
                     logic [15:0] nw;
@@ -1103,7 +1109,7 @@ module lm1_control
                         ns      = S_TRAP_LOOKUP;
                     end else begin
                         aa_n      = np_v;
-                        acnt_n    = nw[4:0];
+                        acnt_n    = nw;
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
@@ -1134,7 +1140,7 @@ module lm1_control
                         ns      = S_TRAP_LOOKUP;
                     end else begin
                         aa_n      = np_v;
-                        acnt_n    = nw[4:0];
+                        acnt_n    = nw;
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
@@ -1566,17 +1572,27 @@ module lm1_control
                 end
 
                 OP_FAA_FENCE: begin
-                    // old = mem[addr], store old + delta, return old
-                    rf_we     = 1'b1;
-                    rf_w_addr = banked_addr(cur_thread, dr.rd);
-                    rf_w_data = lsu_rdata;
-                    // Save computed new value for write-back via S_ATOMIC_STORE
-                    // (cannot issue store here — LSU is still in WAIT_RD,
-                    //  lsu_ready is 0, so the store would be silently dropped)
-                    td_n    = lsu_rdata + opc;
-                    cyc_inc = 1'b0;
-                    pc_n    = pc;
-                    ns      = S_ATOMIC_STORE;
+                    if (!is_fixnum(lsu_rdata) || !is_fixnum(opc)) begin
+                        // The word in memory and the delta must both be
+                        // fixnums (spec/02-isa.md § 8.5).  A fault: nothing
+                        // is stored or written, and the PC stays.
+                        tc_n    = TRAP_NOT_FIXNUM;
+                        cyc_inc = 1'b0;
+                        pc_n    = pc;
+                        ns      = S_TRAP_LOOKUP;
+                    end else begin
+                        // old = mem[addr], store old + delta, return old
+                        rf_we     = 1'b1;
+                        rf_w_addr = banked_addr(cur_thread, dr.rd);
+                        rf_w_data = lsu_rdata;
+                        // Save computed new value for write-back via S_ATOMIC_STORE
+                        // (cannot issue store here — LSU is still in WAIT_RD,
+                        //  lsu_ready is 0, so the store would be silently dropped)
+                        td_n    = lsu_rdata + opc;
+                        cyc_inc = 1'b0;
+                        pc_n    = pc;
+                        ns      = S_ATOMIC_STORE;
+                    end
                 end
 
                 OP_CAS_TAGGED: begin
@@ -1987,7 +2003,7 @@ module lm1_control
         S_ALLOC_HDR_W: begin
             if (lsu_valid) begin
                 ta_n = aa + 64'd8;
-                if (acnt == 5'd0)
+                if (acnt == 16'd0)
                     ns = S_ALLOC_INIT;
                 else
                     ns = S_ALLOC_ZERO;
@@ -2005,8 +2021,8 @@ module lm1_control
         S_ALLOC_ZERO_W: begin
             if (lsu_valid) begin
                 ta_n   = ta + 64'd8;
-                acnt_n = acnt - 5'd1;
-                if (acnt == 5'd1)
+                acnt_n = acnt - 16'd1;
+                if (acnt == 16'd1)
                     ns = S_ALLOC_INIT;
                 else
                     ns = S_ALLOC_ZERO;

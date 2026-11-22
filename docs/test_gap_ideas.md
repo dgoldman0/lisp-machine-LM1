@@ -78,15 +78,6 @@ uninitialized template slots.
 **Action:** Add a reset-sequencer that clears all 64 entries, or add a
 "template valid" bit and trap on access to invalid entries.
 
-### P0-8  FAA adds raw words without the fixnum check
-
-`S_MEM_WAIT` adds the delta to the loaded word whatever their tags.  The
-spec traps `TRAP_NOT_FIXNUM` when either is not a fixnum (spec/02-isa.md
-§ 8.5), as the emulator does.  Bench test 37 adds fixnums, on which the
-RTL's raw add and the spec agree; no bench test yet covers the trap.
-
-**Where:** `lm1_control.sv`, `OP_FAA_FENCE` in `S_MEM_WAIT`.
-
 ### P0-9  SEND and RECV take a queue number from the immediate
 
 The RTL and the assembler put a queue number in imm16 and SEND's value in
@@ -104,17 +95,23 @@ value 42 as a descriptor and traps `TRAP_QUEUE_FULL`.
 test 35, as the spec has them, or queue numbers in the spec, which gives up
 messages between tiles.
 
-### P0-10  ALLOCV zeroes at most 31 words and takes any length
+### P0-11  ALLOCV lengths that no header can describe
 
-`S_ALLOC_ZERO` counts the words to zero in the 5-bit `acnt`, which ALLOCV
-loads from `nw[4:0]`, so a vector of 31 or more elements gets only
-`(len + 1) mod 32` words zeroed and keeps whatever memory held in the
-rest, which a collection then reads as fields.  ALLOCV also uses its
-length without checking its tag, where the spec traps `TRAP_NOT_FIXNUM`
-for a length that is not a fixnum (spec/02-isa.md § 4.3), as the emulator
-does.
+A header's size field holds 16 bits, so a vector of 65,535 or more
+elements needs the extended header (spec/01-object-model.md § 3.5), which
+the product design has yet to define, and spec/02-isa.md § 4.3 gives no
+answer for a negative length.  The RTL counts the vector's words in 16
+bits, so a length of 65,535 or more allocates a smaller, wrapped object,
+while both models allocate the full size and so trap
+`TRAP_NURSERY_OVERFLOW` in a nursery of today's sizes.  A length of -1
+makes all three allocate the header alone and write the length into the
+word after it, and other negative lengths make the RTL and the models
+allocate different wrong sizes.  No bench test covers either.
 
-**Where:** `lm1_control.sv`, `OP_ALLOCV` and `S_ALLOC_ZERO`.
+**Where:** `lm1_control.sv` (`OP_ALLOCV`), `emu/lm1/execute.py` and
+`chiplet/src/execute.cpp` (ALLOCV).
+**Action:** give the spec ALLOCV's range of lengths, then trap outside it
+in all three.
 
 ---
 

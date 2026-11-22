@@ -441,8 +441,10 @@ yet implemented).
 ```
 FSM sequence:
   S_MEM:      Load old value from mem[addr]
-  S_MEM_WAIT: Write (old + delta) to mem[addr]
-              Rd = old value
+  S_MEM_WAIT: If old value or delta is not a fixnum: trap NOT_FIXNUM,
+              storing and writing nothing
+              Else: Rd = old value
+  S_ATOMIC_STORE: Write (old + delta) to mem[addr]
 ```
 
 Same atomicity semantics as CAS — atomic within tile, requires
