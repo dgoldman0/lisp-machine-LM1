@@ -26,6 +26,7 @@ from lm1.word import (
 )
 from lm1.traps import (
     LM1Trap, TRAP_NURSERY_OVERFLOW, TRAP_DIVIDE_BY_ZERO, TRAP_UNIMPLEMENTED,
+    TRAP_STACK_OVERFLOW, TRAP_USER,
 )
 
 
@@ -363,6 +364,100 @@ def test_eret_outside_handler_or_reserved_func_traps():
     else:
         raise AssertionError("ERET with func 2 returned")
     assert t.in_trap and t.pc == 0, "the reserved ERET left the handler"
+
+
+# Encodings whose selecting field names no instruction (spec/07-encoding.md
+# section 2), and an opcode and system trap codes none has.
+_RESERVED = (
+    ("ARITH.FIX func 4", encode_r(Op.ARITH_FIX, 3, 1, 2, 4)),
+    ("CMP.TAGGED func 2", encode_r(Op.CMP_TAGGED, 3, 1, 2, 2)),
+    ("LD.CAR/CDR imm 2", encode_i(Op.LD_CAR_CDR, 3, 4, 2)),
+    ("ST.CAR/CDR field 2", encode_s(Op.ST_CAR_CDR, 4, 1, 2)),
+    ("FAA func 1", encode_r(Op.FAA_FENCE, 3, 5, 1, 1)),
+    ("ARITH.RAW func 5", encode_r(Op.ARITH_RAW, 3, 1, 2, 5)),
+    ("BITWISE func 7", encode_r(Op.BITWISE, 3, 1, 2, 7)),
+    ("BR.COND cond 6", encode_b(Op.BR_COND, 1, 6, 2)),
+    ("PUSH/POP func 2", encode_r(Op.PUSH_POP, 3, 0, 0, 2)),
+    ("PUSH.MULTI bank 2", encode_i(Op.PUSH_MULTI, 2, 0, 0x0001)),
+    ("POP.MULTI bank 31", encode_i(Op.POP_MULTI, 31, 0, 0xFFFF)),
+    ("ERET func 2", encode_r(Op.ERET, 0, 0, 0, 2)),
+    ("SYS.INFO sub 15", encode_i(Op.SYS_INFO, 3, 15, 0)),
+    ("HALT/NOP selector 2", encode_x(Op.HALT_NOP, 2 << 21)),
+    ("TRAP 0x96", encode_x(Op.TRAP, 0x96)),
+    ("TRAP 0xA0", encode_x(Op.TRAP, 0xA0)),
+    ("opcode 000111", encode_r(0b000111, 3, 1, 2, 0)),
+    ("opcode 010101", encode_r(0b010101, 3, 1, 2, 0)),
+    ("opcode 010110", encode_r(0b010110, 3, 1, 2, 0)),
+)
+
+
+@test("reserved_encodings_trap_unimplemented", batch="phase3_trap")
+def test_reserved_encodings_trap_unimplemented():
+    """Each reserved encoding traps TRAP_UNIMPLEMENTED, 0x7E, before it does
+    anything: its destination, SP, memory and the PC stay as they were, and
+    the handler sees the cause and the instruction's own PC."""
+    for what, word in _RESERVED:
+        emu = _emu()
+        t = emu.thread
+        handler_addr = 0x100
+        emu.mem.store_word(TRAP_TABLE + TRAP_UNIMPLEMENTED * 8, handler_addr)
+        t.trap_table_base = TRAP_TABLE
+        emu.mem.store_u32(handler_addr, encode_x(Op.HALT_NOP, 0))
+        cons = make_ref(0x8000, cons=True)
+        emu.mem.store_word(0x8000, make_header(HDR_CONS, 2, 0))
+        t.regs[1], t.regs[2], t.regs[3] = tag_fixnum(3), tag_fixnum(4), 0x77
+        t.regs[4], t.regs[5] = cons, 0x9000
+        emu.mem.store_word(0x9000, tag_fixnum(10))
+        # The words a wrongly decoded store, FAA or push would write.
+        watched = [0x8000, 0x8008, 0x8010, 0x8018, 0x8020, 0x9000] + \
+                  [STACK_TOP - 8 * i for i in range(1, 17)]
+        before = [emu.mem.load_word(a) for a in watched]
+        _load_and_run(emu, [encode_i(Op.LI, 6, 0, 0x66), word,
+                            encode_x(Op.HALT_NOP, 0)], max_instructions=10)
+        assert TRAP_UNIMPLEMENTED == 0x7E
+        assert t.trap_cause == TRAP_UNIMPLEMENTED, f"{what}: cause {t.trap_cause:#x}"
+        assert t.trap_pc == 4, f"{what}: saved PC {t.trap_pc:#x}"
+        assert t.regs[3] == 0x77 and t.sp == STACK_TOP, f"{what} changed a register"
+        assert t.regs[1:6] == [tag_fixnum(3), tag_fixnum(4), 0x77, cons, 0x9000], what
+        assert [emu.mem.load_word(a) for a in watched] == before, f"{what} wrote memory"
+
+
+@test("system_trap_codes", batch="phase3_trap")
+def test_system_trap_codes():
+    """A TRAP code below 0x80 vectors through the trap table and resumes
+    after the TRAP, TRAP_STACK_OVERFLOW (0x70) and TRAP_USER (0x7F) among
+    them; from 0x80 up the core carries the code out itself, so 0x95
+    records the queue base that SYS_INFO 8 reads back, and a code no system
+    trap has faults with TRAP_UNIMPLEMENTED at the TRAP's own PC."""
+    emu = _emu()
+    t = emu.thread
+    handler_addr = 0x100
+    for code in (TRAP_STACK_OVERFLOW, TRAP_USER, TRAP_UNIMPLEMENTED):
+        emu.mem.store_word(TRAP_TABLE + code * 8, handler_addr)
+    t.trap_table_base = TRAP_TABLE
+    for i, insn in enumerate([
+        encode_i(Op.SYS_INFO, 20, FUNC_TRAP_CAUSE, 0),
+        encode_r(Op.ARITH_RAW, 21, 21, 20, FUNC_ADD),   # r21 += cause
+        encode_i(Op.SYS_INFO, 22, FUNC_TRAP_PC, 0),     # the last saved PC
+        encode_r(Op.ERET, 0, 0, 0, FUNC_ERET_NEXT),
+    ]):
+        emu.mem.store_u32(handler_addr + i * 4, insn)
+    assert (TRAP_STACK_OVERFLOW, TRAP_USER) == (0x70, 0x7F)
+    _load_and_run(emu, [
+        encode_x(Op.TRAP, TRAP_STACK_OVERFLOW),   # 0x00: resumes at 0x08
+        encode_i(Op.LI, 9, 0, 0x99),               # skipped by ERET.NEXT
+        encode_x(Op.TRAP, TRAP_USER),              # 0x08: resumes at 0x10
+        encode_i(Op.LI, 9, 0, 0x99),               # skipped
+        encode_i(Op.LUI, 1, 0, 0x0001),            # 0x10: r1 = 0x10000
+        encode_x(Op.TRAP, 0x95),                   # SET_QUEUE_BASE
+        encode_i(Op.SYS_INFO, 7, 8, 0),            # QUEUE_BASE
+        encode_x(Op.TRAP, 0xA0),                   # 0x1C: reserved, a fault
+        encode_x(Op.HALT_NOP, 0),
+    ], max_instructions=100)
+    assert t.halted and t.regs[9] == 0, "ERET.NEXT after an explicit TRAP skips one"
+    assert t.regs[21] == 0x70 + 0x7F + 0x7E
+    assert t.regs[22] == 0x1C, f"the reserved code saved {t.regs[22]:#x}"
+    assert t.regs[7] == 0x10000, f"QUEUE_BASE read {t.regs[7]:#x}"
 
 
 # ===================================================================

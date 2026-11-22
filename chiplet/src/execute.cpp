@@ -34,17 +34,19 @@ enum Op : unsigned {
     OP_TRAP = 60, OP_ERET = 61, OP_SYS_INFO = 62, OP_HALT_NOP = 63
 };
 
-// Emulator I/O and configuration traps (design/emulator.md section 7).
+// System traps: the core's configuration traps, and the emulator's bridge
+// to its host's console and block device (design/emulator.md section 7).
 enum : uint32_t {
     EMU_TRAP_PUTCHAR = 0x80, EMU_TRAP_GETCHAR = 0x81, EMU_TRAP_BLOCK_IO = 0x82,
     EMU_TRAP_MEM_BYTE = 0x84, EMU_TRAP_SET_TRAP_TABLE = 0x90, EMU_TRAP_SET_TEMPLATE = 0x91,
     EMU_TRAP_SET_CARD_BASE = 0x92, EMU_TRAP_SET_CARD_SHIFT = 0x93,
     EMU_TRAP_SET_GEN_BOUNDARY = 0x94, EMU_TRAP_SET_QUEUE_BASE = 0x95,
-    EMU_TRAP_GC_ENGINE_CMD = 0x96, EMU_TRAP_DEBUG_PRINT = 0x9F
+    EMU_TRAP_DEBUG_PRINT = 0x9F
 };
 
 // ERET's func: 0 resumes at the saved PC, 1 (ERET.NEXT) after it.
 constexpr unsigned FUNC_ERET_NEXT = 1;
+constexpr unsigned FUNC_FENCE_GC = 0x1F;
 
 struct Inst {
     unsigned op, rd, rs1, rs2, func;
@@ -62,6 +64,28 @@ inline Inst decode(u64 raw) {
     d.imm16 = int16_t(uint16_t(raw & 0xFFFF));
     d.raw26 = raw & 0x03FFFFFFull;
     return d;
+}
+
+// Whether an instruction carries a value of a selecting field that names no
+// instruction (spec/07-encoding.md section 2, emu/lm1/decode.py reserved):
+// it traps TRAP_UNIMPLEMENTED before it does anything.
+inline bool reserved(const Inst &in) {
+    switch (in.op) {
+    case OP_ARITH_FIX: return in.func > 3;
+    case OP_CMP_TAGGED: return in.func > 1;
+    case OP_LD_CAR_CDR: return (u64(in.imm16) & 0xFFFF) > 1;
+    case OP_ST_CAR_CDR: return in.rs2 > 1;
+    case OP_FAA_FENCE: return in.func != 0 && in.func != FUNC_FENCE_GC;
+    case OP_ARITH_RAW: return in.func > 4;
+    case OP_BITWISE: return in.func > 6;
+    case OP_BR_COND: return in.rs1 > 5;
+    case OP_PUSH_POP: return in.func > 1;
+    case OP_PUSH_MULTI: case OP_POP_MULTI: return in.rd > 1;  // two banks of 16
+    case OP_ERET: return in.func > FUNC_ERET_NEXT;
+    case OP_SYS_INFO: return in.rs1 > 14;
+    case OP_HALT_NOP: return in.rd > 1;
+    default: return false;
+    }
 }
 
 // The tagged-fixnum value of a queue descriptor, or the raw word when it
@@ -90,7 +114,7 @@ private:
     Flow alloc_cons(unsigned rd, u64 car, u64 cdr);
     Flow push_frame(u64 return_addr);
     Flow pop_frame(u64 &return_addr);
-    Flow handle_trap(uint32_t code);
+    Flow system_trap(uint32_t code);
     Flow block_io();
     Flow shape_of(u64 receiver, u64 &shape);
 
@@ -221,9 +245,10 @@ Flow Executor::block_io() {
     return Flow::Next;
 }
 
-// TRAP #code: the emulator's I/O and configuration traps, and otherwise a
-// trap for the trap table (Emulator._handle_trap).
-Flow Executor::handle_trap(uint32_t code) {
+// TRAP #code for a code from 0x80 up (Emulator._system_trap): the
+// configuration traps and the emulator's host bridge; any other code is
+// reserved and traps TRAP_UNIMPLEMENTED, a fault that saves the TRAP's PC.
+Flow Executor::system_trap(uint32_t code) {
     u64 *r = t_.regs;
     switch (code) {
     case EMU_TRAP_PUTCHAR: {
@@ -263,8 +288,8 @@ Flow Executor::handle_trap(uint32_t code) {
     case EMU_TRAP_SET_GEN_BOUNDARY:
         tile_.gen_boundary = r[1];
         return Flow::Next;
-    case EMU_TRAP_SET_QUEUE_BASE:  // queues are modeled, not placed in memory
-    case EMU_TRAP_GC_ENGINE_CMD:   // the movement engines are not modeled yet
+    case EMU_TRAP_SET_QUEUE_BASE:  // recorded; the modeled queues are not in memory
+        tile_.queue_base = r[1];
         return Flow::Next;
     case EMU_TRAP_MEM_BYTE: {
         // r1 = 0 to load or 1 to store, r2 = address, r3 = offset, r4 = value
@@ -299,12 +324,13 @@ Flow Executor::handle_trap(uint32_t code) {
         return Flow::Next;
     }
     default:
-        return raise(code);
+        return raise(TRAP_UNIMPLEMENTED);
     }
 }
 
 Flow Executor::execute(const Inst &in, u64 &next_pc) {
     u64 *r = t_.regs;
+    if (reserved(in)) return raise(TRAP_UNIMPLEMENTED);
     switch (in.op) {
 
     // ---- Scalar arithmetic (raw, untagged 64-bit) ----
@@ -418,8 +444,7 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         }
         return Flow::Next;
     case OP_PUSH_MULTI: {
-        // Format I: rd = bank of 16 registers, imm16 = register mask.
-        if (in.rd > 1) return raise(TRAP_UNIMPLEMENTED);
+        // Format I: rd = bank of 16 registers, 0 or 1, imm16 = register mask.
         unsigned base = in.rd * 16;
         u64 mask = u64(in.imm16) & 0xFFFF;
         for (unsigned i = 0; i < 16; ++i) {
@@ -431,7 +456,6 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         return Flow::Next;
     }
     case OP_POP_MULTI: {
-        if (in.rd > 1) return raise(TRAP_UNIMPLEMENTED);
         unsigned base = in.rd * 16;
         u64 mask = u64(in.imm16) & 0xFFFF;
         for (int i = 15; i >= 0; --i) {
@@ -447,18 +471,19 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
 
     // ---- System ----
     case OP_TRAP: {
-        Flow f = handle_trap(uint32_t(in.raw26 & 0xFF));
-        if (f == Flow::Trap) {
-            // An explicit trap resumes after itself, as a system call returns.
-            m_.trap.resumes = true;
-            m_.trap.resume_pc = next_pc;
-        }
-        return f;
+        uint32_t code = uint32_t(in.raw26 & 0xFF);
+        if (code >= SYSTEM_TRAPS) return system_trap(code);
+        // A trap for the trap table: the instruction's whole work, so it
+        // resumes after itself, as a system call returns.
+        raise(code);
+        m_.trap.resumes = true;
+        m_.trap.resume_pc = next_pc;
+        return Flow::Trap;
     }
     case OP_ERET:
         // ERET (func 0) resumes at the saved PC, so a fault runs again;
         // ERET.NEXT (func 1) resumes after it (spec/03-core.md section 6.3).
-        if (!t_.in_trap || in.func > FUNC_ERET_NEXT) return raise(TRAP_UNIMPLEMENTED);
+        if (!t_.in_trap) return raise(TRAP_UNIMPLEMENTED);
         t_.in_trap = false;
         next_pc = in.func == FUNC_ERET_NEXT ? t_.trap_pc + 4 : t_.trap_pc;
         return Flow::Next;
@@ -474,11 +499,10 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         case 5: v = tile_.card_table_base; break;
         case 6: v = tile_.card_shift; break;
         case 7: v = tile_.gen_boundary; break;
-        case 8: case 9: case 10: case 11: case 12: case 13: case 14:
-            v = 0;  // queue base, GC status, counters and scan results: not modeled
-            break;
+        case 8: v = tile_.queue_base; break;
         default:
-            return Flow::Next;
+            v = 0;  // GC status, counters and scan results: no engines are modeled
+            break;
         }
         r[in.rd] = v;
         return Flow::Next;
@@ -798,6 +822,7 @@ void Model::init_tiles() {
         tile.gc_count = 0;
         tile.instruction_count = 0;
         tile.card_table_base = 0;
+        tile.queue_base = 0;
         tile.ic.clear();
         tile.nursery_base = config.nursery_base;
         tile.nursery_size = config.nursery_size;
@@ -898,7 +923,7 @@ Flow Model::step(Tile &tile, Thread &t) {
             Flow c = collect(tile);
             if (c != Flow::Next) return c;
             next_pc = t.pc;
-        } else if (t.trap_table_base != 0 && code < 0x80) {
+        } else if (t.trap_table_base != 0 && code < SYSTEM_TRAPS) {
             t.trap_pc = trap.resumes ? trap.resume_pc : t.pc;
             t.trap_cause = code;
             t.in_trap = true;

@@ -17,6 +17,7 @@ This document specifies the binary encoding of LM-1 instructions. All instructio
 3. **Orthogonal register fields.** Register specifiers are always 5 bits, always in the same positions when present.
 4. **Immediates are sign-extended** unless otherwise noted.
 5. **No condition codes.** Conditional branches test a register, not flags.
+6. **Reserved encodings trap.** A field that chooses among instructions, the opcode, a `func`, a branch's `cond`, a bank, a sub-code or a selector, holds only the values this document assigns. Any other value is reserved: executing it raises `TRAP_UNIMPLEMENTED` ([02-isa.md](02-isa.md) § 12) before the instruction does anything else, so a later revision can assign the value without changing what a program written today does. A field this document marks reserved or 0 in an instruction's payload chooses nothing; the hardware ignores it, and software writes 0 there.
 
 ## 3. Top-Level Format
 
@@ -233,16 +234,14 @@ opcode = 001000
 `words`: object size in words (0–31). For larger objects, use `ALLOCV`.  
 `header_template_index`: index into a per-tile/per-thread header-template table (16-bit), which stores the full 64-bit header word. This keeps the instruction compact.
 
-#### `ALLOC.CONS Rd` — Format X (minimalist)
+#### `ALLOC.CONS Rd, Rs_car, Rs_cdr` — Format R
 
 ```
 opcode = 001001
-
- 25  21 20                                   0
-┌──────┬────────────────────────────────────────┐
-│  Rd  │              (reserved, 0)              │
-│  (5) │                 (21)                    │
-└──────┴────────────────────────────────────────┘
+Rd = destination
+Rs1 = Rs_car (a field of 0 gives nil)
+Rs2 = Rs_cdr (a field of 0 gives nil)
+func = 0
 ```
 
 #### `ALLOCV Rd, Rs_length, #header_template` — Format X
@@ -378,6 +377,14 @@ opcode = 011101
 ```
 opcode = 011110
 (same layout as CALL.DIRECT)
+```
+
+#### `JR Rs` — Format I
+
+```
+opcode = 011111
+Rd (25:21) = Rs, the register holding the target
+bits 20:0 = 0
 ```
 
 #### `CALL.REG Rs` — Format I
@@ -592,8 +599,19 @@ imm16 = register mask, bit i for the bank's register i
 opcode = 110111
 Rd = destination
 Rs1 = 0 (ignored)
-imm16 = 16-bit value (sign-extended to 64 bits and tagged as fixnum? or raw? — depends on context)
+imm16 = 16-bit value, sign-extended to 64 bits and written as it is, untagged
 ```
+
+#### Long Immediate: `LI32 Rd, #imm32` — Format I and a word
+
+```
+opcode = 111011
+Rd = destination
+bits 20:0 = 0
+the next 32-bit word = imm32, zero-extended to 64 bits
+```
+
+`LI32` is two words long: the PC moves past its immediate.
 
 #### Upper Immediate: `LUI Rd, #imm16` — Format I
 
@@ -606,11 +624,13 @@ Used with LI to construct 32-bit constants.
 #### System — Format X
 
 ```
-opcode = 111100 (TRAP #code)
+opcode = 111100 (TRAP #code): bits 7:0 = the code, bits 25:8 = 0
 opcode = 111101 (ERET, ERET.NEXT — func selects which)
-opcode = 111110 (TILE.ID, THREAD.ID, CYCLE — func selects which)
-opcode = 111111 (HALT, NOP — func selects which)
+opcode = 111110 (SYS_INFO: TILE.ID, THREAD.ID, CYCLE and the other reads)
+opcode = 111111 (HALT, NOP — bits 25:21 select which)
 ```
+
+`SYS_INFO Rd, #sub` is Format I: `Rd` in bits 25:21, the sub-code in bits 20:16 ([02-isa.md](02-isa.md) § 11.6 lists them), and for sub-code 10 the performance counter's number in bits 4:0 of `imm16`. Sub-codes 15 to 31 are reserved. `HALT` and `NOP` are told apart by bits 25:21: `00000` for `HALT`, `00001` for `NOP`, other values reserved; bits 20:0 are 0.
 
 `ERET` and `ERET.NEXT` share their opcode and are told apart by Format R's `func`, bits 10:6: `00000` for `ERET`, which resumes at the saved PC, and `00001` for `ERET.NEXT`, which resumes at the saved PC + 4 ([03-core.md](03-core.md) § 6.3). The other payload bits are 0.
 
@@ -675,7 +695,7 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | LDW | 000101 | I | Rd, Rs, offset |
 | STW | 000110 | I | Rs, Rt, offset |
 | ALLOC | 001000 | X | Rd, words, template |
-| ALLOC.CONS | 001001 | X | Rd |
+| ALLOC.CONS | 001001 | R | Rd, Rs_car, Rs_cdr |
 | ALLOCV | 001010 | X | Rd, Rs_len, template |
 | ALLOC.CLOSURE | 001011 | X | Rd, Rs_code, env_size |
 | LD | 010000 | I | Rd, Rs, field |
@@ -691,6 +711,7 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | RET | 011100 | X | — |
 | TAILCALL.IC | 011101 | I | (as CALL.IC) |
 | TAILCALL.DIRECT | 011110 | I | (as CALL.DIRECT) |
+| JR | 011111 | I | Rs |
 | CALL.REG | 010111 | I | Rs |
 | PREFETCH.REF | 100000 | I | Rs |
 | PREFETCH.FIELD | 100001 | I | Rs, field |
@@ -720,11 +741,12 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | LUI | 111000 | I | Rd, imm16 |
 | PUSH.MULTI | 111001 | I | bank, mask |
 | POP.MULTI | 111010 | I | bank, mask |
+| LI32 | 111011 | I | Rd; the next word is the immediate |
 | TRAP | 111100 | X | trap code |
 | ERET | 111101 | R | func=0 |
 | ERET.NEXT | 111101 | R | func=1 |
-| TILE.ID etc | 111110 | X | func selects |
-| HALT / NOP | 111111 | X | func selects |
+| SYS_INFO (TILE.ID etc) | 111110 | I | Rd, sub-code in bits 20:16 |
+| HALT / NOP | 111111 | X | bits 25:21 select |
 
 ---
 

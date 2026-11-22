@@ -271,6 +271,14 @@ These instructions issue commands through the GC engine interface. The command i
 | 0x94 | SET_GEN_BOUNDARY | Nursery/old-gen boundary address |
 | 0x95 | SET_QUEUE_BASE | Message queue base address |
 
+Every other code from 0x80 up is reserved and traps `TRAP_UNIMPLEMENTED`
+at the `TRAP`'s own PC.
+
+**Reserved encodings** trap `TRAP_UNIMPLEMENTED` in `S_EXECUTE` before the
+instruction does anything (spec/07-encoding.md § 2): `reserved_encoding`
+in `lm1_control.sv` lists each selecting field's unassigned values, and the
+dispatch's default case takes an opcode no instruction has.
+
 ---
 
 ## Register Conventions
@@ -311,4 +319,9 @@ The LM-1 implements a vectored trap system:
 | 0x40 | Engine | ENGINE_BUSY |
 | 0x50 | Barrier | BARRIER_OVERFLOW |
 | 0x60 | Security | CAPABILITY_VIOLATION |
-| 0xFE | Fallback | UNIMPLEMENTED (unknown opcode) |
+| 0x70 | Stack | STACK_OVERFLOW (raised by an explicit TRAP) |
+| 0x7E | Fallback | UNIMPLEMENTED (reserved encoding, unknown opcode or system code, ERET outside a handler) |
+| 0x7F | User | USER (a user program's explicit TRAP into the runtime) |
+
+Codes below 0x80 vector through the trap table; codes from 0x80 up are the
+system traps above, which never vector.

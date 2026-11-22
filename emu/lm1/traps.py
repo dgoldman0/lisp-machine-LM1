@@ -33,19 +33,16 @@ TRAP_BARRIER_OVERFLOW = 0x50
 # Family 8 — capability
 TRAP_CAPABILITY_VIOLATION = 0x60
 
-# Stack
-TRAP_STACK_OVERFLOW   = 0x80
+# The thread's own: the stack check's code and the user's calls into the
+# runtime, both raised by explicit TRAPs, and an encoding no instruction has
+TRAP_STACK_OVERFLOW   = 0x70
+TRAP_UNIMPLEMENTED    = 0x7E
+TRAP_USER             = 0x7F
 
-# System
-TRAP_UNIMPLEMENTED    = 0xFE
-TRAP_USER             = 0xFF
-
-# Emulator-specific I/O traps (not ISA — emulator bridge)
-TRAP_IO_PUTCHAR = 0x80  # NOTE: shares code with TRAP_STACK_OVERFLOW in spec;
-                        # in practice the emulator uses explicit TRAP #code
-                        # so the code in the instruction distinguishes them.
-# We'll use the instruction-embedded code, not the above constants,
-# for the emulator I/O bridge.  See execute.py.
+# Codes below 0x80 vector through the trap table.  TRAP #code with a code
+# from 0x80 up is a system trap the core carries out itself, never vectored:
+# 0x90 to 0x95 configure the core, and the emulator's bridge to its host,
+# console and block device, uses 0x80 to 0x82, 0x84 and 0x9F (execute.py).
 
 # Human-readable names
 _NAMES: dict[int, str] = {
@@ -63,9 +60,9 @@ _NAMES: dict[int, str] = {
     0x40: "TRAP_ENGINE_BUSY",
     0x50: "TRAP_BARRIER_OVERFLOW",
     0x60: "TRAP_CAPABILITY_VIOLATION",
-    0x80: "TRAP_STACK_OVERFLOW",
-    0xFE: "TRAP_UNIMPLEMENTED",
-    0xFF: "TRAP_USER",
+    0x70: "TRAP_STACK_OVERFLOW",
+    0x7E: "TRAP_UNIMPLEMENTED",
+    0x7F: "TRAP_USER",
 }
 
 

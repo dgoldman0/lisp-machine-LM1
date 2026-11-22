@@ -158,6 +158,10 @@ package lm1_pkg;
     parameter logic [FUNC_W-1:0] FUNC_PUSH = 5'd0;
     parameter logic [FUNC_W-1:0] FUNC_POP  = 5'd1;
 
+    // HALT_NOP selector  (bits [25:21])
+    parameter logic [REG_IDX_W-1:0] SEL_HALT = 5'd0;
+    parameter logic [REG_IDX_W-1:0] SEL_NOP  = 5'd1;
+
     // FAA_FENCE: func == 0x1F means FENCE.GC, else FAA
     parameter logic [FUNC_W-1:0] FUNC_FENCE_GC = 5'h1F;
 
@@ -280,10 +284,14 @@ package lm1_pkg;
     parameter logic [7:0] TRAP_ENGINE_BUSY      = 8'h40;
     parameter logic [7:0] TRAP_BARRIER_OVERFLOW = 8'h50;
     parameter logic [7:0] TRAP_CAPABILITY_VIOL  = 8'h60;
-    parameter logic [7:0] TRAP_UNIMPLEMENTED    = 8'hFE;
+    parameter logic [7:0] TRAP_STACK_OVERFLOW   = 8'h70;  // raised by explicit TRAPs
+    parameter logic [7:0] TRAP_UNIMPLEMENTED    = 8'h7E;  // a reserved encoding
+    parameter logic [7:0] TRAP_USER             = 8'h7F;  // raised by explicit TRAPs
 
     // ---------------------------------------------------------------
-    // System-trap sub-codes  (OP_TRAP with imm[7] = 1)
+    // System-trap codes  (OP_TRAP with imm[7] = 1), carried out by the
+    // core and never vectored; every other code from 0x80 up is reserved
+    // and traps TRAP_UNIMPLEMENTED (spec/02-isa.md § 11.6)
     //
     //   0x90  SET_TRAP_TABLE   — r1 → trap_tbl
     //   0x91  SET_TEMPLATE     — tmpl[r1[7:0]] ← r2
@@ -291,7 +299,6 @@ package lm1_pkg;
     //   0x93  SET_CARD_SHIFT   — r1[5:0] → card_shift (default 6 = 64-byte cards)
     //   0x94  SET_GEN_BOUNDARY — r1 → gen_boundary (addrs < gen_boundary are nursery)
     //   0x95  SET_QUEUE_BASE   — r1 → message-queue base address
-    //   0x96  GC_ENGINE_CMD    — enqueue a GC engine command (used by ENQ.*)
     // ---------------------------------------------------------------
     parameter logic [7:0] SYS_SET_TRAP_TABLE   = 8'h90;
     parameter logic [7:0] SYS_SET_TEMPLATE     = 8'h91;
@@ -299,7 +306,6 @@ package lm1_pkg;
     parameter logic [7:0] SYS_SET_CARD_SHIFT   = 8'h93;
     parameter logic [7:0] SYS_SET_GEN_BOUNDARY = 8'h94;
     parameter logic [7:0] SYS_SET_QUEUE_BASE   = 8'h95;
-    parameter logic [7:0] SYS_GC_ENGINE_CMD    = 8'h96;
 
     // SYS_INFO sub-codes for GC-related queries
     parameter logic [REG_IDX_W-1:0] SYS_CARD_BASE     = 5'd5;

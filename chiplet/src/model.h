@@ -67,7 +67,10 @@ constexpr uint32_t TRAP_NOT_CLOSURE = 0x07;
 constexpr uint32_t TRAP_NURSERY_OVERFLOW = 0x10;
 constexpr uint32_t TRAP_IC_MISS = 0x20;
 constexpr uint32_t TRAP_QUEUE_FULL = 0x30;
-constexpr uint32_t TRAP_UNIMPLEMENTED = 0xFE;
+constexpr uint32_t TRAP_UNIMPLEMENTED = 0x7E;
+// Codes below this vector through the trap table; TRAP #code from here up
+// is a system trap the core carries out itself.
+constexpr uint32_t SYSTEM_TRAPS = 0x80;
 
 // A tile's header-template table: SET_TEMPLATE names an entry with eight
 // bits, and an allocation's index past the table reads a zero template.
@@ -139,6 +142,7 @@ struct Tile {
     u64 nursery_base = 0, nursery_size = 0;
     u64 oldgen_base = 0, oldgen_size = 0, oldgen_ptr = 0;
     u64 card_shift = 6, card_table_base = 0, gen_boundary = 0;
+    u64 queue_base = 0;  // SET_QUEUE_BASE records it, SYS_INFO 8 reads it back
     std::vector<uint8_t> cards;  // one byte per card, 0xFF when dirty
     u64 gc_count = 0;
     u64 instruction_count = 0;

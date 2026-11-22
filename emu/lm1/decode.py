@@ -126,11 +126,12 @@ BR_FIX_EQ = 3   # branch if fixnum ==
 BR_FIX_GT = 4   # branch if fixnum >
 BR_EQ     = 5   # branch if word-equal
 
-# PUSH/POP sub-functions (in func / imm)
+# PUSH/POP sub-functions (in func)
 FUNC_PUSH       = 0
 FUNC_POP        = 1
-FUNC_PUSH_MULTI = 2
-FUNC_POP_MULTI  = 3
+
+# FAA/FENCE.GC: func 0x1F is FENCE.GC, func 0 FAA
+FUNC_FENCE_GC   = 0x1F
 
 # SYS_INFO sub-functions
 FUNC_TILE_ID   = 0
@@ -149,13 +150,53 @@ FUNC_SCAN_HEAD_OBJ   = 12
 FUNC_SCAN_HEAD_FIELD = 13
 FUNC_SCAN_POP_REF    = 14
 
-# HALT_NOP sub-functions
+# HALT_NOP sub-functions (bits 25:21)
 FUNC_HALT = 0
 FUNC_NOP  = 1
 
 # ERET sub-functions (func field): resume at the saved PC, or after it
 FUNC_ERET      = 0
 FUNC_ERET_NEXT = 1
+
+# ---------------------------------------------------------------------------
+# Reserved encodings
+# ---------------------------------------------------------------------------
+
+def reserved(inst: "Instruction") -> bool:
+    """Whether INST carries a value of a selecting field that names no
+    instruction: a func, cond, bank, sub-code, or car/cdr or halt/nop
+    selector the spec does not assign (spec/07-encoding.md section 2).
+    Such an encoding traps TRAP_UNIMPLEMENTED before it does anything.  An
+    opcode no instruction has traps the same way, from the executor's last
+    case, and so does a system trap code no system trap has."""
+    op = inst.opcode
+    if op == Op.ARITH_FIX:
+        return inst.func > FUNC_DIV_FIX
+    if op == Op.CMP_TAGGED:
+        return inst.func > FUNC_EQ
+    if op == Op.LD_CAR_CDR:
+        return (inst.raw & 0xFFFF) > 1
+    if op == Op.ST_CAR_CDR:
+        return inst.rs2 > 1
+    if op == Op.FAA_FENCE:
+        return inst.func not in (0, FUNC_FENCE_GC)
+    if op == Op.ARITH_RAW:
+        return inst.func > FUNC_MOD
+    if op == Op.BITWISE:
+        return inst.func > FUNC_NOT
+    if op == Op.BR_COND:
+        return inst.rs1 > BR_EQ
+    if op == Op.PUSH_POP:
+        return inst.func > FUNC_POP
+    if op in (Op.PUSH_MULTI, Op.POP_MULTI):
+        return inst.rd > 1          # two banks of 16 registers
+    if op == Op.ERET:
+        return inst.func > FUNC_ERET_NEXT
+    if op == Op.SYS_INFO:
+        return inst.rs1 > FUNC_SCAN_POP_REF
+    if op == Op.HALT_NOP:
+        return inst.rd > FUNC_NOP
+    return False
 
 # ---------------------------------------------------------------------------
 # Decoded instruction

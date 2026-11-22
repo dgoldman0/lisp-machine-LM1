@@ -284,13 +284,6 @@ Counter wiring is present but no test reads any counter.
 - Verify counter IDs are encoded in the correct instruction field
   (`imm16[4:0]` per RTL)
 
-### P2-9  ALLOC.CONS with NP/NL as car or cdr argument
-
-When `rs2 == REG_NP`, the CDR value read in `S_ALLOC_RD_CDR` gets the
-*updated* NP (post-bump), not the original.  Is this intended?
-
-**Test idea:** `ALLOC.CONS r3, r1, np` → what CDR value is stored?
-
 ### P2-10  Backward branch boundary
 
 No test verifies a branch with the maximum negative offset, or a

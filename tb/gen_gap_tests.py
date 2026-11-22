@@ -22,6 +22,8 @@ Tests cover:
   48: FAA traps on a word or a delta that is not a fixnum
   49: ERET.NEXT resumes after the faulting instruction; ERET retries it
   50: CALL.REG calls the address in a register, with the frame every call makes
+  51: reserved encodings trap TRAP_UNIMPLEMENTED; TRAP 0x70 and 0x7F vector
+  52: ALLOC.CONS takes car and cdr registers, read before np moves; r0 gives nil
 """
 
 import os
@@ -29,6 +31,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'emu'))
 from lm1.asm import Assembler
+from lm1.decode import Op, encode_r, encode_i, encode_s, encode_b, encode_x
 from lm1.word import tag_fixnum, make_header, make_ref, make_char, NIL, T
 
 TB_DIR = os.path.join(os.path.dirname(__file__), 'tests')
@@ -1296,6 +1299,167 @@ far_fn:
 
 
 # ===========================================================================
+# Test 51: reserved encodings trap TRAP_UNIMPLEMENTED
+# ===========================================================================
+def gen_test_51():
+    def word(w: int) -> str:
+        return f"    .u32 {w:#010x}"
+    reserved = [
+        ("ARITH.FIX func 4",     encode_r(Op.ARITH_FIX, 3, 1, 2, 4)),
+        ("CMP.TAGGED func 2",    encode_r(Op.CMP_TAGGED, 4, 1, 2, 2)),
+        ("LD.CAR/CDR imm 2",     encode_i(Op.LD_CAR_CDR, 5, 16, 2)),
+        ("ST.CAR/CDR field 2",   encode_s(Op.ST_CAR_CDR, 16, 2, 2)),
+        ("FAA func 1",           encode_r(Op.FAA_FENCE, 6, 17, 1, 1)),
+        ("ARITH.RAW func 5",     encode_r(Op.ARITH_RAW, 7, 1, 2, 5)),
+        ("BITWISE func 7",       encode_r(Op.BITWISE, 8, 1, 2, 7)),
+        ("BR.COND cond 6",       encode_b(Op.BR_COND, 1, 6, 2)),
+        ("PUSH/POP func 2",      encode_r(Op.PUSH_POP, 10, 0, 0, 2)),
+        ("PUSH.MULTI bank 2",    encode_i(Op.PUSH_MULTI, 2, 0, 0x0001)),
+        ("POP.MULTI bank 3",     encode_i(Op.POP_MULTI, 3, 0, 0x0001)),
+        ("ERET func 2",          encode_r(Op.ERET, 0, 0, 0, 2)),
+        ("SYS.INFO sub 15",      encode_i(Op.SYS_INFO, 11, 15, 0)),
+        ("HALT/NOP selector 2",  encode_x(Op.HALT_NOP, 2 << 21)),
+        ("TRAP 0x96",            encode_x(Op.TRAP, 0x96)),
+        ("TRAP 0xA0",            encode_x(Op.TRAP, 0xA0)),
+        ("opcode 000111",        encode_r(0b000111, 0, 1, 2, 0)),
+        ("opcode 010101",        encode_r(0b010101, 0, 1, 2, 0)),   # Family 8
+        ("opcode 010110",        encode_r(0b010110, 0, 1, 2, 0)),
+    ]
+    lines = []
+    for i, (what, w) in enumerate(reserved):
+        if i == len(reserved) - 1:
+            lines.append("last:")
+        lines.append(f"{word(w)}   ; {what}")
+        if what.startswith("BR.COND"):
+            lines.append("    LI  r9, 0x99          ; skipped only if the branch were taken")
+    body = "\n".join(lines)
+    source = f"""\
+    ; Test 51: a value of a selecting field that names no instruction is
+    ; reserved (spec/07-encoding.md section 2), and so are an opcode and a
+    ; system trap code no instruction has.  Each traps TRAP_UNIMPLEMENTED,
+    ; 0x7E, a fault that saves its own PC and changes nothing else: no
+    ; register it names, no word of memory, no SP and no branch.  The
+    ; handler counts them and returns past each with ERET.NEXT.  Explicit
+    ; TRAPs 0x70 and 0x7F, TRAP_STACK_OVERFLOW and TRAP_USER, vector
+    ; through the trap table like every code below 0x80.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, unimpl_handler
+    LI  r15, {TRAP_TABLE + 0x7E * 8}   ; TRAP_UNIMPLEMENTED
+    STR r15, r14, 0
+    LI  r14, call_handler
+    LI  r15, {TRAP_TABLE + 0x70 * 8}   ; TRAP_STACK_OVERFLOW
+    STR r15, r14, 0
+    LI  r15, {TRAP_TABLE + 0x7F * 8}   ; TRAP_USER
+    STR r15, r14, 0
+    LI  sp, {STACK_TOP}
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+    LI  r19, 0
+    LI  r20, 0
+
+    LI  r1, {tag_fixnum(3)}
+    LI  r2, {tag_fixnum(4)}
+    ALLOC.CONS r16, r1, r2
+    LI  r17, 0x2000
+    LI  r18, {tag_fixnum(10)}
+    STR r17, r18, 0
+    LI  r3, 0x77
+    LI  r4, 0x77
+    LI  r5, 0x77
+    LI  r6, 0x77
+    LI  r7, 0x77
+    LI  r8, 0x77
+    LI  r9, 0
+    LI  r10, 0x77
+    LI  r11, 0x77
+
+{body}
+
+    TRAP 0x70
+    TRAP 0x7F
+    MOV r12, sp
+    LD.CAR r13, r16
+    LD.CDR r14, r16
+    LI  r23, -8
+    AND r15, r16, r23
+    LDR r15, r15, 24      ; the word after the cons
+    LDR r18, r17, 0
+    HALT
+
+unimpl_handler:
+    TRAP.CAUSE r22
+    TRAP.PC r21
+    LI  r23, 1
+    ADD r20, r20, r23
+    ERET.NEXT
+
+call_handler:
+    TRAP.CAUSE r24
+    LI  r23, 1
+    ADD r19, r19, r23
+    ERET
+"""
+    asm = Assembler()
+    asm.assemble(source)
+    emit_test('51_reserved', source, {
+        'r3': 0x77, 'r4': 0x77, 'r5': 0x77, 'r6': 0x77,   # no destination written
+        'r7': 0x77, 'r8': 0x77, 'r10': 0x77, 'r11': 0x77,
+        'r9': 0x99,                     # the branch fell through
+        'r12': STACK_TOP,               # no push and no pop
+        'r13': tag_fixnum(3),           # the cons as ALLOC.CONS made it
+        'r14': tag_fixnum(4),
+        'r15': 0,                       # nothing stored after it
+        'r18': tag_fixnum(10),          # FAA added nothing
+        'r20': len(reserved),           # every reserved encoding trapped
+        'r21': asm.labels['last'],      # each saved its own PC
+        'r22': 0x7E,                    # TRAP_UNIMPLEMENTED
+        'r19': 2,                       # TRAP 0x70 and 0x7F reached a handler
+        'r24': 0x7F,
+    })
+
+
+# ===========================================================================
+# Test 52: ALLOC.CONS takes its car and cdr from registers
+# ===========================================================================
+def gen_test_52():
+    source = f"""\
+    ; Test 52: ALLOC.CONS Rd, Rs_car, Rs_cdr makes a cons of two registers'
+    ; values, read before the allocation moves np, so np itself names the
+    ; address the cons gets (spec/02-isa.md section 4.2); a field of r0
+    ; gives nil.
+
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+    LI  r1, {tag_fixnum(7)}
+    LI  r2, {tag_fixnum(8)}
+    ALLOC.CONS r3, r1, r2
+    LD.CAR r4, r3
+    LD.CDR r5, r3
+    ALLOC.CONS r6, np, np     ; both fields: np before the allocation
+    LD.CAR r7, r6
+    LD.CDR r8, r6
+    ALLOC.CONS r9, r0, r1     ; r0 stands for nil
+    LD.CAR r10, r9
+    LD.CDR r11, r9
+    MOV r12, np
+    HALT
+"""
+    emit_test('52_alloc_cons_operands', source, {
+        'r3': make_ref(NURSERY_BASE, cons=True),
+        'r4': tag_fixnum(7),
+        'r5': tag_fixnum(8),
+        'r6': make_ref(NURSERY_BASE + 24, cons=True),
+        'r7': NURSERY_BASE + 24,      # np as the cons found it
+        'r8': NURSERY_BASE + 24,
+        'r10': NIL,
+        'r11': tag_fixnum(7),
+        'r12': NURSERY_BASE + 72,     # three conses of three words each
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -1321,4 +1485,6 @@ if __name__ == '__main__':
     gen_test_48()
     gen_test_49()
     gen_test_50()
+    gen_test_51()
+    gen_test_52()
     print("Done. All gap tests generated.")

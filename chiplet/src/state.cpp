@@ -17,7 +17,7 @@ namespace lm1 {
 namespace {
 
 constexpr char MAGIC[8] = {'L', 'M', '1', 'C', 'H', 'I', 'P', 'S'};
-constexpr uint32_t VERSION = 1;
+constexpr uint32_t VERSION = 2;  // 2: a tile's queue base
 
 class Writer {
 public:
@@ -183,6 +183,7 @@ void save_tile(Writer &w, const Tile &tile) {
     w.word64(tile.card_shift);
     w.word64(tile.card_table_base);
     w.word64(tile.gen_boundary);
+    w.word64(tile.queue_base);
     w.word64(tile.cards.size());
     w.bytes(tile.cards);
     w.word64(tile.gc_count);
@@ -220,7 +221,7 @@ bool restore_tile(Reader &r, Tile &tile, size_t queue_depth) {
     if (!r.word64(tile.nursery_base) || !r.word64(tile.nursery_size) || !r.word64(tile.oldgen_base) ||
         !r.word64(tile.oldgen_size) || !r.word64(tile.oldgen_ptr) || !r.word64(tile.card_shift) ||
         tile.card_shift > 63 || !r.word64(tile.card_table_base) || !r.word64(tile.gen_boundary) ||
-        !r.word64(cards))
+        !r.word64(tile.queue_base) || !r.word64(cards))
         return false;
     // SET_CARD_SHIFT sizes the card table from the shift; a table the shift
     // does not size came from no model.

@@ -25,7 +25,7 @@ from .word import (
     REF_ADDR_MASK, TAG_REF, TAG_CONS,
 )
 from .decode import (
-    Op, Instruction, decode,
+    Op, Instruction, decode, reserved,
     FUNC_ADD, FUNC_SUB, FUNC_MUL, FUNC_DIV, FUNC_MOD,
     FUNC_AND, FUNC_OR, FUNC_XOR, FUNC_SHL, FUNC_SHR, FUNC_ASR, FUNC_NOT,
     FUNC_ADD_FIX, FUNC_SUB_FIX, FUNC_MUL_FIX, FUNC_DIV_FIX,
@@ -44,7 +44,6 @@ from .traps import (
     TRAP_IC_MISS, TRAP_NOT_CLOSURE,
     TRAP_QUEUE_FULL, TRAP_QUEUE_EMPTY,
     TRAP_UNIMPLEMENTED,
-    trap_name,
 )
 from .core import ThreadContext, HEADER_TEMPLATES
 from .memory import Memory
@@ -65,7 +64,6 @@ EMU_TRAP_SET_CARD_BASE  = 0x92   # r1 = card table base address
 EMU_TRAP_SET_CARD_SHIFT = 0x93   # r1 = card shift (bits 5:0)
 EMU_TRAP_SET_GEN_BOUNDARY = 0x94 # r1 = generation boundary address
 EMU_TRAP_SET_QUEUE_BASE = 0x95   # r1 = queue base address
-EMU_TRAP_GC_ENGINE_CMD  = 0x96   # r1 = GC engine command
 EMU_TRAP_DEBUG_PRINT    = 0x9F   # Debug: print string (r1=addr, r2=len)
 
 # Block I/O sub-functions (in r1)
@@ -154,6 +152,9 @@ class Emulator:
         self.card_shift = self.DEFAULT_CARD_SHIFT     # bits; card_size = 1 << card_shift
         self.card_table_base = 0                       # physical address of card table in memory
         self.gen_boundary = nursery_end                 # addresses >= gen_boundary are old-gen
+        # The message queues' base, which SET_QUEUE_BASE records and
+        # SYS_INFO 8 reads back; the modeled queues do not live in memory.
+        self.queue_base = 0
 
         # Card table: one byte per card.  Covers the entire memory space.
         # A card is "dirty" (0xFF) when a store-with-barrier writes a
@@ -265,6 +266,11 @@ class Emulator:
         """Execute one decoded instruction.  Returns the next PC."""
         op = inst.opcode
         t = self.thread
+
+        # A selecting field's value that names no instruction is reserved:
+        # it traps before the instruction does anything.
+        if reserved(inst):
+            raise LM1Trap(TRAP_UNIMPLEMENTED, f"reserved encoding {inst.raw:#010x}")
 
         # ---- Scalar arithmetic (raw, untagged 64-bit) ----
         if op == Op.ARITH_RAW:
@@ -429,11 +435,8 @@ class Emulator:
 
         # ---- PUSH.MULTI (Format I: rd=bank, imm16=mask) ----
         elif op == Op.PUSH_MULTI:
-            bank = inst.rd
+            bank = inst.rd           # 0 or 1: the 32 registers form two banks of 16
             mask = inst.imm16 & 0xFFFF
-            if bank > 1:
-                # The 32 registers form two banks of 16; no other bank exists.
-                raise LM1Trap(TRAP_UNIMPLEMENTED, f"PUSH.MULTI: no register bank {bank}")
             base_reg = bank * 16
             for i in range(16):
                 if mask & (1 << i):
@@ -444,8 +447,6 @@ class Emulator:
         elif op == Op.POP_MULTI:
             bank = inst.rd
             mask = inst.imm16 & 0xFFFF
-            if bank > 1:
-                raise LM1Trap(TRAP_UNIMPLEMENTED, f"POP.MULTI: no register bank {bank}")
             base_reg = bank * 16
             for i in range(15, -1, -1):
                 if mask & (1 << i):
@@ -455,13 +456,14 @@ class Emulator:
         # ---- TRAP ----
         elif op == Op.TRAP:
             trap_code = inst.raw26 & 0xFF
-            try:
-                self._handle_trap(trap_code)
-            except LM1Trap as trap:
-                # An explicit trap is the instruction's whole work, so ERET
-                # resumes after it, as a system call returns.
+            if trap_code < 0x80:
+                # A trap for the trap table, the runtime's: it is the
+                # instruction's whole work, so ERET resumes after it, as a
+                # system call returns.
+                trap = LM1Trap(trap_code)
                 trap.resume_pc = next_pc
-                raise
+                raise trap
+            self._system_trap(trap_code)
 
         # ---- ERET / ERET.NEXT ----
         elif op == Op.ERET:
@@ -470,8 +472,6 @@ class Emulator:
             # handler carried out itself (spec/03-core.md section 6.3).
             if not t.in_trap:
                 raise LM1Trap(TRAP_UNIMPLEMENTED, "ERET outside of trap handler")
-            if inst.func > FUNC_ERET_NEXT:
-                raise LM1Trap(TRAP_UNIMPLEMENTED, f"ERET with func {inst.func}")
             t.in_trap = False
             next_pc = t.trap_pc + 4 if inst.func == FUNC_ERET_NEXT else t.trap_pc
 
@@ -489,7 +489,9 @@ class Emulator:
                 case 5:  t.regs[inst.rd] = self.card_table_base   # CARD_BASE
                 case 6:  t.regs[inst.rd] = self.card_shift        # CARD_SHIFT
                 case 7:  t.regs[inst.rd] = self.gen_boundary      # GEN_BOUNDARY
-                case 8:  t.regs[inst.rd] = 0                      # QUEUE_BASE (stub)
+                case 8:  t.regs[inst.rd] = self.queue_base        # QUEUE_BASE
+                # The emulator models no movement engines and no counters,
+                # so it reads 0 for their status and results.
                 case 9:  t.regs[inst.rd] = 0                      # GC_STATUS (stub)
                 case 10: t.regs[inst.rd] = 0                      # PERF_CTR (stub)
                 case 11: t.regs[inst.rd] = 0                      # SCAN_COUNT (stub)
@@ -1232,11 +1234,14 @@ class Emulator:
 
         self.gc_count += 1
 
-    def _handle_trap(self, code: int) -> None:
-        """Handle TRAP instruction.
-
-        Phase 1: only emulator I/O traps are handled natively.
-        All other traps raise LM1Trap (fatal in Phase 1).
+    def _system_trap(self, code: int) -> None:
+        """Carry out TRAP #code for a code from 0x80 up, a system trap the
+        core carries out itself and which never reaches the trap table
+        (spec/02-isa.md section 11.6): the configuration traps 0x90 to 0x95,
+        and the emulator's bridge to its host, its console and block device,
+        on 0x80 to 0x82, 0x84 and 0x9F (design/emulator.md section 7).  Any
+        other code is reserved, and the TRAP traps TRAP_UNIMPLEMENTED, a
+        fault that saves the TRAP's own PC.
         """
         t = self.thread
 
@@ -1328,13 +1333,9 @@ class Emulator:
             self.gen_boundary = t.regs[1]
 
         elif code == EMU_TRAP_SET_QUEUE_BASE:
-            # Set queue base (matches RTL SYS_SET_QUEUE_BASE)
-            # Not directly used in emulator (queues are software-modeled)
-            pass
-
-        elif code == EMU_TRAP_GC_ENGINE_CMD:
-            # GC engine command (no-op in emulator — GC engines are HW-only)
-            pass
+            # Record the queue base (the RTL's SYS_SET_QUEUE_BASE); the
+            # modeled queues do not live in memory, so nothing else uses it.
+            self.queue_base = t.regs[1]
 
         elif code == EMU_TRAP_MEM_BYTE:
             # Byte-level memory access:
@@ -1366,7 +1367,7 @@ class Emulator:
             self._stdout.flush()
 
         else:
-            raise LM1Trap(code, f"Unhandled trap: {trap_name(code)}")
+            raise LM1Trap(TRAP_UNIMPLEMENTED, f"no system trap {code:#04x}")
 
     # -- Trace output ---
 

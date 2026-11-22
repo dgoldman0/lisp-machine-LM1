@@ -365,8 +365,10 @@ R_CODE = (21, 22)
 R_QUEUE = 23
 R_ANY = (24, 31)
 
+# TRAP codes: the emulator's host bridge, the configuration traps but the
+# trap table's, reserved system codes, and codes below 0x80 for the table.
 _SAFE_TRAPS = (0x80, 0x81, 0x82, 0x83, 0x84, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96,
-               0x42, 0x10, 0x03)
+               0xA0, 0xFF, 0x42, 0x10, 0x03, 0x70, 0x7F)
 _OPS = [  # (opcode, weight)
     (Op.TST, 3), (Op.TST_SHAPE, 2), (Op.ARITH_FIX, 6), (Op.ADD_FIX_IMM, 4),
     (Op.CMP_TAGGED, 3), (Op.LDW, 2), (Op.STW, 2), (Op.ALLOC, 4), (Op.ALLOC_CONS, 8),
@@ -379,7 +381,7 @@ _OPS = [  # (opcode, weight)
     (Op.STH, 2), (Op.ARITH_RAW, 5), (Op.BITWISE, 5), (Op.LDR, 4), (Op.STR, 4),
     (Op.BR, 2), (Op.BR_COND, 4), (Op.PUSH_POP, 3), (Op.LI, 5), (Op.LUI, 1),
     (Op.PUSH_MULTI, 1), (Op.POP_MULTI, 1), (Op.LI32, 1), (Op.TRAP, 3), (Op.ERET, 0.3),
-    (Op.SYS_INFO, 2), (Op.HALT_NOP, 1), (7, 0.15), (40, 0.15),
+    (Op.SYS_INFO, 2), (Op.HALT_NOP, 1), (7, 0.15), (21, 0.15), (22, 0.15), (40, 0.15),
 ]
 _OP_CHOICES = [op for op, _ in _OPS]
 _OP_WEIGHTS = [w for _, w in _OPS]
@@ -400,7 +402,7 @@ _SKIP_HANDLER = [encode_i(Op.SYS_INFO, 24, 4, 0),             # r24 = trap_pc
 _NEXT_HANDLER = [encode_i(Op.LI, 24, 0, 0x55), encode_r(Op.ERET, 0, 0, 0, 1)]
 _RETRY_HANDLER = [encode_i(Op.LI, 24, 0, 0x77), encode_x(Op.ERET, 0)]
 _HANDLERS = {"skip": _SKIP_HANDLER, "next": _NEXT_HANDLER, "retry": _RETRY_HANDLER}
-_HANDLED = (0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x10, 0x20, 0x30, 0x42)
+_HANDLED = (0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x10, 0x20, 0x30, 0x42, 0x70, 0x7E, 0x7F)
 
 
 class _Stream:
@@ -513,8 +515,8 @@ class _Stream:
             return encode_x(op, rng.choice(_SAFE_TRAPS))
         if op == Op.SYS_INFO:
             return encode_i(op, pick(R_ANY + R_FIX), rng.randrange(16), 0)
-        if op == Op.HALT_NOP:
-            return encode_x(op, 0 if rng.random() < 0.2 else 1 << 21)
+        if op == Op.HALT_NOP:   # HALT, NOP, or a selector neither names
+            return encode_x(op, rng.choices((0, 1, 2, 31), (2, 7, 1, 0.5))[0] << 21)
         if op == Op.ERET:   # ERET, ERET.NEXT, or a func neither names
             return encode_r(op, 0, 0, 0, rng.choice((0, 0, 1, 1, 2, 31)))
         if op == Op.SEND:
@@ -524,9 +526,9 @@ class _Stream:
             return encode_r(op, pick(R_FIX + R_ANY), pick((R_QUEUE,)), 0, func)
         if op == Op.CAS_TAGGED:
             return encode_r(op, pick(R_ANY), pick(R_BASE + R_OBJ), pick(R_FIX + R_OBJ), value)
-        if op == Op.FAA_FENCE:
+        if op == Op.FAA_FENCE:   # FAA, FENCE.GC, or a func neither names
             return encode_r(op, pick(R_FIX), pick(R_BASE + R_OBJ), pick(R_FIX),
-                            0 if rng.random() < 0.8 else 0x1F)
+                            rng.choices((0, 0x1F, rng.randrange(1, 31)), (8, 1.5, 0.5))[0])
         if op in (Op.CALL_IC, Op.TAILCALL_IC, Op.CALL_CLOSURE):
             return encode_i(op, pick(R_OBJ), 0, 0)
         if op in (Op.JR, Op.CALL_REG):

@@ -191,7 +191,7 @@ The emulator provides I/O devices as memory-mapped regions or via special TRAP c
 | **Timer** | CYCLE instruction | Read host cycle counter (or wall clock) |
 | **Shutdown** | HALT instruction | Exit emulator |
 
-These traps are **not** part of the ISA spec — they're emulator-specific stand-ins for I/O, which the chiplet receives from MegaPad over the link.
+These traps are **not** part of the ISA spec — they're emulator-specific stand-ins for I/O, which the chiplet receives from MegaPad over the link. They use system trap codes, 0x80 to 0x82, 0x84 and 0x9F, which the spec leaves reserved (`spec/02-isa.md` § 11.6), so on the RTL, which has no such bridge, each traps `TRAP_UNIMPLEMENTED`.
 
 ## 8. Implementation Language
 

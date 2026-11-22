@@ -658,7 +658,8 @@ Trap triggered (type error, nursery overflow, IC miss, etc.):
 ### System Traps (Non-Faulting)
 
 System traps (`TRAP` with imm bit 7 set) are handled directly in `S_EXECUTE`
-without entering the trap handler path:
+without entering the trap handler path; a code from 0x80 up that none of
+them has is reserved and faults with `TRAP_UNIMPLEMENTED`:
 
 | Code | Name | Action |
 |------|------|--------|

@@ -185,18 +185,25 @@ The `header_template` encodes the header subtype and shape ID, and the header wr
 **Cycles:** 1 (fast path)  
 **Traps:** `TRAP_NURSERY_OVERFLOW` (runtime performs minor GC, then retries)
 
-### 4.2 `ALLOC.CONS Rd`
+### 4.2 `ALLOC.CONS Rd, Rs_car, Rs_cdr`
 
-Allocate a cons cell. Specialized for the most common allocation.
+Allocate a cons cell holding two registers' values. Specialized for the most common allocation.
 
 ```
+car = Rs_car, or nil when the field names r0
+cdr = Rs_cdr, or nil when the field names r0
 if np + CONS_SIZE > nl:
     trap TRAP_NURSERY_OVERFLOW
-// If headerless cons is enabled:
+// With a cons header:
+*np = header_template[0] with its size field set to 2
+*(np + 8) = car
+*(np + 16) = cdr
 Rd = np | TAG_CONS_REF
-np = np + 16
-// else: write cons header, Rd = np | TAG_CONS_REF, np += 24
+np = np + 24
+// With headerless cons: *np = car, *(np + 8) = cdr, Rd = np | TAG_CONS_REF, np = np + 16
 ```
+
+The instruction reads both registers before it moves `np`, so naming `np` gives the address the new cons receives. A field of 0 gives nil rather than `r0`'s value, so `ALLOC.CONS Rd, r0, r0` makes a cons of two nils. Every implementation so far writes the cons header, from entry 0 of the header-template table ([07-encoding.md](07-encoding.md) § 6); the headerless cons of [01-object-model.md](01-object-model.md) § 4.1 is an option an implementation MAY take.
 
 **Cycles:** 1 (fast path)  
 **Traps:** `TRAP_NURSERY_OVERFLOW`
@@ -715,7 +722,8 @@ The offset is a signed byte offset. Each access clears the address bits below it
 `BR.FIX.LT Rs, #offset` — branch if `Rs` is a fixnum below zero  
 `BR.FIX.EQ Rs, #offset` — branch if `Rs` is fixnum zero, the word 0  
 `BR.FIX.GT Rs, #offset` — branch if `Rs` is a fixnum above zero  
-`BR.EQ Rs, #offset` — branch if `Rs` is the word 0
+`BR.EQ Rs, #offset` — branch if `Rs` is the word 0  
+`JR Rs` — jump to the address in `Rs`, without a frame
 
 Every conditional branch tests one register, and every branch counts its offset in instructions from its own address. A program compares two values first and branches on the result: `CMP.TAGGED` gives `-2`, `0` or `+2` for `BR.FIX.LT`, `BR.FIX.EQ` and `BR.FIX.GT` to test, and `EQ` gives `t` or `nil` for `BR.T` and `BR.NIL`.
 
@@ -726,7 +734,7 @@ Every conditional branch tests one register, and every branch counts its offset 
 `PUSH.MULTI #bank, #bitmask` — push multiple registers  
 `POP.MULTI #bank, #bitmask` — pop multiple registers
 
-`PUSH` decrements `sp` by 8 and stores `Rs` at the new `sp`; `POP` loads `Rd` from `sp` and increments `sp` by 8. The multiple forms name a bank of 16 registers, bank 0 for `r0`–`r15` and bank 1 for `r16`–`r31`, and a 16-bit mask in which bit *i* selects the bank's register *i*. `PUSH.MULTI` pushes the selected registers from the lowest-numbered up, and `POP.MULTI` pops them from the highest-numbered down, so a `POP.MULTI` with the same bank and mask restores what a `PUSH.MULTI` saved.
+`PUSH` decrements `sp` by 8 and stores `Rs` at the new `sp`; `POP` loads `Rd` from `sp` and increments `sp` by 8. The multiple forms name a bank of 16 registers, bank 0 for `r0`–`r15` and bank 1 for `r16`–`r31`, other banks being reserved, and a 16-bit mask in which bit *i* selects the bank's register *i*. `PUSH.MULTI` pushes the selected registers from the lowest-numbered up, and `POP.MULTI` pops them from the highest-numbered down, so a `POP.MULTI` with the same bank and mask restores what a `PUSH.MULTI` saved.
 
 ### 11.6 System
 
@@ -739,9 +747,54 @@ Every conditional branch tests one register, and every branch counts its offset 
 `THREAD.ID Rd` — read current hardware thread ID  
 `CYCLE Rd` — read cycle counter
 
+`TRAP #code` with a code below 0x80 raises that code: the thread enters the handler the trap table names for it, and `ERET` resumes after the `TRAP`, as a return from a system call does (§ 12). A code from 0x80 up is a system trap, which the core carries out itself and which no handler sees:
+
+| Code | Name | Effect |
+|:----:|------|--------|
+| 0x90 | `SET_TRAP_TABLE` | The trap table's base becomes `r1` |
+| 0x91 | `SET_TEMPLATE` | Entry `r1` bits 7:0 of the header-template table becomes `r2` ([07-encoding.md](07-encoding.md) § 6) |
+| 0x92 | `SET_CARD_BASE` | The card table's base becomes `r1` |
+| 0x93 | `SET_CARD_SHIFT` | The card size's log₂ becomes `r1` bits 5:0; it is 6, 64-byte cards, from reset |
+| 0x94 | `SET_GEN_BOUNDARY` | The generation boundary becomes `r1`; the barrier counts addresses at or above it as old ([05-memory-gc.md](05-memory-gc.md) § 4) |
+| 0x95 | `SET_QUEUE_BASE` | The message queues' base becomes `r1`, which `SYS_INFO` 8 reads back; nothing else uses it yet |
+
+Every other code from 0x80 up is reserved, and a `TRAP` naming one raises `TRAP_UNIMPLEMENTED`, a fault that saves the `TRAP`'s own PC. The emulators give 0x80 to 0x82, 0x84 and 0x9F to their host's console and block device (`design/emulator.md` § 7), a bridge the chip lacks: LM-1's own I/O travels the link to MegaPad.
+
+`TILE.ID`, `THREAD.ID` and `CYCLE` are three of the reads of `SYS_INFO Rd, #sub`, which writes `Rd` from the source its sub-code names:
+
+| Sub | Mnemonic | Reads |
+|:---:|----------|-------|
+| 0 | `TILE.ID` | The tile's ID |
+| 1 | `THREAD.ID` | The hardware thread's ID |
+| 2 | `CYCLE` | The cycle counter |
+| 3 | `TRAP.CAUSE` | The code of the last trap taken |
+| 4 | `TRAP.PC` | The PC the last trap saved |
+| 5 | `CARD.BASE` | The card table's base |
+| 6 | `CARD.SHIFT` | The card shift |
+| 7 | `GEN.BOUNDARY` | The generation boundary |
+| 8 | `QUEUE.BASE` | The queue base |
+| 9 | `GC.STATUS` | 1 while a movement engine works, otherwise 0 |
+| 10 | — | The performance counter that the immediate's bits 4:0 name |
+| 11 | — | The number of entries in the scanner's result FIFO |
+| 12 | — | The object address of the FIFO's head entry |
+| 13 | — | The field index of the head entry |
+| 14 | — | The reference of the head entry, popping the entry |
+
+Sub-codes 15 to 31 are reserved. The emulators model no movement engines and no counters, so they read 0 for sub-codes 9 to 14.
+
+### 11.7 Immediate Loads
+
+`LI Rd, #imm16` — `Rd` = `imm16` sign-extended to 64 bits  
+`LUI Rd, #imm16` — `Rd` = `imm16` shifted left 16 bits, the other bits zero  
+`LI32 Rd, #imm32` — `Rd` = the 32-bit word that follows the instruction, zero-extended; the instruction takes two words, and the PC advances past both
+
+None of them tags its value, so a program writes a fixnum constant pre-tagged.
+
 ---
 
 ## 12. Trap Code Summary
+
+A trap's code picks its entry in the trap table, whose base `TRAP 0x90` sets: entry *code* is the 64-bit word at the base plus *code* × 8, and it holds the handler's address. The codes below 0x80 vector this way, the faults the table lists and every code an explicit `TRAP` raises, and a handler returns with `ERET` or `ERET.NEXT` ([03-core.md](03-core.md) § 6.3). A thread whose trap finds no table, or a zero entry, stops with the trap standing. The codes from 0x80 up belong to the system traps of § 11.6, which no handler sees.
 
 | Code | Mnemonic | Source |
 |:----:|----------|--------|
@@ -761,8 +814,9 @@ Every conditional branch tests one register, and every branch counts its offset 
 | 0x51 | `TRAP_SHARED_STORE` | A store into a shared object of a reference outside the shared heap ([05-memory-gc.md](05-memory-gc.md) § 4.5) |
 | 0x60 | `TRAP_CAPABILITY_VIOLATION` | Capability check failure |
 | 0x61 | `TRAP_SHARED_REF` | A tagged load from the shared heap that yields a reference outside it ([05-memory-gc.md](05-memory-gc.md) § 12.8) |
-| 0x80 | `TRAP_STACK_OVERFLOW` | Stack exceeds allocated region |
-| 0xFF | `TRAP_USER` | Explicit `TRAP` instruction |
+| 0x70 | `TRAP_STACK_OVERFLOW` | A stack check finds the stack past its region; no instruction checks a stack's bounds, so the check's explicit `TRAP` raises it |
+| 0x7E | `TRAP_UNIMPLEMENTED` | A reserved encoding ([07-encoding.md](07-encoding.md) § 2), an opcode no instruction has, a reserved system trap code, or `ERET` outside a handler |
+| 0x7F | `TRAP_USER` | A user program's call into the runtime, by an explicit `TRAP` |
 
 ---
 
@@ -784,21 +838,13 @@ The 6-bit family field gives 64 top-level opcodes, more than enough for the 8 se
 
 ## 14. Pseudocode for Key Operations
 
-### 14.1 `(cons x y)` → `ALLOC.CONS` + `ST`
+### 14.1 `(cons x y)` → `ALLOC.CONS`
 
 ```asm
-    ALLOC.CONS r3              ; r3 = new cons ref
-    ST         r3, #0, r1     ; car = x (no barrier: freshly allocated, not yet reachable)
-    ST         r3, #1, r2     ; cdr = y
-    ; r3 is now (cons x y)
+    ALLOC.CONS r3, r1, r2      ; r3 = (cons x y), with x in r1 and y in r2
 ```
 
-With headerless cons:
-```asm
-    ALLOC.CONS r3              ; r3 = new cons ref (16 bytes, no header)
-    ST         r3, #0, r1     ; car = x (field 0 is at ref addr + 0)
-    ST         r3, #1, r2     ; cdr = y (field 1 is at ref addr + 8)
-```
+The new cons holds its car and cdr from the start, so no store follows it, and none needs a barrier.
 
 ### 14.2 `(car x)` → `LD.CAR`
 

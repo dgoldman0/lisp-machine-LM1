@@ -325,6 +325,35 @@ module lm1_control
         return d[0] ? {1'b0, d} : {d[XLEN-1], d[XLEN-1], d[XLEN-1:1]};
     endfunction
 
+    // ---------------------------------------------------------------
+    // Reserved encodings (spec/07-encoding.md § 2)
+    //
+    // A value of a selecting field that names no instruction: a func,
+    // cond, bank, sub-code, or car/cdr or halt/nop selector the spec does
+    // not assign.  S_EXECUTE traps TRAP_UNIMPLEMENTED on one before the
+    // instruction does anything, as it does on an opcode no instruction
+    // has and on a system trap code no system trap has.
+    // ---------------------------------------------------------------
+    function automatic logic reserved_encoding(decoded_t d);
+        case (d.opcode)
+            OP_ARITH_FIX:   return d.func > FUNC_DIV_FIX;
+            OP_CMP_TAGGED:  return d.func > FUNC_EQ;
+            OP_LD_CAR_CDR:  return d.imm16 > 16'd1;
+            OP_ST_CAR_CDR:  return d.rs2 > 5'd1;
+            OP_FAA_FENCE:   return d.func != 5'd0 && d.func != FUNC_FENCE_GC;
+            OP_ARITH_RAW:   return d.func > FUNC_MOD;
+            OP_BITWISE:     return d.func > FUNC_NOT;
+            OP_BR_COND:     return d.rs1 > BR_EQ_Z;
+            OP_PUSH_POP:    return d.func > FUNC_POP;
+            OP_PUSH_MULTI,
+            OP_POP_MULTI:   return d.rd > 5'd1;       // two banks of 16
+            OP_ERET:        return d.func > FUNC_ERET_NEXT;
+            OP_SYS_INFO:    return d.rs1 > SYS_SCAN_POP_REF;
+            OP_HALT_NOP:    return d.rd > SEL_NOP;
+            default:        return 1'b0;
+        endcase
+    endfunction
+
     // While SEND or RECV waits on another tile's queue, ta holds the tile,
     // tt[1:0] the queue and td SEND's value.
     assign rmq_req   = ((state == S_SEND_WAIT) || (state == S_RECV_WAIT)) &&
@@ -652,6 +681,13 @@ module lm1_control
             pc_n    = pc + 64'd4;
             cyc_inc = 1'b1;
 
+            if (reserved_encoding(dr)) begin
+                // A fault: the PC stays, and nothing else changes
+                tc_n    = TRAP_UNIMPLEMENTED;
+                cyc_inc = 1'b0;
+                pc_n    = pc;
+                ns      = S_TRAP_LOOKUP;
+            end else begin
             case (dr.opcode)
 
             // ===== ALU R-type =====
@@ -1231,9 +1267,15 @@ module lm1_control
                             rf_rd1_addr = banked_addr(cur_thread, 5'd1);
                             queue_base_n = rf_rd1_data;
                         end
-                        default: ;
+                        default: begin
+                            // A reserved system code: a fault, so the PC
+                            // stays at the TRAP
+                            tc_n    = TRAP_UNIMPLEMENTED;
+                            cyc_inc = 1'b0;
+                            pc_n    = pc;
+                        end
                     endcase
-                    ns = S_FETCH;
+                    ns = (dr.raw26[7:0] inside {[8'h90:8'h95]}) ? S_FETCH : S_TRAP_LOOKUP;
                 end else begin
                     // User trap: advance PC past the TRAP instruction
                     // so that ERET returns to the instruction after TRAP.
@@ -1248,7 +1290,7 @@ module lm1_control
             // faulting instruction the handler carried out itself
             // (spec/03-core.md § 6.3).
             OP_ERET: begin
-                if (!in_trap || dr.func > FUNC_ERET_NEXT) begin
+                if (!in_trap) begin
                     tc_n    = TRAP_UNIMPLEMENTED;
                     cyc_inc = 1'b0;
                     pc_n    = pc;
@@ -1490,6 +1532,7 @@ module lm1_control
             end
 
             endcase  // dr.opcode in S_EXECUTE
+            end  // not a reserved encoding
         end  // S_EXECUTE
 
         // ---------------------------------------------------------
@@ -2133,11 +2176,14 @@ module lm1_control
         //
         // In S_EXECUTE, rf_rd1_addr was overridden to read NP/NL,
         // which prevents the default opc_n = rf_rd1_data from
-        // capturing regs[rs2]. This state reads rs2 on port 1.
+        // capturing regs[rs2]. This state reads rs2 on port 1.  The
+        // operands are read before the allocation (spec/02-isa.md
+        // § 4.2), and S_EXECUTE has already bumped NP, so a cdr named
+        // np takes NP's value from before the bump, which aa holds.
         // ---------------------------------------------------------
         S_ALLOC_RD_CDR: begin
             rf_rd1_addr = banked_addr(cur_thread, dr.rs2);
-            opc_n       = rf_rd1_data;
+            opc_n       = (dr.rs2 == REG_NP) ? aa : rf_rd1_data;
             ns          = S_ALLOC_HDR;
         end
 
