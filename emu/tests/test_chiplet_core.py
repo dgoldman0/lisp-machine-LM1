@@ -661,6 +661,14 @@ class _GraphStream(_Stream):
             field = n - 1 if rng.random() < 0.5 else rng.randrange(n)
             op = rng.choice((Op.ST_WB, Op.ST_WB, Op.ST_WB, Op.ST))
             code.append(encode_s(op, a, b, field))
+            if rng.random() < 0.25:
+                # CAS.TAGGED swaps the stored ref for another object's
+                # through a tagged address of the field, so its barrier
+                # sees a young ref stored into an old object too.
+                c = rng.choice(objects)
+                code.append(encode_i(Op.LI, 22, 0, (field + 1) * 8))
+                code.append(encode_r(Op.ARITH_RAW, 22, a, 22, 0))
+                code.append(encode_r(Op.CAS_TAGGED, 23, 22, b, c))
 
         for r in objects:
             alloc(r)
