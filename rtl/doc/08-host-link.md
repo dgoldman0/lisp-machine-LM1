@@ -257,10 +257,12 @@ Each runs the shared cases first, then those only it can run:
 - **Doorbells and the message queues.** `dbi_*` and `dbo_*` are meant for
   the external ports of a tile's hardware message queue, so a doorbell
   arrives as a message. The cluster's message router drives those ports
-  now, so a doorbell joins its requesters. That wiring is still to do. The
-  chiplet module wires them so: a doorbell arrives as the fixnum of its
-  source on queue 0 of the first tile, and the link rings each participant
-  whose ID LM-1 code sends as a fixnum to queue 1 of that tile.
+  now, so a doorbell joins its requesters. That wiring is still to do.
+  `spec/04-soc.md` § 4.4 states it, and the chiplet module wires them so: a
+  doorbell arrives as the fixnum of its source on queue 0 of the first
+  tile, waiting at MegaPad while that queue is full, and the link rings
+  each participant whose ID, from 0 to 255, LM-1 code sends as a fixnum to
+  queue 1 of that tile, and drops any other word sent there.
 - **The runtime's use of the ports.** Nothing in the cluster issues
   host-memory requests or lend operations yet, and the runtime has no
   `LEND` entries to send. LM-1's main memory and its collector's traffic

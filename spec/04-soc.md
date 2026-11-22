@@ -148,10 +148,14 @@ The 256 KiB tile SRAM is **software-partitioned** into regions. The runtime conf
 
 ### 4.3 Nursery Lifecycle
 
-1. **Allocation phase:** `ALLOC` bumps `np`. Objects accumulate in the nursery.
-2. **Overflow:** When `np` reaches `nl`, `TRAP_NURSERY_OVERFLOW` fires.
-3. **Minor GC:** The runtime (or a movement engine) scans the nursery, copies survivors to the cluster's shared SRAM (old-gen region), resets `np` to nursey base.
+The nursery belongs to the tile, and the tile's hardware threads share it. Each thread has its own `np` and `nl` in its register context, and an allocation traps `TRAP_NURSERY_OVERFLOW` when it would carry the thread's `np` past its `nl` ([02-isa.md](02-isa.md) § 4), so a thread allocates only within the span its two registers bound. How the nursery is divided among the threads is the runtime's choice, made through those registers:
+
+1. **Chunks:** The runtime hands each thread a chunk of the nursery by setting its `np` and `nl`. `ALLOC` bumps the thread's `np` through the chunk, and objects accumulate there.
+2. **Refill:** When an allocation would pass the end of the chunk, `TRAP_NURSERY_OVERFLOW` reaches the runtime, which hands the thread another chunk from the nursery's free space and returns with `ERET`, so the allocation runs again in the new chunk.
+3. **Minor GC:** Only when the nursery has no free space left does the runtime collect. It (or a movement engine) scans the nursery, copies survivors to the cluster's shared SRAM (old-gen region), and gives every thread fresh space.
 4. **Card table reset:** After minor GC, the card table is cleared.
+
+The emulators give a tile's threads equal slices of the nursery and collect when a thread's slice runs out. That division is a default for their tests, not a rule of the architecture.
 
 ### 4.4 Message Queue Hardware
 
@@ -167,6 +171,8 @@ Each tile has **4 hardware message queues**, configurable as input or output:
 Queue entries are single tagged words (64 bits). Queue depth: configurable, default 512 entries (4 KiB).
 
 **Flow control:** `SEND` to a full queue traps (`TRAP_QUEUE_FULL`). The runtime can either back-pressure (stall the sender) or spill to SRAM.
+
+**Doorbells:** The host link to MegaPad (MegaPad's `docs/chiplet-link.md`) reaches the message queues of the cluster's first tile, and its doorbells travel as messages on two of them. A doorbell from MegaPad arrives on Q0 as the fixnum of its source, the ID of the participant that rang. When Q0 is full the tile declines the doorbell, which stays pending at MegaPad until Q0 has room, so no doorbell is lost. LM-1 rings participant *N* by sending the fixnum *N*, from 0 to 255, to Q1 of that tile. The link takes every word sent there and rings the participant each such fixnum names; any other word names no participant, and the link drops it.
 
 ### 4.5 Tile DMA Endpoint
 

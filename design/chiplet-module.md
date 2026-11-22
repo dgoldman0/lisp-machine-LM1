@@ -142,6 +142,12 @@ built beside it (decision B):
   with their records in lent memory, windows, store logs, regions and
   failure handling (`docs/managed-data.md`).
 
+The stand-in's minor collection of LM-1's own nursery takes the division
+that `spec/04-soc.md` § 4.3 gives the runtime in this stage as well: a
+thread whose chunk of the nursery runs out gets another from the nursery's
+free space, and the stand-in collects only when none is left. Until then it
+collects when a thread's equal slice runs out, as the reference does.
+
 Tests are the 27 conformance tests of `docs/managed-data.md` § 15, run
 through the real code at both ends in the emulator and the simulator.
 

@@ -17,7 +17,8 @@
 # link share.
 #
 # Build products go to tb/build/link, or to LM1_LINK_BUILD when it is set.
-# Verilator builds with LM1_LINK_JOBS jobs, every core when it is unset.
+# Verilator builds with LM1_LINK_JOBS jobs, 4 when it is unset, as
+# tb/cluster/run_cluster_tests.sh builds with LM1_BUILD_JOBS; 0 takes every core.
 #
 # Exit code 0 if every bench that ran passed, 1 otherwise.
 
@@ -26,7 +27,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${LM1_LINK_BUILD:-$ROOT/tb/build/link}"
-JOBS="${LM1_LINK_JOBS:-0}"
+JOBS="${LM1_LINK_JOBS:-4}"
 CASES="$SCRIPT_DIR/link_cases.txt"
 
 WARN="-Wno-UNUSEDSIGNAL -Wno-UNDRIVEN -Wno-UNUSEDPARAM -Wno-UNOPTFLAT \
