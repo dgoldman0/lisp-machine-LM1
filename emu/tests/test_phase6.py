@@ -213,6 +213,19 @@ def test_asm_call_direct_ret():
     assert emu.thread.regs[6] == 0xDD
 
 
+@test("asm_call_reg_and_eret_forms", batch="phase6_dispatch")
+def test_asm_call_reg_and_eret_forms():
+    """CALL.REG names its register in bits 25:21 under opcode 010111, and
+    ERET and ERET.NEXT share ERET's opcode with func 0 and 1
+    (spec/07-encoding.md sections 5.4 and 5.8)."""
+    call, eret, eret_next = (decode(w) for w in Assembler().assemble_to_words(
+        "CALL.REG lr\nERET\nERET.NEXT"))
+    assert (call.opcode, call.rd, call.rs1, call.imm16) == (Op.CALL_REG, 28, 0, 0)
+    assert call.opcode == 0b010111
+    assert (eret.opcode, eret.func, eret.raw26) == (Op.ERET, 0, 0)
+    assert (eret_next.opcode, eret_next.func, eret_next.raw26) == (Op.ERET, 1, 1 << 6)
+
+
 @test("asm_tailcall_direct", batch="phase6_dispatch")
 def test_asm_tailcall_direct():
     """TAILCALL.DIRECT reuses the frame."""

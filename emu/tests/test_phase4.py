@@ -148,6 +148,53 @@ def test_call_direct_preserves_sp():
     assert t.sp == sp_before, f"SP should be restored: expected {sp_before:#x}, got {t.sp:#x}"
 
 
+@test("call_reg_calls_the_register_address", batch="phase4_frame")
+def test_call_reg_calls_the_register_address():
+    """CALL.REG Rs calls the address Rs holds, far past CALL.DIRECT's reach,
+    with the frame every call makes, and RET returns past it (spec/02-isa.md
+    section 6.8)."""
+    emu = _emu()
+    t = emu.thread
+    far = 0x7_0000                     # 448 KiB: beyond CALL.DIRECT's 128 KiB
+    for i, insn in enumerate([
+        encode_r(Op.ARITH_RAW, 2, 28, 0, FUNC_ADD),   # r2 = lr, the return address
+        encode_r(Op.ARITH_RAW, 3, 29, 0, FUNC_ADD),   # r3 = fp
+        encode_i(Op.LDR, 4, 30, 8),                   # the caller's LR on the stack
+        encode_x(Op.RET, 0),
+    ]):
+        emu.mem.store_u32(far + i * 4, insn)
+    t.lr, t.fp = 0x2222, 0x3333
+    _load_and_run(emu, [
+        encode_i(Op.LUI, 1, 0, far >> 16),            # r1 = far
+        encode_i(Op.CALL_REG, 1, 0, 0),               # 0x04
+        encode_i(Op.LI, 5, 0, 0x55),                  # 0x08: after the return
+        encode_x(Op.HALT_NOP, 0),
+    ])
+    assert t.halted and t.regs[5] == 0x55
+    assert t.regs[2] == 0x08, f"LR in the callee: {t.regs[2]:#x}"
+    assert t.regs[3] == STACK_TOP - 16 and t.regs[4] == 0x2222
+    assert (t.sp, t.fp, t.lr) == (STACK_TOP, 0x3333, 0x2222), "RET restored the frame"
+
+
+@test("call_reg_reads_its_target_before_the_frame", batch="phase4_frame")
+def test_call_reg_reads_its_target_before_the_frame():
+    """CALL.REG reads its target before the frame changes LR, so CALL.REG lr
+    calls the address LR held, and the frame keeps that address as the
+    caller's LR."""
+    emu = _emu()
+    t = emu.thread
+    _load_and_run(emu, [
+        encode_i(Op.LI, 28, 0, 0x10),                 # lr = the function
+        encode_i(Op.CALL_REG, 28, 0, 0),              # 0x04
+        encode_i(Op.LI, 7, 0, 0x77),                  # 0x08: after the return
+        encode_x(Op.HALT_NOP, 0),                     # 0x0C
+        encode_i(Op.LDR, 6, 29, 8),                   # 0x10: the saved LR
+        encode_x(Op.RET, 0),
+    ])
+    assert t.halted and t.regs[7] == 0x77
+    assert t.regs[6] == 0x10 and t.lr == 0x10
+
+
 # ===================================================================
 # Batch: phase4_closure — CALL.CLOSURE
 # ===================================================================

@@ -196,6 +196,7 @@ All instructions are 32 bits wide. Four encoding formats:
 | 29 | TAILCALL.IC | I | Tail-call via inline cache (no frame push). |
 | 30 | TAILCALL.DIR | I | Direct tail-call. |
 | 31 | JR | R | Jump register (indirect jump). |
+| 23 | CALL.REG | I | Call the address in a register: push frame, jump. |
 
 **CALL.IC sequence:**
 1. Read receiver object's header → extract `shape_id`

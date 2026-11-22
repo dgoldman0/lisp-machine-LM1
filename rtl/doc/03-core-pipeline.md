@@ -109,7 +109,7 @@ This is the big dispatch state. The opcode determines the next state:
 | Tagged stores | ST | ref check → `S_FIELD_MEM` → `S_FIELD_WAIT` |
 | Write-barrier | ST_WB, ST_CAR_CDR | ref check → `S_FIELD_MEM` → `S_FIELD_WAIT` → `S_BARRIER_CHECK` |
 | Branches | BR, BR_COND | Evaluate → update `pc_n` → `S_FETCH` |
-| Calls | CALL_DIRECT | `S_PUSH_FRAME_0` (3 store states) → target |
+| Calls | CALL_DIRECT, CALL_REG | `S_PUSH_FRAME_0` (3 store states) → target |
 | Calls | CALL_IC, TAILCALL_IC | `S_HDR_READ` → `S_IC_DISPATCH` |
 | Calls | CALL_CLOSURE | `S_HDR_READ` → `S_CLOS_CODE_RD` → frame push |
 | Return | RET | `S_POP_FRAME_0` chain (3 loads) |

@@ -373,7 +373,8 @@ _OPS = [  # (opcode, weight)
     (Op.ALLOCV, 3), (Op.ALLOC_CLOSURE, 2), (Op.LD, 4), (Op.LD_CAR_CDR, 4), (Op.ST, 3),
     (Op.ST_WB, 5), (Op.ST_CAR_CDR, 5), (Op.CALL_IC, 1), (Op.IC_INSTALL, 1),
     (Op.CALL_DIRECT, 1), (Op.CALL_CLOSURE, 1), (Op.RET, 1), (Op.TAILCALL_IC, 1),
-    (Op.TAILCALL_DIR, 1), (Op.JR, 1), (Op.PREFETCH_REF, 1), (Op.SEND, 2), (Op.RECV, 2),
+    (Op.TAILCALL_DIR, 1), (Op.JR, 1), (Op.CALL_REG, 1), (Op.PREFETCH_REF, 1),
+    (Op.SEND, 2), (Op.RECV, 2),
     (Op.CAS_TAGGED, 2), (Op.FAA_FENCE, 2), (Op.LDB, 2), (Op.STB, 2), (Op.LDH, 2),
     (Op.STH, 2), (Op.ARITH_RAW, 5), (Op.BITWISE, 5), (Op.LDR, 4), (Op.STR, 4),
     (Op.BR, 2), (Op.BR_COND, 4), (Op.PUSH_POP, 3), (Op.LI, 5), (Op.LUI, 1),
@@ -528,7 +529,7 @@ class _Stream:
                             0 if rng.random() < 0.8 else 0x1F)
         if op in (Op.CALL_IC, Op.TAILCALL_IC, Op.CALL_CLOSURE):
             return encode_i(op, pick(R_OBJ), 0, 0)
-        if op == Op.JR:
+        if op in (Op.JR, Op.CALL_REG):
             return encode_i(op, pick(R_CODE), 0, 0)
         if op == Op.IC_INSTALL:
             return encode_r(op, pick(R_CODE), pick(R_OBJ), pick(R_CODE))

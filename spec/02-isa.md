@@ -325,7 +325,7 @@ Barriered stores to cons cell fields. Equivalent to `ST.WB` with field 0/1 and c
 
 ## 6. Family 4: Dynamic Dispatch
 
-Every call — `CALL.DIRECT`, `CALL.CLOSURE`, and `CALL.IC` on a hit — starts a frame on the thread's stack, and `RET` ends it:
+Every call — `CALL.DIRECT`, `CALL.CLOSURE`, `CALL.REG`, and `CALL.IC` on a hit — starts a frame on the thread's stack, and `RET` ends it:
 
 ```
 push_frame(return_addr):
@@ -444,6 +444,21 @@ Tail-call variant of `CALL.IC`. It looks the receiver's shape up as `CALL.IC` do
 ### 6.7 `TAILCALL.DIRECT #offset`
 
 Tail-call variant of `CALL.DIRECT`: `pc = pc + offset * 4`, without a frame.
+
+### 6.8 `CALL.REG Rs`
+
+Call the code at the address in a register.
+
+```
+target = Rs
+push_frame(pc + 4)
+pc = target
+```
+
+The call reads its target before it pushes the frame, so `Rs` may be `lr`, `fp` or `sp` and gives the value it held before the call. `CALL.REG` reaches any address, where `CALL.DIRECT` reaches 128 KiB either way, and calls an address a program computed, such as a far function's or one read from a table, with no closure object to hold it. `JR` jumps to a register's address without a frame (§ 11.4).
+
+**Cycles:** 1  
+**Traps:** None
 
 ---
 
@@ -665,6 +680,8 @@ Seal a capability, making it opaque and usable only via `CALL` (entry capability
 Unseal a capability (requires matching type authority).
 
 **Conformance:** All Family 8 instructions are OPTIONAL. Required for LM-1 Full conformance.
+
+**Encoding:** the five instructions share opcode `010101` and are told apart by a func field ([07-encoding.md](07-encoding.md) § 5.9). No implementation has capability mode yet, so each raises `TRAP_UNIMPLEMENTED` for the opcode.
 
 ---
 

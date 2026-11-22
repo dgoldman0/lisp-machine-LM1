@@ -635,6 +635,9 @@ class Assembler:
         if mn == 'CALL.CLOSURE':
             rd = self._reg(args[0], ln)
             return encode_i(Op.CALL_CLOSURE, rd, 0, 0)
+        if mn == 'CALL.REG':
+            rd = self._reg(args[0], ln)   # the register holding the target
+            return encode_i(Op.CALL_REG, rd, 0, 0)
         if mn == 'RET':
             return encode_x(Op.RET, 0)
         if mn == 'TAILCALL.IC':

@@ -37,6 +37,9 @@ class Op(IntEnum):
     ST_WB         = 0b010011  # 19
     ST_CAR_CDR    = 0b010100  # 20  (field selects car=0 / cdr=1)
 
+    # Family 4 — Dispatch, beyond its own opcode range
+    CALL_REG      = 0b010111  # 23  call to the address in a register
+
     # Family 4 — Dispatch
     CALL_IC       = 0b011000  # 24
     IC_INSTALL    = 0b011001  # 25

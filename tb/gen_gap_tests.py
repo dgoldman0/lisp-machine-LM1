@@ -21,6 +21,7 @@ Tests cover:
   47: ALLOCV and ALLOC.CLOSURE zero every payload word; ALLOCV's length is a fixnum
   48: FAA traps on a word or a delta that is not a fixnum
   49: ERET.NEXT resumes after the faulting instruction; ERET retries it
+  50: CALL.REG calls the address in a register, with the frame every call makes
 """
 
 import os
@@ -1222,6 +1223,79 @@ call_handler:
 
 
 # ===========================================================================
+# Test 50: CALL.REG calls the address in a register
+# ===========================================================================
+def gen_test_50():
+    source = f"""\
+    ; Test 50: CALL.REG Rs calls the address Rs holds with the frame every
+    ; call makes (spec/02-isa.md section 6.8): it pushes LR and FP, points
+    ; FP at them and sets LR to the next instruction, and RET undoes it.
+    ; It reaches a function far beyond CALL.DIRECT's 128 KiB, one whose
+    ; address is computed, and, through LR itself, the address LR held
+    ; before the call.
+
+    LI  sp, {STACK_TOP}
+    LI  fp, 0x3333
+    LI  lr, 0x2222
+
+    ; --- a function at 192 KiB ---
+    LI32 r1, far_fn
+    CALL.REG r1
+back:
+    MOV r10, sp
+
+    ; --- an address read from a table ---
+    LI32 r2, fn_table
+    LDR r4, r2, 8         ; the table's second entry, fn_b
+    CALL.REG r4
+
+    ; --- LR itself: the target is LR's value before the call ---
+    LI32 lr, fn_c
+    CALL.REG lr
+    HALT
+
+fn_b:
+    LI  r11, 0xbb
+    RET
+
+fn_c:
+    LDR r12, fp, 8        ; the caller's LR the frame saved: fn_c itself
+    RET
+
+    .align 8
+fn_table:
+    .word 0
+    .word fn_b
+
+    .org 0x30000
+far_fn:
+    LI  r5, 0x55
+    MOV r6, lr            ; the return address
+    MOV r7, fp
+    MOV r8, sp
+    LDR r9, sp, 8         ; the caller's LR
+    LDR r13, sp, 0        ; the caller's FP
+    RET
+"""
+    asm = Assembler()
+    asm.assemble(source)
+    emit_test('50_call_reg', source, {
+        'r5': 0x55,
+        'r6': asm.labels['back'],     # LR is the instruction after the call
+        'r7': STACK_TOP - 16,         # FP points at the saved FP
+        'r8': STACK_TOP - 16,
+        'r9': 0x2222,                 # the frame holds the caller's LR
+        'r13': 0x3333,                # and its FP
+        'r10': STACK_TOP,             # RET took the frame off again
+        'r11': 0xbb,
+        'r12': asm.labels['fn_c'],
+        'r28': asm.labels['fn_c'],    # RET restored the caller's LR
+        'r29': 0x3333,                # and FP
+        'r30': STACK_TOP,
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -1246,4 +1320,5 @@ if __name__ == '__main__':
     gen_test_47()
     gen_test_48()
     gen_test_49()
+    gen_test_50()
     print("Done. All gap tests generated.")

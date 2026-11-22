@@ -193,7 +193,7 @@ module lm1_decoder
             end
 
             // --- Calls and returns ---
-            OP_CALL_DIRECT, OP_CALL_CLOSURE, OP_CALL_IC: begin
+            OP_CALL_DIRECT, OP_CALL_CLOSURE, OP_CALL_IC, OP_CALL_REG: begin
                 is_jump        = 1'b1;
                 is_multi_cycle = 1'b1;  // push_frame + jump
             end

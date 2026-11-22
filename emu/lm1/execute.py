@@ -781,6 +781,14 @@ class Emulator:
             self._push_frame(t, next_pc)
             next_pc = code_entry
 
+        # ---- CALL.REG: call the address in a register ----
+        elif op == Op.CALL_REG:
+            # Format I: Rd (bits 25:21) holds the target, read before the
+            # frame changes LR, FP and SP (spec/02-isa.md section 6.8).
+            target = t.regs[inst.rd]
+            self._push_frame(t, next_pc)
+            next_pc = target
+
         # ---- RET: return from call ----
         elif op == Op.RET:
             next_pc = self._pop_frame(t)

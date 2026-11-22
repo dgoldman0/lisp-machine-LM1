@@ -34,7 +34,7 @@ The 6-bit opcode gives 64 top-level instruction slots. These are grouped by fami
 |:------------:|:------:|-------------|
 | `000000`–`000111` | F1 | Tagged arithmetic & type tests; `000101` and `000110` hold the word load and store `LDW` and `STW` |
 | `001000`–`001111` | F2 | Allocation |
-| `010000`–`010111` | F3 | Field access with barriers |
+| `010000`–`010111` | F3 | Field access with barriers; `010101` holds Family 8 and `010111` holds `CALL.REG` |
 | `011000`–`011111` | F4 | Dynamic dispatch |
 | `100000`–`100011` | F5 | Pointer prefetch |
 | `100100`–`100111` | F6 | Concurrency & messaging |
@@ -43,7 +43,7 @@ The 6-bit opcode gives 64 top-level instruction slots. These are grouped by fami
 | `110000`–`111011` | Scalar | Supplementary scalar & control |
 | `111100`–`111111` | System | System, traps, NOP, HALT |
 
-Family 8, the optional capability instructions, has no opcodes assigned yet: the byte and halfword loads and stores took its range.
+Family 8, the capability instructions, takes opcode `010101`, with a func field for its five instructions (§ 5.9), since the byte and halfword loads and stores took the range this table first gave it. `CALL.REG` takes `010111`, next to the dispatch family, whose own range `JR` fills. The opcodes free for later instructions are `000111`, `001100`–`001111` and `010110`.
 
 ## 4. Instruction Formats
 
@@ -380,6 +380,14 @@ opcode = 011110
 (same layout as CALL.DIRECT)
 ```
 
+#### `CALL.REG Rs` — Format I
+
+```
+opcode = 010111
+Rd (25:21) = Rs, the register holding the target
+bits 20:0 = 0
+```
+
 ### 5.5 Family 5: Pointer Prefetch
 
 #### `PREFETCH.REF Rs` — Format I
@@ -606,6 +614,23 @@ opcode = 111111 (HALT, NOP — func selects which)
 
 `ERET` and `ERET.NEXT` share their opcode and are told apart by Format R's `func`, bits 10:6: `00000` for `ERET`, which resumes at the saved PC, and `00001` for `ERET.NEXT`, which resumes at the saved PC + 4 ([03-core.md](03-core.md) § 6.3). The other payload bits are 0.
 
+### 5.9 Family 8: Capability Mode — Format R
+
+```
+opcode = 010101
+func (10:6) = 00000 MKCAP, 00001 CHKCAP, 00010 NARROW, 00011 SEAL, 00100 UNSEAL
+```
+
+| Instruction | Rd (25:21) | Rs1 (20:16) | Rs2 (15:11) | bits 5:1 |
+|-------------|:----------:|:-----------:|:-----------:|:--------:|
+| `MKCAP Rd, Rs_ref, Rs_bounds, Rs_perms` | Rd | Rs_ref | Rs_bounds | Rs_perms |
+| `CHKCAP Rs_cap, #perm` | 0 | Rs_cap | perm | 0 |
+| `NARROW Rd, Rs_cap, Rs_new_bounds` | Rd | Rs_cap | Rs_new_bounds | 0 |
+| `SEAL Rd, Rs_cap, Rs_type` | Rd | Rs_cap | Rs_type | 0 |
+| `UNSEAL Rd, Rs_cap, Rs_type` | Rd | Rs_cap | Rs_type | 0 |
+
+`MKCAP` alone takes a third source register, which it holds in bits 5:1, where Format R otherwise reserves its low bits; bit 0 is 0. `CHKCAP` writes no register and holds the permissions it checks, a mask of five bits, in the field `Rs2` would occupy. The other func values are reserved. The capability's own format, its bounds descriptor and its permission bits, is still to be defined, with the chiplet revision that makes capability mode a required part of the chip, and no implementation builds the family yet ([02-isa.md](02-isa.md) § 10).
+
 ---
 
 ## 6. Header-Template Table
@@ -658,6 +683,7 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | ST | 010010 | S | Rs, field, Rt |
 | ST.WB | 010011 | S | Rs, field, Rt |
 | ST.CAR/CDR | 010100 | S | Rs, Rt, 0/1 |
+| MKCAP / CHKCAP / NARROW / SEAL / UNSEAL | 010101 | R | func=0–4 (§ 5.9) |
 | CALL.IC | 011000 | I | Rs_rcv |
 | IC.INSTALL | 011001 | R | Rs_site, Rs_rcv, Rs_entry |
 | CALL.DIRECT | 011010 | I | offset |
@@ -665,6 +691,7 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | RET | 011100 | X | — |
 | TAILCALL.IC | 011101 | I | (as CALL.IC) |
 | TAILCALL.DIRECT | 011110 | I | (as CALL.DIRECT) |
+| CALL.REG | 010111 | I | Rs |
 | PREFETCH.REF | 100000 | I | Rs |
 | PREFETCH.FIELD | 100001 | I | Rs, field |
 | PREFETCH.CDR | 100010 | I | Rs |

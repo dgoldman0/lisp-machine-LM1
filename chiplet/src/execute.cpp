@@ -22,6 +22,7 @@ enum Op : unsigned {
     OP_LDW = 5, OP_STW = 6,
     OP_ALLOC = 8, OP_ALLOC_CONS = 9, OP_ALLOCV = 10, OP_ALLOC_CLOSURE = 11,
     OP_LD = 16, OP_LD_CAR_CDR = 17, OP_ST = 18, OP_ST_WB = 19, OP_ST_CAR_CDR = 20,
+    OP_CALL_REG = 23,
     OP_CALL_IC = 24, OP_IC_INSTALL = 25, OP_CALL_DIRECT = 26, OP_CALL_CLOSURE = 27,
     OP_RET = 28, OP_TAILCALL_IC = 29, OP_TAILCALL_DIR = 30, OP_JR = 31,
     OP_PREFETCH_REF = 32, OP_PREFETCH_FLD = 33, OP_PREFETCH_CDR = 34, OP_GATHER_PRE = 35,
@@ -679,6 +680,14 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         Flow f = push_frame(next_pc);
         if (f != Flow::Next) return f;
         next_pc = code_entry;
+        return Flow::Next;
+    }
+    case OP_CALL_REG: {
+        // The target, read before the frame changes LR, FP and SP.
+        u64 target = r[in.rd];
+        Flow f = push_frame(next_pc);
+        if (f != Flow::Next) return f;
+        next_pc = target;
         return Flow::Next;
     }
     case OP_RET: {

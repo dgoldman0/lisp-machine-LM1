@@ -977,6 +977,16 @@ module lm1_control
                 ns       = S_PUSH_FRAME_0;
             end
 
+            // CALL.REG Rs: a call to the address in Rs, read before the
+            // frame changes LR, FP and SP (spec/02-isa.md § 6.8)
+            OP_CALL_REG: begin
+                tt_n     = opa;
+                td_n     = pc + 64'd4;
+                cyc_inc  = 1'b0;
+                pc_n     = pc;
+                ns       = S_PUSH_FRAME_0;
+            end
+
             OP_CALL_CLOSURE: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_CLOSURE;

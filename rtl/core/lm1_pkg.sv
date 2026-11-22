@@ -75,6 +75,7 @@ package lm1_pkg;
         OP_TAILCALL_IC   = 6'd29,
         OP_TAILCALL_DIR  = 6'd30,
         OP_JR            = 6'd31,
+        OP_CALL_REG      = 6'd23,   // a call to the address in a register
 
         // Family 5 — Prefetch (no-ops)
         OP_PREFETCH_REF  = 6'd32,
