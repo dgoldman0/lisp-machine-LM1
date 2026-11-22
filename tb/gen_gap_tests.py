@@ -469,36 +469,39 @@ def gen_test_37():
     ;   old = mem[addr]
     ;   mem[addr] = old + delta
     ;   rd = old
+    ;
+    ; The word in memory and the delta are fixnums, which FAA requires
+    ; (spec/02-isa.md section 8.5): fixnum n is the raw word 2n.
 
-    ; Set up memory at 0x2000 with initial value 10
+    ; Set up memory at 0x2000 with fixnum 10
     LI r10, 0x2000
-    LI r11, 10
+    LI r11, {tag_fixnum(10)}
     STR r10, r11, 0
 
     ; FAA: delta=5 -> old=10, new=15
-    LI r12, 5
+    LI r12, {tag_fixnum(5)}
     FAA r1, r10, r12      ; r1 = 10 (old value)
     LDR r2, r10, 0        ; should be 15
 
     ; FAA again: delta=3 -> old=15, new=18
-    LI r13, 3
+    LI r13, {tag_fixnum(3)}
     FAA r3, r10, r13      ; r3 = 15 (old value)
     LDR r4, r10, 0        ; should be 18
 
     ; FAA with delta=0 -> should return old, no change
-    LI r14, 0
+    LI r14, {tag_fixnum(0)}
     FAA r5, r10, r14      ; r5 = 18 (old value)
     LDR r6, r10, 0        ; should still be 18
 
     HALT
 """
     emit_test('37_faa', source, {
-        'r1': 10,    # old value returned
-        'r2': 15,    # memory updated: 10+5
-        'r3': 15,    # old value after first FAA
-        'r4': 18,    # memory: 15+3
-        'r5': 18,    # old value, delta=0
-        'r6': 18,    # memory unchanged
+        'r1': tag_fixnum(10),   # old value returned
+        'r2': tag_fixnum(15),   # memory updated: 10+5
+        'r3': tag_fixnum(15),   # old value after first FAA
+        'r4': tag_fixnum(18),   # memory: 15+3
+        'r5': tag_fixnum(18),   # old value, delta=0
+        'r6': tag_fixnum(18),   # memory unchanged
     })
 
 

@@ -102,7 +102,8 @@ lists `TRAP_FIXNUM_OVERFLOW` for DIV.FIX, and the emulator traps there.
 
 `S_MEM_WAIT` adds the delta to the loaded word whatever their tags.  The
 spec traps `TRAP_NOT_FIXNUM` when either is not a fixnum (spec/02-isa.md
-§ 8.5), as the emulator does.
+§ 8.5), as the emulator does.  Bench test 37 adds fixnums, on which the
+RTL's raw add and the spec agree; no bench test yet covers the trap.
 
 **Where:** `lm1_control.sv`, `OP_FAA_FENCE` in `S_MEM_WAIT`.
 

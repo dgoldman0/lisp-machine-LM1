@@ -266,8 +266,6 @@ RTL_DEVIATIONS = {
     "35_send_recv": "P0-9: the RTL and the assembler take SEND's and RECV's queue "
                     "from the immediate; the spec and both models read a descriptor "
                     "register",
-    "37_faa": "P0-8: the RTL's FAA adds raw words, and the program adds odd ones; "
-              "the spec and both models trap TRAP_NOT_FIXNUM",
 }
 
 
