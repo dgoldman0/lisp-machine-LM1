@@ -4,6 +4,7 @@
 // design/chiplet-module.md), with the reference emulator's present
 // defaults for every key left out.
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -46,9 +47,38 @@ const Key KEYS[] = {
     {"oldgen_size", &Config::oldgen_size},
     {"card_shift", &Config::card_shift},
     {"queue_depth", &Config::queue_depth},
+    {"load_base", &Config::load_base},
+    {"burst_words", &Config::burst_words},
+    {"lend_ranges", &Config::lend_ranges},
+    {"quanta", &Config::quanta},
 };
 
+// "BASE:LENGTH", two numbers.
+bool parse_range(const std::string &text, u64 &base, u64 &length) {
+    size_t colon = text.find(':');
+    return colon != std::string::npos && parse_number(text.substr(0, colon), base) &&
+           parse_number(text.substr(colon + 1), length);
+}
+
+std::string hex(u64 v) {
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "0x%llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+
 }  // namespace
+
+std::string config_text(const Config &config) {
+    std::string text;
+    for (const Key &k : KEYS) {
+        if (!text.empty()) text += ',';
+        text += k.name;
+        text += '=';
+        text += hex(config.*(k.field));
+    }
+    for (const auto &range : config.lend) text += ",lend=" + hex(range.first) + ":" + hex(range.second);
+    return text;
+}
 
 bool parse_config(const char *text, Config &config, std::string &error) {
     std::string s = text ? text : "";
@@ -72,6 +102,15 @@ bool parse_config(const char *text, Config &config, std::string &error) {
             return false;
         }
         std::string key = item.substr(0, eq), value = item.substr(eq + 1);
+        if (key == "lend") {  // one range each time it is named
+            u64 base, length;
+            if (!parse_range(value, base, length)) {
+                error = "configuration key 'lend' takes BASE:LENGTH, not '" + value + "'";
+                return false;
+            }
+            config.lend.emplace_back(base, length);
+            continue;
+        }
         const Key *found = nullptr;
         for (const Key &k : KEYS) {
             if (key == k.name) found = &k;
@@ -104,6 +143,29 @@ bool parse_config(const char *text, Config &config, std::string &error) {
         error = "old-gen lies below the nursery's end; the barrier's generation "
                 "boundary needs old-gen above the nursery";
         return false;
+    }
+    // The link: a burst carries up to 256 words (its length field holds
+    // 0 to 255 beyond the first), the lend port's index has eight bits, and
+    // the image lands in whole words.
+    if (config.load_base % 8 != 0) { error = "load_base is a multiple of 8"; return false; }
+    if (config.burst_words < 1 || config.burst_words > 256) {
+        error = "burst_words lies from 1 to 256";
+        return false;
+    }
+    if (config.lend_ranges < 1 || config.lend_ranges > 255) {
+        error = "lend_ranges lies from 1 to 255";
+        return false;
+    }
+    if (config.quanta < 1) { error = "a thread's quantum is at least one instruction"; return false; }
+    if (config.lend.size() > config.lend_ranges) {
+        error = "more ranges to lend than the lend table's lend_ranges entries";
+        return false;
+    }
+    for (const auto &range : config.lend) {
+        if (range.second == 0 || range.first > config.mem || range.second > config.mem - range.first) {
+            error = "a lent range is empty or lies outside the first tile's memory";
+            return false;
+        }
     }
     return true;
 }

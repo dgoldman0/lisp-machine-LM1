@@ -18,17 +18,6 @@ lm1c_result ended(Model &m, size_t tile, size_t thread, u64 executed) {
     return r;
 }
 
-// Whether a stalled thread may run again, which clears its stall.
-bool unstall(Tile &tile, Thread &t) {
-    if (!t.stalled) return true;
-    i64 q = t.stall_queue;
-    if (q < 0) q += QUEUES;  // as the reference's list index counts from its end
-    if (q < 0 || q >= i64(QUEUES) || tile.queues[q].size() == 0) return false;
-    t.stalled = false;
-    t.stall_queue = -1;
-    return true;
-}
-
 }  // namespace
 
 lm1c_result Model::run_thread(size_t tile_index, u64 max_instructions) {

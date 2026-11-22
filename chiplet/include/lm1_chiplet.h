@@ -6,14 +6,20 @@
  * implements, traps and the trap table, allocation and the write barrier,
  * the minor collection that stands in for an absent runtime, the hardware
  * threads of a tile in round-robin, and a cluster of tiles that route
- * messages to one another.  design/chiplet-module.md is the plan; this
- * interface serves LM-1's own tests, and MegaPad's chiplet interface joins
- * it in the same library in stage 2.
+ * messages to one another.  design/chiplet-module.md is the plan.  This
+ * interface serves LM-1's own tests.  The same library exports
+ * mp64_chiplet_create, MegaPad's chiplet module interface
+ * (shared/accel/chiplet_module.h in MegaPad), through which MegaPad's
+ * emulator and simulator attach the model to a chiplet port; the link's
+ * functions at the end of this file reach LM-1's end of that link in a
+ * model made that way, whose module's self is the model (src/link.cpp
+ * describes LM-1's end).
  *
- * A model calls its host only through the callbacks of lm1c_host, and only
- * from inside a run, starts no thread and reads no clock, so its results
- * depend only on its state and the calls made to it.  Models share no
- * state, so separate models may be driven from separate threads.
+ * A model calls its host only through the callbacks of lm1c_host, or as a
+ * chiplet module through MegaPad's services, and only from inside a run or
+ * a step, starts no thread and reads no clock, so its results depend only
+ * on its state and the calls made to it.  Models share no state, so
+ * separate models may be driven from separate threads.
  *
  * Every function that takes a tile or thread index returns LM1C_BAD_INDEX
  * for one the model lacks, and LM1C_OK on success.
@@ -35,7 +41,7 @@ extern "C" {
 #endif
 
 /* Raised when a function of this interface changes or is added. */
-#define LM1C_INTERFACE_VERSION 1
+#define LM1C_INTERFACE_VERSION 2
 
 #define LM1C_OK          0
 #define LM1C_BAD_INDEX  (-1)  /* no such tile, thread, register or entry */
@@ -131,9 +137,12 @@ enum lm1c_tile_field {
 
 /* The digest of the sources this library was built from, 64 hex digits:
    the SHA-256 of `sha256sum` over the Makefile, the export list, the
-   headers and the sources. */
+   headers and the sources, followed by MegaPad's chiplet_module.h, which
+   the module is built against. */
 LM1C_API const char *lm1c_source_digest(void);
 LM1C_API uint32_t lm1c_interface_version(void);
+/* The MP64_CHIPLET_ABI of the chiplet_module.h the library was built with. */
+LM1C_API uint32_t lm1c_chiplet_abi(void);
 
 /*
  * Make a model from a configuration string of comma-separated key=value
@@ -143,7 +152,17 @@ LM1C_API uint32_t lm1c_interface_version(void);
  *   nursery_size=0x10000 oldgen_base=0x80000 oldgen_size=0x40000
  *   card_shift=6 queue_depth=512
  * threads counts a tile's hardware threads, mem the bytes of each tile's
- * memory (a multiple of 8), tile_id the first tile's ID.  On failure it
+ * memory (a multiple of 8), tile_id the first tile's ID.  LM-1's end of the
+ * link takes these, with the RTL's parameters as defaults:
+ *   load_base=0      where in the first tile's memory the image lands
+ *   burst_words=8    words to a request of the boot fetch, 1 to 256
+ *   lend_ranges=2    entries of the lend table, 1 to 255
+ *   quanta=1         instructions a thread runs before the next one's turn
+ *   lend=BASE:LENGTH a range of the first tile's memory that the runtime's
+ *                    stand-in lends MegaPad for writing once the image is
+ *                    in, until LM-1's runtime sends LEND entries; named
+ *                    once for each range, at most lend_ranges of them.
+ * The same string configures mp64_chiplet_create.  On failure lm1c_create
  * returns NULL and, given room, writes the reason to error.
  */
 LM1C_API lm1c_model *lm1c_create(const char *config, char *error, size_t error_size);
@@ -220,6 +239,56 @@ LM1C_API int lm1c_run_round_robin(lm1c_model *model, uint32_t tile,
 LM1C_API int lm1c_run_cluster(lm1c_model *model, uint64_t max_instructions,
                               uint64_t quanta, lm1c_result *result);
 LM1C_API int lm1c_collect(lm1c_model *model, uint32_t tile, lm1c_result *result);
+
+/*
+ * LM-1's end of the link, in a model made by mp64_chiplet_create.  The
+ * link reaches the memory and the queues of the first tile.  A doorbell
+ * from MegaPad arrives as fixnum(src) on queue LM1C_DOORBELL_IN_QUEUE, and
+ * the link rings the participant named by each fixnum from 0 to 255 that
+ * LM-1 code sends to queue LM1C_DOORBELL_OUT_QUEUE; any other word sent
+ * there names no participant and is dropped.
+ */
+#define LM1C_LINK_TILE          0
+#define LM1C_DOORBELL_IN_QUEUE  0
+#define LM1C_DOORBELL_OUT_QUEUE 1
+
+enum lm1c_boot {
+    LM1C_BOOT_RESET = 0,    /* held in reset */
+    LM1C_BOOT_FETCH = 1,    /* released; the image is still being fetched */
+    LM1C_BOOT_RUNNING = 2,  /* the image is in and the runtime is up */
+    LM1C_BOOT_FAILED = 3    /* a request or a word of the fetch failed */
+};
+
+enum lm1c_link_field {
+    LM1C_LINK_BOOT = 0,          /* enum lm1c_boot */
+    LM1C_LINK_BOOT_ADDR,
+    LM1C_LINK_BOOT_LEN,
+    LM1C_LINK_BOOT_ARG,
+    LM1C_LINK_FETCHED,           /* words of the image loaded so far */
+    LM1C_LINK_STOP_REQ,          /* 0 or 1 */
+    LM1C_LINK_READY,             /* READY as MegaPad was last told it */
+    LM1C_LINK_STOPPED,           /* STOPPED as MegaPad was last told it */
+    LM1C_LINK_RANGES,            /* entries of the lend table */
+    LM1C_LINK_FAULTS,            /* threads ended by a trap or a fault */
+    LM1C_LINK_DOORBELLS_IN,      /* doorbells taken from MegaPad */
+    LM1C_LINK_DOORBELLS_OUT,     /* doorbells rung */
+    LM1C_LINK_DOORBELLS_DROPPED, /* words sent for the link that name no participant */
+    LM1C_LINK_FIELDS
+};
+
+LM1C_API int lm1c_link_get(const lm1c_model *model, int field, uint64_t *value);
+/* One entry of the lend table: base, exclusive limit, and the write right. */
+LM1C_API int lm1c_link_range(const lm1c_model *model, uint32_t index, uint64_t *base,
+                             uint64_t *limit, int *write);
+/* The lend port, as LM-1's runtime uses it: install entry INDEX, or with
+   WRITE 0 withdraw it.  An index past the table is refused with
+   LM1C_BAD_INDEX and changes nothing, and the port takes nothing while
+   LM-1 is held in reset (LM1C_BAD_VALUE). */
+LM1C_API int lm1c_link_lend(lm1c_model *model, uint32_t index, uint64_t base,
+                            uint64_t limit, int write);
+/* How the first thread to end on a trap no handler answers, or on a
+   fault, ended: a result as lm1c_run gives one, with its tile and thread. */
+LM1C_API int lm1c_link_fault(const lm1c_model *model, lm1c_result *first);
 
 #ifdef __cplusplus
 }

@@ -1,8 +1,10 @@
-/* The library's exported names: its C interfaces, and nothing of the C++
-   standard library its model uses inside. */
+/* The library's exported names: its C interface, the one function MegaPad's
+   module loader looks for, and nothing of the C++ standard library its
+   model uses inside. */
 {
     global:
         lm1c_*;
+        mp64_chiplet_create;
     local:
         *;
 };

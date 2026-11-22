@@ -5,7 +5,9 @@
 // and the counters.  execute() follows Emulator._execute case by case, in
 // the same order of effects, so a fault part way through an instruction
 // leaves the state the reference leaves.
+#include <algorithm>
 #include <cstring>
+#include <iterator>
 
 #include "memory.h"
 #include "model.h"
@@ -760,14 +762,29 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
 
 }  // namespace
 
-Model::Model(const Config &config)
-    : first_tile_id(config.tile_id), queue_depth(size_t(config.queue_depth)) {
+Model::Model(const Config &config_)
+    : config(config_), first_tile_id(config_.tile_id),
+      queue_depth(size_t(config_.queue_depth)) {
+    init_tiles();
+    link.ranges.assign(size_t(config.lend_ranges), LentRange{});
+}
+
+void Model::init_tiles() {
+    // Each tile starts over, so nothing of an earlier run survives: memory,
+    // threads, tables and counters alike.  Once the tiles exist their
+    // storage is reused, so a reset allocates nothing.
     tiles.resize(size_t(config.tiles));
     for (size_t i = 0; i < tiles.size(); ++i) {
         Tile &tile = tiles[i];
         tile.id = config.tile_id + i;
         tile.mem_size = config.mem;
         tile.mem.assign(size_t(config.mem / 8), 0);
+        tile.current = 0;
+        std::fill(std::begin(tile.templates), std::end(tile.templates), 0);
+        tile.gc_count = 0;
+        tile.instruction_count = 0;
+        tile.card_table_base = 0;
+        tile.ic.clear();
         tile.nursery_base = config.nursery_base;
         tile.nursery_size = config.nursery_size;
         tile.oldgen_base = config.oldgen_base;
@@ -783,7 +800,7 @@ Model::Model(const Config &config)
         // pointer through a slice of it, the last slice to the nursery's end.
         u64 n = config.threads;
         u64 slice = (config.nursery_size / n) & ~7ull;
-        tile.threads.resize(size_t(n));
+        tile.threads.assign(size_t(n), Thread{});
         for (u64 tid = 0; tid < n; ++tid) {
             Thread &t = tile.threads[size_t(tid)];
             t.tile_id = tile.id;
@@ -798,6 +815,20 @@ Model::Model(const Config &config)
         tile.templates[1] = make_header(HDR_CLOSURE, 0, 1);
         tile.templates[2] = make_header(HDR_VECTOR, 0, 2);
     }
+}
+
+void Model::reset_chiplet() {
+    init_tiles();
+    for (Tile &tile : tiles) {
+        for (Thread &t : tile.threads) t.halted = true;
+    }
+    trap = {};
+    stop = {};
+    // The lend table keeps its storage; its entries are cleared.
+    std::vector<LentRange> ranges = std::move(link.ranges);
+    link = Link{};
+    ranges.assign(size_t(config.lend_ranges), LentRange{});
+    link.ranges = std::move(ranges);
 }
 
 Tile *Model::tile_by_id(i64 id) {
