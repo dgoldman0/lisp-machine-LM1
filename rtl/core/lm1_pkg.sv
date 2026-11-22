@@ -275,7 +275,6 @@ package lm1_pkg;
     parameter logic [7:0] TRAP_ENGINE_BUSY      = 8'h40;
     parameter logic [7:0] TRAP_BARRIER_OVERFLOW = 8'h50;
     parameter logic [7:0] TRAP_CAPABILITY_VIOL  = 8'h60;
-    parameter logic [7:0] TRAP_STACK_UNDERFLOW  = 8'h70;
     parameter logic [7:0] TRAP_UNIMPLEMENTED    = 8'hFE;
 
     // ---------------------------------------------------------------

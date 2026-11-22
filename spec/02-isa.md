@@ -24,7 +24,6 @@ This document specifies the LM-1 instruction set architecture. The ISA is organi
 | `tp` | 1 | Thread/tile pointer (alias `r27`) — points to per-thread/tile state |
 | `np` | 1 | Nursery pointer (alias `r26`) — current nursery bump pointer |
 | `nl` | 1 | Nursery limit (alias `r25`) — end of nursery region |
-| `ic0`–`ic3` | 4 | Inline-cache scratch registers (not general-purpose) |
 
 All general-purpose registers hold 64-bit tagged words. The hardware thread context includes all 32 GPRs plus the special registers.
 
@@ -36,7 +35,8 @@ Rs, Rs1   — source register(s)
 Rt        — target register (for stores: the value being stored)
 imm       — immediate constant
 field     — field index (unsigned immediate)
-callsite  — inline-cache site identifier
+offset    — signed offset: in instructions from the instruction's own address for
+            branches and calls, in bytes for loads and stores
 tag       — tag constant for type testing
 ```
 
@@ -45,7 +45,7 @@ tag       — tag constant for type testing
 When a fast-path condition is not met, the instruction raises a **synchronous trap** with a defined trap code. The runtime's trap handler receives:
 
 - Trap code (identifying which slow path)
-- Faulting instruction's PC
+- The PC that `ERET` resumes at: the faulting instruction's for a fault, so that `ERET` retries it, and the next instruction's for an explicit `TRAP` ([03-core.md](03-core.md) § 6.3)
 - All register state
 
 Trap codes are enumerated per instruction family below.
@@ -146,13 +146,11 @@ Immediate-operand variant. `imm` is a pre-tagged fixnum constant.
 
 #### `CMP.TAGGED Rd, Rs1, Rs2`
 
-Tagged comparison with type-aware rules:
-- fixnum–fixnum: numeric comparison
-- ref–ref: pointer equality
-- special–special: identity comparison
-- mixed types: `TRAP_TYPE_MISMATCH`
+Tagged comparison with type-aware rules. The result in `Rd` is a fixnum, pre-tagged:
 
-Result in `Rd`: fixnum `-2` (less), `0` (equal), `+2` (greater) — pre-tagged.
+- fixnum–fixnum: numeric comparison, `-2` when `Rs1` is less, `0` when the two are equal and `+2` when `Rs1` is greater.
+- Two words of one other primary tag (bits 2:0) — two general refs, two cons refs, two specials or two headers: identity comparison, `0` when the words are equal and `+2` when they differ. Such words have no order.
+- Any other pair: `TRAP_TYPE_MISMATCH`. A general ref (tag `001`) and a cons ref (tag `011`) are different types for `CMP.TAGGED`, so comparing one with the other traps; `EQ` compares any two words.
 
 **Cycles:** 1–2  
 **Traps:** `TRAP_TYPE_MISMATCH`
@@ -173,14 +171,16 @@ Raw word equality (identity / `eq`). No type checking. `Rd` = `t` if `Rs1 == Rs2
 Allocate a fixed-size object in the tile's nursery.
 
 ```
-if np + (words + 1) * 8 > nl:
+size = words             // payload words, the header excluded
+if np + (size + 1) * 8 > nl:
     trap TRAP_NURSERY_OVERFLOW
-*np = header_template    // write header word
+*np = header_template with its size field set to size
+the size payload words = 0
 Rd = np | TAG_REF        // tag as ref, add metadata hints
-np = np + (words + 1) * 8
+np = np + (size + 1) * 8
 ```
 
-The `header_template` encodes the header subtype, shape ID, and size. GC bits in the header are initialized to the current generation's defaults.
+The `header_template` encodes the header subtype and shape ID, and the header written from it carries the object's size. GC bits in the header are initialized to the current generation's defaults. A header's size counts the payload words after it, as every header's does ([01-object-model.md](01-object-model.md) § 3.5), so the object takes one word more than its size. The allocation zeroes the payload, so every traced word of the new object holds a valid tag, fixnum 0, until the program stores into it ([01-object-model.md](01-object-model.md) § 6).
 
 **Cycles:** 1 (fast path)  
 **Traps:** `TRAP_NURSERY_OVERFLOW` (runtime performs minor GC, then retries)
@@ -206,15 +206,20 @@ np = np + 16
 Allocate a variable-length object (vector, string, bytevector).
 
 ```
+if (Rs_length & 1) != 0:
+    trap TRAP_NOT_FIXNUM
 len = Rs_length >> 1    // untag fixnum length
-total = header_words + len  // + length slot + elements
-if np + total * 8 > nl:
+size = len + 1          // payload words: the length slot and the elements
+if np + (size + 1) * 8 > nl:
     trap TRAP_NURSERY_OVERFLOW
-*np = header_template (with size = total)
+*np = header_template with its size field set to size
+the size payload words = 0
 *(np + 8) = Rs_length    // store length as tagged fixnum
 Rd = np | TAG_REF
-np = np + total * 8
+np = np + (size + 1) * 8
 ```
+
+The header's size counts the payload, the length slot and the elements, as the vector layout of [01-object-model.md](01-object-model.md) § 4.3 has it. Every element starts as fixnum 0.
 
 **Cycles:** 2 (fast path)  
 **Traps:** `TRAP_NURSERY_OVERFLOW`, `TRAP_NOT_FIXNUM` (if length is not a fixnum)
@@ -224,14 +229,17 @@ np = np + total * 8
 Allocate a closure with a code entry point and `env_size` environment slots.
 
 ```
-total = 1 + 1 + env_size    // header + code + env slots
-if np + total * 8 > nl:
+size = 1 + env_size         // payload words: the code entry and the env slots
+if np + (size + 1) * 8 > nl:
     trap TRAP_NURSERY_OVERFLOW
-*np = closure_header(size=total)
+*np = header_template[1] with its size field set to size
+the size payload words = 0
 *(np + 8) = Rs_code
 Rd = np | TAG_REF
-np = np + total * 8
+np = np + (size + 1) * 8
 ```
+
+The header comes from entry 1 of the header-template table, the closure template ([07-encoding.md](07-encoding.md) § 6), and its size counts the code entry and the environment slots, as the closure layout of [01-object-model.md](01-object-model.md) § 4.4 has it. The environment slots start as fixnum 0.
 
 **Cycles:** 1–2 (fast path)  
 **Traps:** `TRAP_NURSERY_OVERFLOW`
@@ -317,26 +325,38 @@ Barriered stores to cons cell fields. Equivalent to `ST.WB` with field 0/1 and c
 
 ## 6. Family 4: Dynamic Dispatch
 
-### 6.1 `CALL.IC #callsite, Rs_receiver, #argc`
+Every call — `CALL.DIRECT`, `CALL.CLOSURE`, and `CALL.IC` on a hit — starts a frame on the thread's stack, and `RET` ends it:
 
-Inline-cached dynamic dispatch. This is the primary instruction for method calls, generic function dispatch, and message sends.
+```
+push_frame(return_addr):
+    *(sp - 8)  = lr       // the caller's link register
+    *(sp - 16) = fp       // the caller's frame pointer
+    sp = sp - 16
+    lr = return_addr      // pc + 4, the instruction after the call
+    fp = sp               // fp points at the saved fp, with the saved lr above it
+```
+
+While the callee runs, `lr` holds its return address and `fp` its frame. The tail calls jump without a frame, so their callee returns through the frame in use, to its caller's caller.
+
+### 6.1 `CALL.IC Rs_receiver`
+
+Inline-cached dynamic dispatch. This is the primary instruction for method calls, generic function dispatch, and message sends. Each `CALL.IC` is a call site of its own: the inline cache is keyed by the instruction's address and the receiver's shape, so the instruction names only the receiver, and the arguments travel by the calling convention.
 
 **Hardware behavior:**
 
 ```
-shape = extract_shape_hint(Rs_receiver)    // from ref metadata bits
-entry = ic_lookup(callsite, shape)         // probe hardware IC table
+if Rs_receiver is not a ref (tag 001 or 011):
+    trap TRAP_NOT_REF
+hdr = *(untag_ref(Rs_receiver))
+shape = shape_id(hdr) if hdr is a header, else 0
+entry = ic_lookup(pc, shape)        // pc: this CALL.IC's address
 
-if entry.valid AND entry.shape == shape:
+if entry.valid:
     // IC hit: direct call
-    push_frame(pc + instruction_size, fp, argc)
+    push_frame(pc + 4)
     pc = entry.code_entry
-    fp = sp
 else:
     // IC miss: trap to runtime
-    ic0 = callsite
-    ic1 = Rs_receiver
-    ic2 = argc
     trap TRAP_IC_MISS
 ```
 
@@ -344,77 +364,86 @@ The hardware IC table is a small associative structure (per-core or per-tile, se
 
 | Field | Bits | Description |
 |-------|:----:|-------------|
-| callsite | 16–24 | Callsite identifier |
+| call site | 48 | Address of the `CALL.IC` or `TAILCALL.IC` |
 | shape | 32 | Expected receiver shape ID |
 | code_entry | 48 | Destination code address |
 | valid | 1 | Entry is valid |
 
 **IC table size:** Implementation-defined; RECOMMENDED minimum 64 entries per hardware thread.
 
-**IC installation:** The runtime's `TRAP_IC_MISS` handler performs method lookup, resolves the target, and executes `IC.INSTALL` to populate the cache.
+**IC installation:** The runtime's `TRAP_IC_MISS` handler finds the call site in the trap PC, which is the `CALL.IC`'s own address (§ 2.3), and the receiver in the register that instruction names. It performs method lookup, resolves the target, executes `IC.INSTALL` to populate the cache, and returns with `ERET`, which runs the call again, now a hit.
 
-**Cycles:** 1–2 (IC hit), full trap latency (IC miss)  
-**Traps:** `TRAP_IC_MISS`
+**Cycles:** 1 + memory latency (IC hit), full trap latency (IC miss)  
+**Traps:** `TRAP_NOT_REF`, `TRAP_IC_MISS`
 
-### 6.2 `IC.INSTALL #callsite, #shape, Rs_entry`
+### 6.2 `IC.INSTALL Rs_site, Rs_receiver, Rs_entry`
 
 Install or update an inline-cache entry. Privileged to the runtime.
 
 ```
-ic_table[callsite] = { shape, Rs_entry, valid=1 }
+shape = the shape of Rs_receiver, read as CALL.IC reads it; 0 when Rs_receiver is not a ref
+ic_table[(Rs_site, shape)] = { Rs_entry, valid=1 }
 ```
 
-**Cycles:** 1–2  
+`Rs_site` holds the address of the call site, and `Rs_receiver` an object of the shape the entry serves, such as the receiver whose miss the handler answers.
+
+**Cycles:** 1–2 (+ memory latency for the header)  
 **Traps:** None (but may evict existing entries)
 
-### 6.3 `CALL.DIRECT Rs_entry`
+### 6.3 `CALL.DIRECT #offset`
 
-Direct (non-dispatched) function call.
+Direct (non-dispatched) call of the code at a PC-relative address.
 
 ```
-push_frame(pc + instruction_size, fp)
-pc = Rs_entry    // or untag if Rs_entry is a ref to a code object
-fp = sp
+push_frame(pc + 4)
+pc = pc + offset * 4    // offset in instructions, from this CALL.DIRECT
+```
+
+The 16-bit offset reaches 32,768 instructions (128 KiB) back and 32,767 forward.
+
+**Cycles:** 1  
+**Traps:** None
+
+### 6.4 `CALL.CLOSURE Rs_closure`
+
+Call a closure. Loads the code entry from the closure object.
+
+```
+if Rs_closure is not a ref, or its header is not a closure header (hdr-sub 00100):
+    trap TRAP_NOT_CLOSURE
+code = *(untag_ref(Rs_closure) + 8)    // code entry is first field
+push_frame(pc + 4)
+pc = code
+```
+
+The callee finds the closure in `Rs_closure`, a register the calling convention fixes, and reads its captured variables through it: environment slot *i* is field *i* + 1 of the closure ([01-object-model.md](01-object-model.md) § 4.4).
+
+**Cycles:** 1 + memory latency (for the header and code loads)  
+**Traps:** `TRAP_NOT_CLOSURE` (if tag/header check fails)
+
+### 6.5 `RET`
+
+Return from a call through the link register, restoring the caller's frame.
+
+```
+target = lr
+sp = fp
+fp = *(sp)        // the caller's frame pointer
+lr = *(sp + 8)    // the caller's link register
+sp = sp + 16
+pc = target
 ```
 
 **Cycles:** 1  
 **Traps:** None
 
-### 6.4 `CALL.CLOSURE Rs_closure, #argc`
+### 6.6 `TAILCALL.IC Rs_receiver`
 
-Call a closure. Loads the code entry from the closure object and sets up the environment.
+Tail-call variant of `CALL.IC`. It looks the receiver's shape up as `CALL.IC` does, keyed by its own address; a hit jumps to the entry without a frame, and a miss traps `TRAP_IC_MISS`.
 
-```
-code = *(untag_ref(Rs_closure) + 8)    // code entry is first field
-push_frame(pc + instruction_size, fp, argc)
-tp.env = Rs_closure    // runtime can access captured vars via closure ref
-pc = code
-fp = sp
-```
+### 6.7 `TAILCALL.DIRECT #offset`
 
-**Cycles:** 1 + memory latency (for code load)  
-**Traps:** `TRAP_NOT_CLOSURE` (if tag/header check fails)
-
-### 6.5 `RET`
-
-Return from call. Pops the frame.
-
-```
-sp = fp
-pc = pop_return_address()
-fp = pop_saved_fp()
-```
-
-**Cycles:** 1  
-**Traps:** `TRAP_STACK_UNDERFLOW`
-
-### 6.6 `TAILCALL.IC #callsite, Rs_receiver, #argc`
-
-Tail-call variant of `CALL.IC`. Reuses the current frame.
-
-### 6.7 `TAILCALL.DIRECT Rs_entry`
-
-Tail-call variant of `CALL.DIRECT`.
+Tail-call variant of `CALL.DIRECT`: `pc = pc + offset * 4`, without a frame.
 
 ---
 
@@ -659,22 +688,28 @@ These are conventional instructions for systems code, boot, and interfacing.
 `LDH`, `STH` — halfword (16-bit) load/store  
 `LDW`, `STW` — word (32-bit) load/store
 
+The offset is a signed byte offset. Each access clears the address bits below its size, so a doubleword access is 8-byte aligned, and the narrow loads zero-extend what they read. Each width has an opcode of its own ([07-encoding.md](07-encoding.md) § 5.8).
+
 ### 11.4 Control Flow
 
 `BR #offset` — unconditional branch  
 `BR.T Rs, #offset` — branch if `Rs` is not `nil` and not fixnum `0`  
 `BR.NIL Rs, #offset` — branch if `Rs` is `nil`  
-`BR.FIX.LT Rs1, Rs2, #offset` — branch if fixnum less-than  
-`BR.FIX.EQ Rs1, Rs2, #offset` — branch if fixnum equal  
-`BR.FIX.GT Rs1, Rs2, #offset` — branch if fixnum greater-than  
-`BR.EQ Rs1, Rs2, #offset` — branch if word-equal (`eq`)
+`BR.FIX.LT Rs, #offset` — branch if `Rs` is a fixnum below zero  
+`BR.FIX.EQ Rs, #offset` — branch if `Rs` is fixnum zero, the word 0  
+`BR.FIX.GT Rs, #offset` — branch if `Rs` is a fixnum above zero  
+`BR.EQ Rs, #offset` — branch if `Rs` is the word 0
+
+Every conditional branch tests one register, and every branch counts its offset in instructions from its own address. A program compares two values first and branches on the result: `CMP.TAGGED` gives `-2`, `0` or `+2` for `BR.FIX.LT`, `BR.FIX.EQ` and `BR.FIX.GT` to test, and `EQ` gives `t` or `nil` for `BR.T` and `BR.NIL`.
 
 ### 11.5 Stack Operations
 
 `PUSH Rs` — push to stack  
 `POP Rd` — pop from stack  
-`PUSH.MULTI #bitmask` — push multiple registers  
-`POP.MULTI #bitmask` — pop multiple registers
+`PUSH.MULTI #bank, #bitmask` — push multiple registers  
+`POP.MULTI #bank, #bitmask` — pop multiple registers
+
+`PUSH` decrements `sp` by 8 and stores `Rs` at the new `sp`; `POP` loads `Rd` from `sp` and increments `sp` by 8. The multiple forms name a bank of 16 registers, bank 0 for `r0`–`r15` and bank 1 for `r16`–`r31`, and a 16-bit mask in which bit *i* selects the bank's register *i*. `PUSH.MULTI` pushes the selected registers from the lowest-numbered up, and `POP.MULTI` pops them from the highest-numbered down, so a `POP.MULTI` with the same bank and mask restores what a `PUSH.MULTI` saved.
 
 ### 11.6 System
 
@@ -708,7 +743,6 @@ These are conventional instructions for systems code, boot, and interfacing.
 | 0x51 | `TRAP_SHARED_STORE` | A store into a shared object of a reference outside the shared heap ([05-memory-gc.md](05-memory-gc.md) § 4.5) |
 | 0x60 | `TRAP_CAPABILITY_VIOLATION` | Capability check failure |
 | 0x61 | `TRAP_SHARED_REF` | A tagged load from the shared heap that yields a reference outside it ([05-memory-gc.md](05-memory-gc.md) § 12.8) |
-| 0x70 | `TRAP_STACK_UNDERFLOW` | Return with empty stack |
 | 0x80 | `TRAP_STACK_OVERFLOW` | Stack exceeds allocated region |
 | 0xFF | `TRAP_USER` | Explicit `TRAP` instruction |
 
@@ -766,8 +800,8 @@ With headerless cons:
 
 ```asm
     ; r1 = obj (receiver), r2 = arg1, r3 = arg2, pushed or in regs per ABI
-    CALL.IC #42, r1, #3       ; callsite 42, receiver = r1, 3 args
-    ; on IC hit: direct jump to cached method
+    CALL.IC r1                ; receiver = r1; this instruction's address is the call site
+    ; on IC hit: direct call to the cached method
     ; on IC miss: TRAP_IC_MISS → runtime looks up method for foo on obj's class,
     ;             installs with IC.INSTALL, retries
 ```

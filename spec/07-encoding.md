@@ -32,16 +32,18 @@ The 6-bit opcode gives 64 top-level instruction slots. These are grouped by fami
 
 | Opcode Range | Family | Description |
 |:------------:|:------:|-------------|
-| `000000`–`000111` | F1 | Tagged arithmetic & type tests |
+| `000000`–`000111` | F1 | Tagged arithmetic & type tests; `000101` and `000110` hold the word load and store `LDW` and `STW` |
 | `001000`–`001111` | F2 | Allocation |
 | `010000`–`010111` | F3 | Field access with barriers |
 | `011000`–`011111` | F4 | Dynamic dispatch |
 | `100000`–`100011` | F5 | Pointer prefetch |
 | `100100`–`100111` | F6 | Concurrency & messaging |
 | `101000`–`101011` | F7 | Region / bulk ops |
-| `101100`–`101111` | F8 | Capability / safety (optional) |
+| `101100`–`101111` | Scalar | Byte and halfword loads and stores (`LDB`, `STB`, `LDH`, `STH`) |
 | `110000`–`111011` | Scalar | Supplementary scalar & control |
 | `111100`–`111111` | System | System, traps, NOP, HALT |
+
+Family 8, the optional capability instructions, has no opcodes assigned yet: the byte and halfword loads and stores took its range.
 
 ## 4. Instruction Formats
 
@@ -114,7 +116,7 @@ Used by all branch instructions.
 ```
  31    26 25  21 20  16 15                    0
 ┌────────┬──────┬──────┬────────────────────────┐
-│ opcode │  Rs1 │  Rs2 │   offset16 (signed)    │
+│ opcode │  Rs  │ cond │   offset16 (signed)    │
 │  (6)   │  (5) │  (5) │      (16)              │
 └────────┴──────┴──────┴────────────────────────┘
 ```
@@ -122,9 +124,9 @@ Used by all branch instructions.
 | Field | Bits | Description |
 |-------|:----:|-------------|
 | opcode | 31:26 | Branch type |
-| Rs1 | 25:21 | First test register |
-| Rs2 | 20:16 | Second test register (or 0 for single-operand branches) |
-| offset16 | 15:0 | Signed branch offset in words (multiply by 4 for byte offset). Range: ±128 KiB. |
+| Rs | 25:21 | The register a conditional branch tests (0 for `BR`) |
+| cond | 20:16 | The condition a conditional branch tests (§ 5.8; 0 for `BR`) |
+| offset16 | 15:0 | Signed branch offset in words, from the branch's own address (multiply by 4 for byte offset). Range: ±128 KiB. |
 
 ### 4.5 Format X (Extended / Special)
 
@@ -321,66 +323,40 @@ field = 1
 
 ### 5.4 Family 4: Dynamic Dispatch
 
-#### `CALL.IC #callsite, Rs_receiver, #argc` — Format X
+#### `CALL.IC Rs_receiver` — Format I
 
 ```
 opcode = 011000
-
- 25  21 20  16 15       8  7               0
-┌──────┬──────┬──────────┬───────────────────┐
-│ argc │Rs_rcv│ callsite │   (reserved, 0)   │
-│  (5) │  (5) │   (8)    │      (8)          │
-└──────┴──────┴──────────┴───────────────────┘
+Rd (25:21) = receiver
+bits 20:0 = 0
 ```
 
-`callsite`: 8-bit callsite index. For programs with >256 callsites, a callsite-base register extends this. The runtime sets the base at function entry.
+The inline cache is keyed by the instruction's address and the receiver's shape ([02-isa.md](02-isa.md) § 6.1), so the instruction carries no call-site number and no argument count.
 
-`argc`: number of arguments (0–31). Enough for most calls; variadic functions use a different convention.
-
-#### `IC.INSTALL #callsite, #shape, Rs_entry` — Format X
+#### `IC.INSTALL Rs_site, Rs_receiver, Rs_entry` — Format R
 
 ```
 opcode = 011001
-
- 25  21 20  16 15       8  7               0
-┌──────┬──────┬──────────┬───────────────────┐
-│(rsvd)│Rs_ent│ callsite │   shape (low 8)   │
-│  (5) │  (5) │   (8)    │      (8)          │
-└──────┴──────┴──────────┴───────────────────┘
+Rd (25:21) = Rs_site, the register holding the call site's address
+Rs1 = Rs_receiver, whose shape keys the entry
+Rs2 = Rs_entry, the code entry
+func = 00000
 ```
 
-The full 32-bit shape ID is passed via a register (the IC unit reads it from Rs1 or a preceding `LI`).
-
-#### `CALL.DIRECT Rs_entry` — Format X
+#### `CALL.DIRECT #offset` — Format I
 
 ```
 opcode = 011010
-
- 25  21 20                                   0
-┌──────┬────────────────────────────────────────┐
-│(rsvd)│              Rs_entry (5) + reserved    │
-└──────┴────────────────────────────────────────┘
+bits 25:16 = 0
+imm16 = signed offset in instructions from the CALL.DIRECT
 ```
 
-Actually:
-```
- 25  21 20  16 15                            0
-┌──────┬──────┬────────────────────────────────┐
-│(rsvd)│Rs_ent│           (reserved, 0)        │
-│  (5) │  (5) │              (16)              │
-└──────┴──────┴────────────────────────────────┘
-```
-
-#### `CALL.CLOSURE Rs_closure, #argc` — Format X
+#### `CALL.CLOSURE Rs_closure` — Format I
 
 ```
 opcode = 011011
-
- 25  21 20  16 15     11 10                  0
-┌──────┬──────┬────────┬──────────────────────┐
-│ argc │Rs_cls│ (rsvd) │     (reserved, 0)    │
-│  (5) │  (5) │  (5)   │       (11)           │
-└──────┴──────┴────────┴──────────────────────┘
+Rd (25:21) = closure
+bits 20:0 = 0
 ```
 
 #### `RET` — Format X
@@ -390,14 +366,14 @@ opcode = 011100
 All payload bits = 0
 ```
 
-#### `TAILCALL.IC #callsite, Rs_receiver, #argc` — Format X
+#### `TAILCALL.IC Rs_receiver` — Format I
 
 ```
 opcode = 011101
 (same layout as CALL.IC)
 ```
 
-#### `TAILCALL.DIRECT Rs_entry` — Format X
+#### `TAILCALL.DIRECT #offset` — Format I
 
 ```
 opcode = 011110
@@ -553,26 +529,51 @@ func = 00000 (AND), 00001 (OR), 00010 (XOR), 00011 (SHL), 00100 (SHR),
        00101 (ASR), 00110 (NOT — Rs2 ignored)
 ```
 
-#### Raw Load/Store: `LDR`, `STR`, `LDB`, `STB`, `LDH`, `STH`, `LDW`, `STW` — Format I / S
+#### Raw Load/Store: `LDR`, `STR`, `LDB`, `STB`, `LDH`, `STH`, `LDW`, `STW` — Format I
+
+Each width has an opcode of its own:
+
+| Width | Load | Store |
+|-------|:----:|:-----:|
+| doubleword (64 bits) | `LDR` 110010 | `STR` 110011 |
+| word (32 bits) | `LDW` 000101 | `STW` 000110 |
+| halfword (16 bits) | `LDH` 101110 | `STH` 101111 |
+| byte | `LDB` 101100 | `STB` 101101 |
 
 ```
-opcode = 110010 (loads), 110011 (stores)
-func/imm bits select width: 000 = byte, 001 = half, 010 = word, 011 = dword
+loads:  Rd = destination, Rs1 = base, imm16 = signed byte offset
+stores: bits 25:21 = base (Rs), bits 20:16 = value (Rt), imm16 = signed byte offset
 ```
+
+A store places its base and value where Format S places `Rs` and `Rt`, and its offset takes all sixteen bits that Format S divides between `field` and `imm11`.
 
 #### Branches — Format B
 
 ```
-opcode = 110100 (BR)
-opcode = 110101 (BR.T, BR.NIL, BR.FIX.LT, BR.FIX.EQ, BR.FIX.GT, BR.EQ)
-Rs2 encoding or func bits select the condition type.
+opcode = 110100 (BR): bits 25:16 = 0
+opcode = 110101 (BR.T, BR.NIL, BR.FIX.LT, BR.FIX.EQ, BR.FIX.GT, BR.EQ):
+    Rs (25:21) = the register tested
+    cond (20:16) = 00000 BR.T, 00001 BR.NIL, 00010 BR.FIX.LT,
+                   00011 BR.FIX.EQ, 00100 BR.FIX.GT, 00101 BR.EQ
 ```
 
-#### Stack: `PUSH`, `POP` — Format I
+Other `cond` values are reserved.
+
+#### Stack: `PUSH`, `POP` — Format R
 
 ```
 opcode = 110110
-imm16 = 0 for single, or bitmask for PUSH.MULTI / POP.MULTI
+Rd = the register pushed or popped
+func = 00000 (PUSH), 00001 (POP)
+```
+
+#### Stack: `PUSH.MULTI`, `POP.MULTI` — Format I
+
+```
+opcode = 111001 (PUSH.MULTI), 111010 (POP.MULTI)
+Rd (25:21) = bank: 0 for r0–r15, 1 for r16–r31
+Rs1 = 0
+imm16 = register mask, bit i for the bank's register i
 ```
 
 #### Immediate Load: `LI Rd, #imm16` — Format I
@@ -623,19 +624,13 @@ The table is stored in the tile's scratch SRAM region and initialized by the run
 
 ---
 
-## 7. Callsite-Base Register
-
-With an 8-bit callsite field in `CALL.IC`, a function can have at most 256 distinct dispatch sites. For functions with more, the compiler partitions callsites into groups of 256 and sets a **callsite-base register** (stored in `tp` or a dedicated field) at the beginning of each group. The hardware IC lookup uses `callsite_base + callsite_field` as the effective callsite ID.
-
----
-
-## 8. Instruction Alignment
+## 7. Instruction Alignment
 
 All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch offsets are in units of 4 bytes (1 instruction word).
 
 ---
 
-## 9. Encoding Summary Table
+## 8. Encoding Summary Table
 
 | Instruction | Opcode | Format | Key Fields |
 |-------------|:------:|:------:|------------|
@@ -648,6 +643,8 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | ADD.FIX.IMM | 000011 | I | Rd, Rs, imm16 |
 | CMP.TAGGED | 000100 | R | func=0 |
 | EQ | 000100 | R | func=1 |
+| LDW | 000101 | I | Rd, Rs, offset |
+| STW | 000110 | I | Rs, Rt, offset |
 | ALLOC | 001000 | X | Rd, words, template |
 | ALLOC.CONS | 001001 | X | Rd |
 | ALLOCV | 001010 | X | Rd, Rs_len, template |
@@ -657,13 +654,13 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | ST | 010010 | S | Rs, field, Rt |
 | ST.WB | 010011 | S | Rs, field, Rt |
 | ST.CAR/CDR | 010100 | S | Rs, Rt, 0/1 |
-| CALL.IC | 011000 | X | argc, Rs_rcv, callsite |
-| IC.INSTALL | 011001 | X | Rs_entry, callsite, shape |
-| CALL.DIRECT | 011010 | X | Rs_entry |
-| CALL.CLOSURE | 011011 | X | argc, Rs_closure |
+| CALL.IC | 011000 | I | Rs_rcv |
+| IC.INSTALL | 011001 | R | Rs_site, Rs_rcv, Rs_entry |
+| CALL.DIRECT | 011010 | I | offset |
+| CALL.CLOSURE | 011011 | I | Rs_closure |
 | RET | 011100 | X | — |
-| TAILCALL.IC | 011101 | X | (as CALL.IC) |
-| TAILCALL.DIRECT | 011110 | X | (as CALL.DIRECT) |
+| TAILCALL.IC | 011101 | I | (as CALL.IC) |
+| TAILCALL.DIRECT | 011110 | I | (as CALL.DIRECT) |
 | PREFETCH.REF | 100000 | I | Rs |
 | PREFETCH.FIELD | 100001 | I | Rs, field |
 | PREFETCH.CDR | 100010 | I | Rs |
@@ -677,15 +674,21 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 | ENQ.COPY | 101001 | I | Rs_src, Rd_dst |
 | ENQ.FIXUP | 101010 | R | Rs_ptrs, Rs_fwd |
 | ENQ.COMPACT | 101011 | I | Rs_region |
+| LDB | 101100 | I | Rd, Rs, offset |
+| STB | 101101 | I | Rs, Rt, offset |
+| LDH | 101110 | I | Rd, Rs, offset |
+| STH | 101111 | I | Rs, Rt, offset |
 | ADD (raw) | 110000 | R | func=0 |
 | AND | 110001 | R | func=0 |
-| LDR | 110010 | I | width in imm |
-| STR | 110011 | S | width in imm |
+| LDR | 110010 | I | Rd, Rs, offset |
+| STR | 110011 | I | Rs, Rt, offset |
 | BR | 110100 | B | offset |
-| BR.T / BR.NIL | 110101 | B | Rs, offset |
-| PUSH / POP | 110110 | I | Rs or bitmask |
+| BR.T / BR.NIL / BR.FIX.* / BR.EQ | 110101 | B | Rs, cond, offset |
+| PUSH / POP | 110110 | R | Rd, func |
 | LI | 110111 | I | Rd, imm16 |
 | LUI | 111000 | I | Rd, imm16 |
+| PUSH.MULTI | 111001 | I | bank, mask |
+| POP.MULTI | 111010 | I | bank, mask |
 | TRAP | 111100 | X | trap code |
 | ERET | 111101 | X | — |
 | TILE.ID etc | 111110 | X | func selects |
@@ -693,7 +696,7 @@ All instructions are 4-byte aligned. The PC is always a multiple of 4. Branch of
 
 ---
 
-## 10. Object File Format
+## 9. Object File Format
 
 Compiled Lisp functions are stored in **LM-1 object files** (`.lmo`):
 
@@ -751,4 +754,3 @@ Relocation types:
 - `R_LM1_ABS64`: 64-bit absolute address
 - `R_LM1_REL16`: 16-bit relative offset (for branch/imm fields)
 - `R_LM1_TEMPLATE`: header-template table index
-- `R_LM1_CALLSITE`: callsite ID assignment

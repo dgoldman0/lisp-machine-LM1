@@ -308,5 +308,4 @@ The LM-1 implements a vectored trap system:
 | 0x40 | Engine | ENGINE_BUSY |
 | 0x50 | Barrier | BARRIER_OVERFLOW |
 | 0x60 | Security | CAPABILITY_VIOLATION |
-| 0x70 | Stack | STACK_UNDERFLOW |
 | 0xFE | Fallback | UNIMPLEMENTED (unknown opcode) |

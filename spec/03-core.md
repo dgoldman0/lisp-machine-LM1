@@ -43,7 +43,7 @@ This document specifies the microarchitecture of a single LM-1 DOP core — one 
 
 - Decodes the 32-bit instruction, identifies the family and operation.
 - Reads source registers from the register file.
-- For `CALL.IC`: extracts the callsite ID and begins the IC lookup (pipelined into TG).
+- For `CALL.IC`: begins the IC lookup, keyed by the instruction's own address and the receiver's shape (pipelined into TG).
 
 ### 3.3 Stage TG: Tag Check (Lisp-Specific)
 
@@ -89,7 +89,6 @@ The core supports **4 hardware thread contexts**. Each context has its own:
 - 32 GPRs (r0–r31) + special registers (sp, fp, lr, tp, np, nl)
 - PC
 - Thread state (running, stalled, halted)
-- IC scratch registers (ic0–ic3)
 
 The scheduler selects which thread enters the pipeline each cycle. Policies:
 
@@ -131,18 +130,18 @@ A small **content-addressable memory** (CAM) that stores IC entries. Probed duri
 | Parameter | Value |
 |-----------|-------|
 | Entries | 64 per core (shared across threads) |
-| Entry size | 16 bytes (callsite: 3B, shape: 4B, code_entry: 6B, flags: 1B, padding: 2B) |
-| Total IC SRAM | 1 KiB |
+| Entry size | 17 bytes (call site address: 6B, shape: 4B, code_entry: 6B, flags: 1B) |
+| Total IC SRAM | ~1.1 KiB |
 | Lookup | Fully associative, 1-cycle |
 | Replacement | LRU (approximate, 2-bit) |
 
 The IC unit:
-1. Receives `(callsite_id, shape_hint)` from the TG stage.
-2. Probes all entries in parallel (CAM match on callsite + shape).
+1. Receives the `CALL.IC`'s address and the receiver's shape from the TG stage.
+2. Probes all entries in parallel (CAM match on call site address + shape).
 3. On hit: outputs `code_entry` to EX stage.
 4. On miss: signals `TRAP_IC_MISS`.
 
-**Polymorphic IC extension (OPTIONAL):** An implementation MAY support **megamorphic entries** — entries keyed only by callsite that point to a runtime-generated dispatch stub. This avoids repeated traps for highly polymorphic sites.
+**Polymorphic IC extension (OPTIONAL):** An implementation MAY support **megamorphic entries** — entries keyed only by call site that point to a runtime-generated dispatch stub. This avoids repeated traps for highly polymorphic sites.
 
 ### 5.3 Nursery Allocator
 
@@ -193,7 +192,7 @@ From trap detection to first handler instruction: **3 cycles** (pipeline drain +
 
 ### 6.3 Return from Trap
 
-`ERET` restores the PC from the trap-save register and resumes the thread.
+`ERET` restores the PC from the trap-save register and resumes the thread there. A fault, the trap an instruction raises when its fast path fails, saves the faulting instruction's PC, so `ERET` runs that instruction again: once a handler has collected the nursery, installed an inline-cache entry or changed a register the instruction reads, the retry succeeds. An explicit `TRAP` saves the PC of the next instruction, so `ERET` resumes after it, as a return from a system call does.
 
 ## 7. Core Area Budget (Illustrative)
 

@@ -406,7 +406,7 @@ Each image holds one group's results in the canonical layout of MegaPad's `docs/
 | FP16, BF16 | 32 | binary32 |
 | FP32 | 16 | binary64 |
 
-LM-1 reads a 32-bit lane with `LDW` (02-isa § 11.3) and makes it a fixnum, which always holds it. A search that orders candidates by score compares fixnums with `BR.FIX.LT` and needs no floating-point unit. A binary32 lane becomes an integer key that orders as the floats do in three bit operations, so float scores are compared the same way.
+LM-1 reads a 32-bit lane with `LDW` (02-isa § 11.3) and makes it a fixnum, which always holds it. A search that orders candidates by score compares fixnums with `CMP.TAGGED` and branches on the result with `BR.FIX.LT`, so it needs no floating-point unit. A binary32 lane becomes an integer key that orders as the floats do in three bit operations, so float scores are compared the same way.
 
 ### 8.3 Waiting
 
