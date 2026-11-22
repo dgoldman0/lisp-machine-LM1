@@ -1,7 +1,7 @@
 # LM-1 Chiplet Module: Plan for Part 8d
 
-**Status:** Proposed, 2026-11-22. Items marked Decided cite the decision;
-section 5 lists the decisions still to take.
+**Status:** Accepted, 2026-11-22. Items marked Decided cite the decision;
+section 5 records the decisions this plan rests on.
 
 ---
 
@@ -54,17 +54,22 @@ software, written in Lisp, and the model stands in for it in two places.
 The first is the reference's own: the Python emulator answers
 `TRAP_NURSERY_OVERFLOW` with a native minor collection, which
 `spec/02-isa.md` § 4.1 gives the runtime, and the module keeps that
-collection as the reference runs it. The second is new. LM-1's spec gives
-the shared heap's collector to the runtime as well (`spec/05-memory-gc.md`
-§ 12): the runtime grants allocation regions, interns shapes and states the
-bounds of holds, and the movement engines of `spec/04-soc.md` § 5.3 reach
-only a cluster's shared SRAM, so work on the shared heap, which lies across
-the link in MegaPad's memory, goes through the host-memory port. Until
-LM-1's runtime runs on the model and serves the shared heap itself, the
-module serves it natively in C++: managed data's function (class 1 of
-`docs/chiplet-link.md` § 8) and the queue software at LM-1's end of the
-link. Decision A in section 5 is whether this reading of the 2026-11-20
-decision holds.
+collection as the reference runs it. The second is new: managed data's
+function (class 1 of `docs/chiplet-link.md` § 8) and the queue software at
+LM-1's end of the link, which the module serves natively in C++ until
+LM-1's runtime runs on the model and serves them itself (decision A).
+
+The shared heap divides between the two. Its policy belongs to the runtime
+(`spec/05-memory-gc.md` § 12): the runtime grants allocation regions,
+interns shapes, states the bounds of holds, and sequences each collection,
+as it sequences the movement engines with `ENQ.SCAN`, `ENQ.COPY` and
+`ENQ.FIXUP` on LM-1's own heap (`spec/04-soc.md` § 5.3). Its moving work,
+the scanning, copying and fixing up, is done "by the runtime or by engines
+given a path to that port, which the chiplet revision decides"
+(`spec/05-memory-gc.md` § 12.3, item 8), since the engines reach only a
+cluster's shared SRAM and the shared heap lies across the link in
+MegaPad's memory. The module's stand-in carries the policy, and models the
+moving work as the movement engines given a path to the link (decision G).
 
 ## 3. Stages
 
@@ -117,8 +122,10 @@ pass the same cases.
 The module's runtime stand-in serves managed data, and MegaPad's side is
 built beside it (decision B):
 
-- **LM-1's side,** in the module: offer `MANAGED` and serve `ATTACH`; count
-  handles as roots and rewrite their slots on every move; drain each MegaPad
+- **LM-1's side,** in the module, with the moving work done by the model of
+  the movement engines that decision G describes: offer `MANAGED` and
+  serve `ATTACH`; count handles as roots and rewrite their slots on every
+  move; drain each MegaPad
   core's store log and replay its entries through the barrier; collect only
   inside holds that wait for open windows, within `HOLD_LIMIT` and
   `HOLD_GAP`, with `NOTICE` for an overdue window; grant, retire and walk
@@ -144,61 +151,82 @@ through the real code at both ends in the emulator and the simulator.
 
 The module's own tests run through LM-1's test runner as batches that load
 the module through `ctypes` (decision D), so the release's test selection
-runs them like LM-1's other batches. The core model is one C++ library
-compiled into two products: the chiplet module, and a Python extension the
-differential tests drive. Tests that need MegaPad, from stage 2 on, run as
-MegaPad or Akashic test files that attach the built module.
+runs them like LM-1's other batches. The module is one C++ library: it
+exports `mp64_chiplet_create` for MegaPad and a small C interface through
+which LM-1's own tests drive the core model, and MegaPad attaches the same
+library that LM-1's tests load. No test runs against a library older than
+its sources. Tests that need MegaPad, from stage 2 on, run as MegaPad or
+Akashic test files that attach the built module.
 
-## 5. Decisions to take
+## 5. Decisions
 
-**A. The runtime stand-in.** The 2026-11-20 decision builds managed data's
-collector side first in this module. Because the spec gives that collector
-to LM-1's runtime, which on the chip is Lisp, the module's version is a
-native stand-in for runtime software.
-- *Options:* (a) build the stand-in, and retire it once LM-1's Lisp runtime
-  serves the shared heap on the model and passes the same 27 tests; (b)
-  build only the hardware model now, and write the collector side as LM-1
-  runtime code, which waits for LM-1's runtime and compiler (Parts 8f and
-  9e).
-- *Recommendation:* (a). It lets MegaPad's side of managed data, Study's
-  concept map and the D13 recovery work proceed now, and the stand-in is a
-  bridge with a stated end, which the workspace rules allow.
-- *Cost:* the stand-in is stage 3's LM-1 side; under (b) that work moves
-  into the runtime instead and stage 3 waits on Parts 8f and 9e.
+All decided on 2026-11-22.
 
-**B. MegaPad's side of stage 3 is the real code.**
-- *Options:* (a) build MegaPad's managed-data words (part of Part 9a) with
-  stage 3; (b) drive the module from a test harness that plays MegaPad's
-  part.
-- *Recommendation:* (a). The conformance tests are written against
-  MegaPad's words, and a harness would be a second implementation of
-  MegaPad's side that the release does not keep.
-- *Cost:* stage 3 spans MegaPad and this repository, on a branch in each.
+**A. The runtime stand-in.** The module serves managed data natively, as a
+stand-in for LM-1's runtime, which on the chip is Lisp. The stand-in
+retires once LM-1's Lisp runtime serves the shared heap on the model and
+passes the same 27 conformance tests. Writing the function as runtime code
+from the start would have made stage 3 wait for LM-1's runtime and
+compiler (Parts 8f and 9e); the stand-in lets MegaPad's side of managed
+data, Study's concept map and the recovery work of D13 proceed now, as a
+bridge with a stated end.
 
-**C. Where the module finds `chiplet_module.h`.**
-- *Options:* (a) build against the workspace's MegaPad checkout, named as
-  the link testbench names it (`MEGAPAD_ROOT`), with a compile-time check
-  of `MP64_CHIPLET_ABI`; (b) keep a copy of the header here.
-- *Recommendation:* (a). The interface belongs to MegaPad, and a copy could
-  drift; the release's lock file (Part 1b) records which MegaPad commit a
-  build used.
-- *Cost:* none beyond the build script.
+**B. MegaPad's side of stage 3 is the real code.** Stage 3 builds
+MegaPad's managed-data words, part of release plan Part 9a, beside the
+module. The conformance tests are written against those words, and a
+harness that played MegaPad's part would be a second implementation of
+MegaPad's side that the release does not keep. Stage 3 therefore spans
+MegaPad and this repository, on a branch in each.
 
-**D. How the module's tests reach the test selection.**
-- *Options:* (a) LM-1 runner batches that load the module through `ctypes`;
-  (b) pytest files, which the selection's LM-1 driver does not run today.
-- *Recommendation:* (a), which needs no change to the selection.
-- *Cost:* none.
+**C. The interface header comes from MegaPad.** The module builds against
+`shared/accel/chiplet_module.h` in the workspace's MegaPad checkout, named
+as the link testbench names it (`MEGAPAD_ROOT`), and checks
+`MP64_CHIPLET_ABI` when it compiles. The interface belongs to MegaPad, a
+copy here could drift, and the release's lock file (Part 1b) records which
+MegaPad commit a build used.
 
-**E. Sizes before D8.** The model's sizes come from the configuration
-string, with the spec's present numbers as defaults, so stage 1 does not
-wait for the sizing study of D8. The study can measure Leviathan's load on
-LM-1 with the module once stage 3 serves managed data.
+**D. The module's tests are LM-1 runner batches.** They load the module
+through `ctypes`, so the release's test selection runs them as it runs
+LM-1's other batches.
 
-**F. One model afterwards** (for later). Once the module passes every test
-the Python emulator passes, the module becomes the reference, its Python
-extension serves the toolchain's needs, and the Python emulator retires by
-archive tag, so that one model remains.
+**E. Sizes come from the configuration.** The model's sizes come from the
+module's configuration string, with the spec's present numbers as
+defaults, so no stage waits for the sizing study of D8. The study can
+measure Leviathan's load on LM-1 with the module once stage 3 serves
+managed data.
+
+**F. One model afterwards.** Once the module passes every test the Python
+emulator passes, the module becomes the reference, its C interface serves
+the toolchain's needs, and the Python emulator retires by archive tag, so
+that one model remains.
+
+**G. The shared heap's moving work is modeled as the movement engines.**
+Stage 3 models the scanning, copying and fixing up on the shared heap as
+the movement engines of `spec/04-soc.md` § 5.3 given a path to the link,
+sequenced by the stand-in's policy. The chiplet revision (release plan
+Part 8b) is expected to give the engines that path, and confirms it once
+the sizing study of D8 has measured the traffic the moves add to
+MegaPad's memory. Under D8's option of keeping LM-1's main memory in
+MegaPad's memory, LM-1's own old generation lies across the link too, and
+the engines need the path for LM-1's own heap. Should the revision choose
+the runtime instead, the stand-in was temporary in any case. The engines'
+model follows four rules the spec already sets, which the engines' own
+description in `spec/04-soc.md` § 5.3 predates and the chiplet revision
+brings into it:
+
+1. Marks stay outside shared objects' headers (`spec/05-memory-gc.md`
+   § 12.3, item 12), so the copier takes liveness from a mark table
+   rather than a header's mark bit.
+2. The scanner reads an object's layout from its header and skips raw
+   words, which since 2026-11-20 follow a record's tagged fields
+   (`spec/01-object-model.md`); a tag check on every word would read raw
+   words as references, on LM-1's own heap as well.
+3. References written into shared objects carry zero in bits 63:51
+   (`spec/05-memory-gc.md` § 12.1, item 4), using the shared-heap range
+   check that tagged stores already make.
+4. An engine reports completion only after its last write over the link
+   is answered, so the `MOVE` word's `FIXED` follows every rewrite
+   (`spec/05-memory-gc.md` § 12.3, items 10 and 11).
 
 ## 6. After this plan
 
