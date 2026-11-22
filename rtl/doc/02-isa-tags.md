@@ -209,13 +209,15 @@ This implements **monomorphic inline caching** — the key optimization for dyna
 
 | Opcode | Mnemonic | Format | Operation |
 |--------|----------|--------|-----------|
-| 36 | SEND | I | Send tagged word to hardware queue. Traps if full. |
-| 37 | RECV | I | Blocking receive from hardware queue. Traps if empty. |
-| 37 | TRY.RECV | R | Non-blocking receive. `Rd = value or nil`, `Rd2 = t or nil`. |
+| 36 | SEND | S | `SEND Rs, Rt`: send `Rt` to the queue the descriptor in `Rs` names. Traps if full or unreachable. |
+| 37 | RECV | I | `RECV Rd, Rs`: blocking receive from the queue `Rs` names. Traps if empty or unreachable. |
+| 37 | TRY.RECV | R | `TRY.RECV Rd, Rd2, Rs`: non-blocking receive. `Rd = value or nil`, `Rd2 = t or nil`. |
 | 38 | CAS.TAGGED | X | Compare-and-swap on a tagged word in memory. |
 | 39 | FAA / FENCE.GC | R | Fetch-and-add / GC fence (wait for all engines idle). |
 
-**TRY.RECV encoding:** Same opcode as RECV, but `func ≠ 0`. The `func` field encodes the Rd2 register index. This allows non-blocking queue polling without trapping.
+**Queue descriptors:** a fixnum whose value is tile × 4 + queue (spec/02-isa.md § 8). One naming the core's own tile reaches its four queues; one naming another tile goes out through the core's remote queue port to the cluster's message router ([SoC Integration](06-soc-integration.md)).
+
+**TRY.RECV encoding:** Same opcode as RECV, but `func ≠ 0`. The `func` field encodes the Rd2 register index, so Rd2 cannot be r0. This allows non-blocking queue polling without trapping.
 
 ### Family 7: GC Engine Commands
 

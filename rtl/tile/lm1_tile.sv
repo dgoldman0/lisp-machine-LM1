@@ -4,7 +4,7 @@
 // Instantiates a single DOP core, tile SRAM, and exposes:
 //   - Cluster crossbar port (read/write to cluster shared SRAM)
 //   - GC engine command forwarding
-//   - NoC router port stub
+//   - NoC router port stub, and the core's port to other tiles' queues
 //   - DMA endpoint stub
 //
 // Memory map (256 KiB tile SRAM, 32K × 64-bit words):
@@ -78,7 +78,17 @@ module lm1_tile
 
     // --- Queue status ---
     output logic [3:0]         mq_empty,
-    output logic [3:0]         mq_full
+    output logic [3:0]         mq_full,
+
+    // --- Remote queue port: the core's SEND and RECV on another tile ---
+    output logic               rmq_req,
+    output logic               rmq_write,
+    output logic [XLEN-1:0]   rmq_tile,
+    output logic [1:0]         rmq_queue,
+    output logic [XLEN-1:0]   rmq_wdata,
+    input  logic               rmq_ack,
+    input  logic               rmq_ok,
+    input  logic [XLEN-1:0]   rmq_rdata
 );
 
     // Tile ID as a 64-bit constant
@@ -154,6 +164,15 @@ module lm1_tile
         // Queue status
         .mq_empty       (mq_empty),
         .mq_full        (mq_full),
+        // Remote queue port
+        .rmq_req        (rmq_req),
+        .rmq_write      (rmq_write),
+        .rmq_tile       (rmq_tile),
+        .rmq_queue      (rmq_queue),
+        .rmq_wdata      (rmq_wdata),
+        .rmq_ack        (rmq_ack),
+        .rmq_ok         (rmq_ok),
+        .rmq_rdata      (rmq_rdata),
         // Cluster crossbar port
         .xbar_req_valid (xbar_req_valid),
         .xbar_req_we    (xbar_req_we),

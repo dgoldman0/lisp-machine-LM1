@@ -71,7 +71,8 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | [rtl/target/xilinx7/](rtl/target/xilinx7/) | FPGA target: Genesys 2 (Kintex-7 325T) constraints |
 | [rtl/doc/](rtl/doc/) | RTL design documentation |
 | [fpga/](fpga/) | FPGA top-level wrapper + synthesis file lists |
-| [tb/](tb/) | Verilator testbench: 41 tests, test generators |
+| [tb/](tb/) | Verilator testbench: 47 tests, test generators |
+| [tb/cluster/](tb/cluster/) | Two-tile cluster bench: SEND and RECV between tiles through the cluster's message router |
 | [tb/link/](tb/link/) | Host-link benches: against a behavioural MegaPad, and against MegaPad's RTL when `MEGAPAD_ROOT` is set |
 
 ### Emulator

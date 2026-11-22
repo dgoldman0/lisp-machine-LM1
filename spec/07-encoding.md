@@ -445,9 +445,11 @@ imm16 = 0 (blocking)
 opcode = 100101
 Rd = value destination
 Rs1 = queue descriptor
-Rs2 = status destination (overloaded: Rd2 is encoded in func field)
+Rs2 = 0
 func[4:0] = Rd2 register index
 ```
+
+`TRY.RECV` shares `RECV`'s opcode, and a `func` other than 0 marks it, so `Rd2` cannot be `r0`.
 
 #### `CAS.TAGGED Rd, Rs_addr, Rs_expected, Rt_new` — Format X
 

@@ -10,7 +10,7 @@
 //   - Control FSM (multi-cycle orchestration)
 //   - Header template table (256×64)
 //   - Inline cache table (16-entry fully-associative)
-//   - Hardware message queues (4 FIFOs)
+//   - Hardware message queues (4 FIFOs), and a port to other tiles' queues
 //   - Performance counters (8 × 64-bit)
 //   - Main memory (SRAM)
 //
@@ -83,6 +83,16 @@ module lm1_cpu
     // --- Queue status ---
     output logic [3:0]         mq_empty,
     output logic [3:0]         mq_full,
+
+    // --- Remote queue port: SEND and RECV on another tile's queue ---
+    output logic               rmq_req,
+    output logic               rmq_write,
+    output logic [XLEN-1:0]   rmq_tile,
+    output logic [1:0]         rmq_queue,
+    output logic [XLEN-1:0]   rmq_wdata,
+    input  logic               rmq_ack,
+    input  logic               rmq_ok,
+    input  logic [XLEN-1:0]   rmq_rdata,
 
     // --- Cluster crossbar port (for addresses beyond local SRAM) ---
     output logic               xbar_req_valid,
@@ -162,10 +172,12 @@ module lm1_cpu
     logic [1:0]         mq_wr_id;
     logic [XLEN-1:0]   mq_wr_data;
     logic               mq_wr_ready;
+    logic               mq_wr_full;
     logic               mq_rd_en;
     logic [1:0]         mq_rd_id;
     logic [XLEN-1:0]   mq_rd_data;
     logic               mq_rd_valid;
+    logic               mq_rd_empty;
 
     // Performance counter
     logic [4:0]         ctr_id;
@@ -477,10 +489,21 @@ module lm1_cpu
         .mq_wr_id     (mq_wr_id),
         .mq_wr_data   (mq_wr_data),
         .mq_wr_ready  (mq_wr_ready),
+        .mq_wr_full   (mq_wr_full),
         .mq_rd_en     (mq_rd_en),
         .mq_rd_id     (mq_rd_id),
         .mq_rd_data   (mq_rd_data),
         .mq_rd_valid  (mq_rd_valid),
+        .mq_rd_empty  (mq_rd_empty),
+        // Remote queue port
+        .rmq_req      (rmq_req),
+        .rmq_write    (rmq_write),
+        .rmq_tile     (rmq_tile),
+        .rmq_queue    (rmq_queue),
+        .rmq_wdata    (rmq_wdata),
+        .rmq_ack      (rmq_ack),
+        .rmq_ok       (rmq_ok),
+        .rmq_rdata    (rmq_rdata),
         // GC engine command
         .gc_cmd_valid (gc_cmd_valid),
         .gc_cmd_op    (gc_cmd_op),
@@ -533,10 +556,12 @@ module lm1_cpu
         .wr_id        (mq_wr_id),
         .wr_data      (mq_wr_data),
         .wr_ready     (mq_wr_ready),
+        .wr_full      (mq_wr_full),
         .rd_en        (mq_rd_en),
         .rd_id        (mq_rd_id),
         .rd_data      (mq_rd_data),
         .rd_valid     (mq_rd_valid),
+        .rd_empty     (mq_rd_empty),
         // External ports (for NoC / tile interconnect)
         .ext_wr_en    (ext_mq_wr_en),
         .ext_wr_id    (ext_mq_wr_id),

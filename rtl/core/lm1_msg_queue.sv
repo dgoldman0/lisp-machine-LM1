@@ -5,9 +5,18 @@
 // Used by SEND/RECV instructions for inter-tile messaging.
 //
 // Ports:
-//   Write side: wr_en + wr_id + wr_data, ready indicates space available
-//   Read side:  rd_en + rd_id + rd_data, valid indicates data available
-//   External push/pop: for NoC or DMA injecting/draining messages
+//   Core write: wr_en + wr_id + wr_data; wr_ready says the word is taken
+//               this cycle, wr_full that the selected queue is full
+//   Core read:  rd_en + rd_id; rd_valid says rd_data is taken this cycle,
+//               rd_empty that the selected queue is empty
+//   External push/pop: for the cluster's message router, the NoC or DMA
+//               injecting/draining messages
+//
+// The external ports go first on a queue both sides use in one cycle, so
+// they never wait: ext_wr_ready is "not full" and ext_rd_valid "not
+// empty".  The core's access to that queue waits a cycle, and the core
+// tells a queue that is busy from one that is full or empty by wr_full and
+// rd_empty.
 // ============================================================================
 module lm1_msg_queue
     import lm1_pkg::*;
@@ -23,13 +32,15 @@ module lm1_msg_queue
     input  logic               wr_en,
     input  logic [1:0]         wr_id,
     input  logic [XLEN-1:0]   wr_data,
-    output logic               wr_ready,       // selected queue not full
+    output logic               wr_ready,       // a word written now is taken
+    output logic               wr_full,        // selected queue is full
 
     // --- Core read port (RECV) ---
     input  logic               rd_en,
     input  logic [1:0]         rd_id,
     output logic [XLEN-1:0]   rd_data,
-    output logic               rd_valid,       // selected queue not empty
+    output logic               rd_valid,       // a word read now is taken
+    output logic               rd_empty,       // selected queue is empty
 
     // --- External write port (NoC → queue) ---
     input  logic               ext_wr_en,
@@ -69,9 +80,11 @@ module lm1_msg_queue
         end
     endgenerate
 
-    // Core port ready/valid
-    assign wr_ready = ~q_full[wr_id];
-    assign rd_valid = ~q_empty[rd_id];
+    // Core port ready/valid: the external port goes first on one queue
+    assign wr_full  = q_full[wr_id];
+    assign rd_empty = q_empty[rd_id];
+    assign wr_ready = ~q_full[wr_id] && !(ext_wr_en && ext_wr_id == wr_id);
+    assign rd_valid = ~q_empty[rd_id] && !(ext_rd_en && ext_rd_id == rd_id);
     assign rd_data  = mem[rd_id][rd_ptr[rd_id][ADDR_W-1:0]];
 
     // External port ready/valid
@@ -79,7 +92,7 @@ module lm1_msg_queue
     assign ext_rd_valid = ~q_empty[ext_rd_id];
     assign ext_rd_data  = mem[ext_rd_id][rd_ptr[ext_rd_id][ADDR_W-1:0]];
 
-    // Write/read arbitration: core has priority over external for same queue
+    // Write/read arbitration: external has priority over core for same queue
     always_comb begin
         for (int i = 0; i < NUM_QUEUES; i++) begin
             q_wr_en[i]   = 1'b0;
@@ -87,27 +100,23 @@ module lm1_msg_queue
             q_rd_en[i]   = 1'b0;
         end
 
-        // Core write
-        if (wr_en && ~q_full[wr_id]) begin
+        // External write
+        if (ext_wr_en && ~q_full[ext_wr_id]) begin
+            q_wr_en[ext_wr_id]   = 1'b1;
+            q_wr_data[ext_wr_id] = ext_wr_data;
+        end
+        // Core write (only if the external port isn't writing the same queue)
+        if (wr_en && wr_ready) begin
             q_wr_en[wr_id]   = 1'b1;
             q_wr_data[wr_id] = wr_data;
         end
-        // External write (only if core isn't writing to same queue)
-        if (ext_wr_en && ~q_full[ext_wr_id]) begin
-            if (!(wr_en && wr_id == ext_wr_id)) begin
-                q_wr_en[ext_wr_id]   = 1'b1;
-                q_wr_data[ext_wr_id] = ext_wr_data;
-            end
-        end
 
-        // Core read
-        if (rd_en && ~q_empty[rd_id])
+        // External read
+        if (ext_rd_en && ~q_empty[ext_rd_id])
+            q_rd_en[ext_rd_id] = 1'b1;
+        // Core read (only if the external port isn't reading the same queue)
+        if (rd_en && rd_valid)
             q_rd_en[rd_id] = 1'b1;
-        // External read (only if core isn't reading same queue)
-        if (ext_rd_en && ~q_empty[ext_rd_id]) begin
-            if (!(rd_en && rd_id == ext_rd_id))
-                q_rd_en[ext_rd_id] = 1'b1;
-        end
     end
 
     // Sequential: pointer and memory updates

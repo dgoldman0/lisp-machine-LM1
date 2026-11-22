@@ -78,23 +78,6 @@ uninitialized template slots.
 **Action:** Add a reset-sequencer that clears all 64 entries, or add a
 "template valid" bit and trap on access to invalid entries.
 
-### P0-9  SEND and RECV take a queue number from the immediate
-
-The RTL and the assembler put a queue number in imm16 and SEND's value in
-Rd (bits 25:21), so a core reaches only its own four queues.  The spec
-reads a queue descriptor from a register: Rs (bits 25:21) for SEND, whose
-value is Rt (bits 20:16), and Rs1 for RECV and TRY.RECV (spec/07-encoding.md
-§ 5.6).  The descriptor names a tile as well as a queue, so a message can
-reach another tile.  The emulator follows the spec, and bench test 35,
-written in the RTL's form, does not run on it: its first SEND reads the
-value 42 as a descriptor and traps `TRAP_QUEUE_FULL`.
-
-**Where:** `lm1_control.sv` (`OP_SEND`, `OP_RECV`), `emu/lm1/asm.py`
-(`SEND`, `RECV`, `TRY.RECV`), `tb/gen_gap_tests.py` test 35.
-**Action:** settle the encoding: descriptors in the RTL, the assembler and
-test 35, as the spec has them, or queue numbers in the spec, which gives up
-messages between tiles.
-
 ### P0-11  ALLOCV lengths that no header can describe
 
 A header's size field holds 16 bits, so a vector of 65,535 or more
@@ -404,8 +387,10 @@ all untested.
 
 ### P3-6  External message queue injection
 
-The external side of the message queues (`ext_mq_*`) is stubbed.
-Testing NoC message arrival requires testbench stimulus on these ports.
+Within a cluster the message router drives the external side of the
+message queues, and `tb/cluster` tests it.  Messages from beyond the
+cluster wait on the NoC, a stub, so a request naming a tile outside the
+cluster is answered as one no route reaches.
 
 ---
 

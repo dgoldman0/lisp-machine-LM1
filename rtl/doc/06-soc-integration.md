@@ -64,6 +64,8 @@ a uniform interface for the cluster to instantiate.
 | Status | `halted` | out | All threads stopped |
 | Crossbar | `xbar_req_*`, `xbar_resp_*` | out/in | Cluster SRAM access |
 | GC Command | `gc_cmd_*` | out/in | GC engine command interface |
+| Queues | `noc_mq_*` | in/out | The tile's queues, for the message router |
+| Remote Queue | `rmq_*` | out/in | The core's SEND and RECV on other tiles' queues |
 | Clock Gate | `cg_enable` | in | Clock gating control |
 
 ### Clock Gating
@@ -102,7 +104,8 @@ tile_id = {cluster_id[4:0], tile_index[2:0]}
 ```
 
 This is readable by software via `SYS_INFO` with `rs1 = SYS_TILE_ID`.
-The tile ID is also used by the message queue system for routing.
+The core compares it with a queue descriptor's tile to tell its own
+queues from another tile's.
 
 ---
 
@@ -218,6 +221,31 @@ end
 Reads are valid one cycle after issue, but only if no write preempted the
 port on the same cycle.
 
+### Message Router
+
+Each tile's core reaches another tile's queues through its remote queue
+port: `rmq_req` with `rmq_write`, `rmq_tile`, `rmq_queue` and
+`rmq_wdata`, driven from the core's registers while SEND or RECV waits,
+and answered by `rmq_ack` with `rmq_ok` and `rmq_rdata`. The router grants
+each tile's external write port and external read port to one request a
+cycle, starting after the requester it granted last, and answers in the
+cycle it grants: `rmq_ok` says that a SEND's word was taken or that a RECV
+took one. A request naming a tile outside the cluster is answered at once
+without `rmq_ok`, since the NoC is a stub. The requests come from
+registers, and the answers from the grants and the queues' registers, so
+no combinational path runs from one core's decisions to another's. The
+tile's clock gate opens for the router's accesses (`noc_mq_wr_en`,
+`noc_mq_rd_en`), so a halted tile's queues still take and give words.
+
+`tb/cluster/run_cluster_tests.sh` builds a two-tile cluster bench,
+`tb/cluster/lm1_cluster_tb.sv`, with Verilator and runs the programs that
+`tb/cluster/gen_cluster_tests.py` writes for its two tiles: 64 words from
+each tile into one queue of tile 1, the two tiles emptying it together,
+a word tile 0 takes from tile 1's queue, a remote queue found empty, and a
+tile outside the cluster. The bench counts the cycles in which a tile's
+core waited on its own queue because the router used it, and the test
+requires some of each kind.
+
 ---
 
 ## Crossbar
@@ -324,42 +352,62 @@ communication.
 ### Interface
 
 ```
-Core write (SEND):   mq_wr_en, mq_wr_qid[1:0], mq_wr_data[63:0]
-Core read  (RECV):   mq_rd_en, mq_rd_qid[1:0], mq_rd_data[63:0], mq_rd_valid
-External write:      ext_wr_en, ext_wr_qid[1:0], ext_wr_data[63:0]
-External read:       ext_rd_en, ext_rd_qid[1:0], ext_rd_data[63:0], ext_rd_valid
-Status:              queue_count[0:3][9:0] (10-bit per queue)
+Core write (SEND):   wr_en, wr_id[1:0], wr_data[63:0] → wr_ready, wr_full
+Core read  (RECV):   rd_en, rd_id[1:0] → rd_data[63:0], rd_valid, rd_empty
+External write:      ext_wr_en, ext_wr_id[1:0], ext_wr_data[63:0] → ext_wr_ready
+External read:       ext_rd_en, ext_rd_id[1:0] → ext_rd_data[63:0], ext_rd_valid
+Status:              q_empty[3:0], q_full[3:0]
 ```
+
+`wr_ready` and `rd_valid` say that the core's word is taken this cycle, and
+`wr_full` and `rd_empty` that the selected queue is full or empty.
 
 ### Priority
 
-When both core and external ports attempt to write the same queue on the
-same cycle, the core write takes priority.
+When the core and an external port use the same queue in one cycle, the
+external port goes first: `ext_wr_ready` is "not full" and `ext_rd_valid`
+"not empty", and the core's access waits a cycle, with `wr_ready` or
+`rd_valid` low while `wr_full` or `rd_empty` is low too. The cluster's
+message router can therefore answer another tile in the cycle it grants.
 
 ### ISA Integration
 
 | Instruction | Queue Op | Behavior |
 |-------------|----------|----------|
-| `SEND` | Write | Push word to queue `imm[1:0]`. Trap `QUEUE_FULL` if full. |
-| `RECV` | Read (blocking) | Pop word from queue `imm[1:0]`. Trap `QUEUE_EMPTY` if empty. |
-| `TRY.RECV` | Read (non-blocking) | If data: `Rd = value`, `Rd2 = VAL_T`. If empty: `Rd = VAL_NIL`, `Rd2 = VAL_NIL`. |
+| `SEND Rs, Rt` | Write | Push `Rt` to the queue the descriptor in `Rs` names. Trap `QUEUE_FULL` if it is full, or if no route reaches its tile. |
+| `RECV Rd, Rs` | Read (blocking) | Pop a word of the queue `Rs` names into `Rd`. Trap `QUEUE_EMPTY` if it is empty, or if no route reaches its tile. |
+| `TRY.RECV Rd, Rd2, Rs` | Read (non-blocking) | If a word: `Rd = value`, `Rd2 = VAL_T`. Else: `Rd = VAL_NIL`, `Rd2 = VAL_NIL`. |
+
+A queue descriptor is a fixnum whose value is tile × 4 + queue
+(spec/02-isa.md § 8). The control FSM takes a word that is not a fixnum
+as its own value, as both models do. A descriptor naming the core's own
+tile reaches its queues in `S_EXECUTE`, and waits in `S_SEND_WAIT` or
+`S_RECV_WAIT` while an external port holds the queue. Any other
+descriptor goes out through the core's remote queue port from
+`S_SEND_WAIT` or `S_RECV_WAIT`, and a negative value names no tile, so
+SEND traps `QUEUE_FULL` and RECV finds the queue empty. The single-core
+bench answers every remote request as one no route reaches.
 
 ### Usage Model
 
-Queues enable message-passing concurrency between tiles. A typical pattern:
+Queues carry messages between tiles. A typical pattern:
 
 ```
-; Producer tile
-SEND r1, #0        ; Send value to queue 0
+; Producer, tile 0: send r1 to queue 0 of tile 1
+LI   r9, 8              ; descriptor: fixnum 4 = tile 1, queue 0
+SEND r9, r1
 
-; Consumer tile  
-TRY.RECV r2, r3, #0  ; Poll queue 0
-BR.COND r3, #retry   ; If r3 == nil, no message yet
+; Consumer, tile 1: poll its own queue 0
+LI   r9, 8
+poll:
+TRY.RECV r2, r3, r9
+BR.NIL r3, poll         ; r3 == nil: no message yet
 ; r2 has the message
 ```
 
-The external port allows a NoC router or DMA engine to inject/extract
-messages, enabling cross-cluster communication (not yet implemented).
+Within a cluster the message router joins the cores' remote queue ports
+to the tiles' external queue ports; messages to other clusters wait on
+the NoC, which is a stub.
 
 ---
 

@@ -41,6 +41,28 @@ CARD_SHIFT     = 6
 GEN_BOUNDARY_V = 0x7800
 
 
+# A handler that counts the trap in r20, keeps its cause in r22 and goes on
+# after the faulting instruction.  It uses r22 to r24.
+SKIP_HANDLER = """\
+skip_handler:
+    TRAP.CAUSE r22
+    LI  r23, 1
+    ADD r20, r20, r23
+    TRAP.PC r24
+    LI  r23, 4
+    ADD r24, r24, r23
+    JR  r24
+"""
+
+# The nursery's words before a program allocates, so that a word an
+# allocation leaves unzeroed shows.  0xBAD5 is odd, so no fixnum.
+NURSERY_FILL = 0xBAD5
+
+
+def nursery_garbage(words: int) -> str:
+    return f"    .org {NURSERY_BASE:#x}\n" + f"    .word {NURSERY_FILL:#x}\n" * words
+
+
 def emit_test(name: str, source: str, expected: dict[str, int]):
     """Assemble source, write .hex and .expected files."""
     asm = Assembler()
@@ -359,42 +381,68 @@ def gen_test_34():
 
 
 # ===========================================================================
-# Test 35: SEND / RECV — message queue round-trip
+# Test 35: SEND / RECV — queue descriptors
 # ===========================================================================
 def gen_test_35():
-    source = """\
-    ; Test 35: SEND/RECV message queue round-trip (same-core)
-    ;
-    ; SEND value to queue 0, RECV it back.
-    ; SEND two values (FIFO order check).
-    ; TRY.RECV on empty queue -> NIL+NIL.
+    source = f"""\
+    ; Test 35: SEND, RECV and TRY.RECV name their queue by a descriptor in a
+    ; register (spec/02-isa.md section 8), a fixnum whose value is
+    ; tile * 4 + queue.  The bench's core is tile 0 alone: descriptors 0 to
+    ; 3 name its own four queues, and one naming another tile reaches no
+    ; queue, so SEND traps TRAP_QUEUE_FULL and TRY.RECV finds no word.  A
+    ; negative value names no tile at all.
 
-    ; --- TRY.RECV on empty queue -> should get NIL ---
-    TRY.RECV r1, r2, 0   ; r1=value (NIL), r2=status (NIL)
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, skip_handler
+    LI  r15, {TRAP_TABLE + 0x30 * 8}   ; slot 0x30 = TRAP_QUEUE_FULL
+    STR r15, r14, 0
+    LI  r20, 0
+
+    LI  r15, {tag_fixnum(0 * 4 + 0)}   ; tile 0, queue 0
+    LI  r16, {tag_fixnum(0 * 4 + 2)}   ; tile 0, queue 2
+    LI  r17, {tag_fixnum(1 * 4 + 0)}   ; tile 1, queue 0
+
+    ; --- TRY.RECV on an empty queue -> nil, nil ---
+    TRY.RECV r1, r2, r15
 
     ; --- SEND and RECV on queue 0 ---
-    LI r10, 42
-    SEND r10, 0           ; send 42 to queue 0
-    RECV r3, 0            ; recv from queue 0 -> r3 = 42
+    LI  r10, 42
+    SEND r15, r10
+    RECV r3, r15          ; 42
 
-    ; --- FIFO ordering: send A then B, recv should get A first ---
-    LI r11, 100
-    LI r12, 200
-    SEND r11, 0           ; send 100
-    SEND r12, 0           ; send 200
-    RECV r4, 0            ; should get 100 (FIFO)
-    RECV r5, 0            ; should get 200
+    ; --- FIFO order: A then B comes back A then B ---
+    LI  r11, 100
+    LI  r12, 200
+    SEND r15, r11
+    SEND r15, r12
+    RECV r4, r15          ; 100
+    RECV r5, r15          ; 200
 
-    ; --- TRY.RECV on non-empty queue ---
-    LI r13, 999
-    SEND r13, 0           ; send 999
-    TRY.RECV r6, r7, 0   ; r6=999, r7=T (success)
+    ; --- TRY.RECV on a queue holding a word -> the word, t ---
+    LI  r13, 999
+    SEND r15, r13
+    TRY.RECV r6, r7, r15
+    TRY.RECV r8, r9, r15  ; empty again -> nil, nil
 
-    ; --- TRY.RECV on now-empty queue -> NIL ---
-    TRY.RECV r8, r9, 0   ; r8=NIL, r9=NIL
+    ; --- the queues are apart: queue 2 keeps its word, queue 0 stays empty ---
+    LI  r14, 77
+    SEND r16, r14
+    TRY.RECV r18, r19, r15
+    RECV r21, r16         ; 77
 
+    ; --- another tile, and no tile: SEND traps, TRY.RECV finds nothing ---
+    LI  r14, -4           ; fixnum -2: tile -1, queue 2
+    LI  r11, 5
+    SEND r17, r11         ; traps TRAP_QUEUE_FULL
+    SEND r14, r11         ; traps TRAP_QUEUE_FULL
+    TRY.RECV r10, r11, r17
+    TRY.RECV r16, r17, r14
+    MOV r12, r20
+    MOV r13, r22
     HALT
-"""
+
+{SKIP_HANDLER}"""
     emit_test('35_send_recv', source, {
         'r1': NIL,   # TRY.RECV empty -> value = NIL
         'r2': NIL,   # TRY.RECV empty -> status = NIL
@@ -404,7 +452,16 @@ def gen_test_35():
         'r6': 999,   # TRY.RECV success -> value
         'r7': T,     # TRY.RECV success -> status = T
         'r8': NIL,   # TRY.RECV empty again
-        'r9': NIL,   # TRY.RECV empty again
+        'r9': NIL,
+        'r18': NIL,  # queue 0 empty while queue 2 holds 77
+        'r19': NIL,
+        'r21': 77,   # queue 2's word
+        'r10': NIL,  # TRY.RECV on another tile's queue finds no word
+        'r11': NIL,
+        'r16': NIL,  # nor on no tile's
+        'r17': NIL,
+        'r12': 2,    # both SENDs trapped
+        'r13': 0x30, # TRAP_QUEUE_FULL
     })
 
 
@@ -922,28 +979,6 @@ fix_handler:
         'r4': 14,              # the raw DIV's own quotient
         'r5': 2,               # two traps
     })
-
-
-# A handler that counts the trap in r20, keeps its cause in r22 and goes on
-# after the faulting instruction.  It uses r22 to r24.
-SKIP_HANDLER = """\
-skip_handler:
-    TRAP.CAUSE r22
-    LI  r23, 1
-    ADD r20, r20, r23
-    TRAP.PC r24
-    LI  r23, 4
-    ADD r24, r24, r23
-    JR  r24
-"""
-
-# The nursery's words before a program allocates, so that a word an
-# allocation leaves unzeroed shows.  0xBAD5 is odd, so no fixnum.
-NURSERY_FILL = 0xBAD5
-
-
-def nursery_garbage(words: int) -> str:
-    return f"    .org {NURSERY_BASE:#x}\n" + f"    .word {NURSERY_FILL:#x}\n" * words
 
 
 # ===========================================================================

@@ -234,6 +234,60 @@ def test_asm_tailcall_direct():
 
 
 # ===================================================================
+# Batch: phase6_messaging — SEND, RECV and TRY.RECV name descriptors
+# ===================================================================
+
+@test("asm_send_recv_descriptors", batch="phase6_messaging")
+def test_asm_send_recv_descriptors():
+    """SEND, RECV and TRY.RECV take a register holding a queue descriptor,
+    the fixnum tile * 4 + queue (spec/02-isa.md section 8), in the fields
+    spec/07-encoding.md section 5.6 gives it, and run on the emulator."""
+    source = f"""
+        LI r1, {tag_fixnum(0 * 4 + 3)}    ; tile 0, queue 3
+        LI r2, {tag_fixnum(42)}
+        SEND r1, r2
+        TRY.RECV r3, r4, r1
+        TRY.RECV r5, r6, r1
+        SEND r1, r2
+        RECV r7, r1
+        HALT
+    """
+    words = Assembler().assemble_to_words(source)
+    send, try_recv, recv = decode(words[2]), decode(words[3]), decode(words[6])
+    assert (send.opcode, send.rd, send.rs1, send.rs2, send.imm11) == (Op.SEND, 1, 2, 0, 0)
+    assert (try_recv.opcode, try_recv.rd, try_recv.rs1, try_recv.func) == (Op.RECV, 3, 1, 4)
+    assert (recv.opcode, recv.rd, recv.rs1, recv.func, recv.imm16) == (Op.RECV, 7, 1, 0, 0)
+    emu = _asm_and_run(source)
+    r = emu.thread.regs
+    assert (r[3], r[4]) == (tag_fixnum(42), T), "TRY.RECV takes the word SEND left"
+    assert (r[5], r[6]) == (NIL, NIL), "TRY.RECV on the empty queue"
+    assert r[7] == tag_fixnum(42), "RECV takes the second word"
+
+
+@test("asm_try_recv_status_not_r0", batch="phase6_messaging")
+def test_asm_try_recv_status_not_r0():
+    """TRY.RECV's status register goes in func, where 0 encodes RECV, so
+    the assembler refuses r0 for it."""
+    try:
+        Assembler().assemble("TRY.RECV r3, r0, r1")
+    except AsmError as e:
+        assert "r0" in str(e)
+    else:
+        raise AssertionError("TRY.RECV with its status in r0 assembled")
+
+
+@test("asm_send_takes_a_register", batch="phase6_messaging")
+def test_asm_send_takes_a_register():
+    """A queue number in place of the descriptor register is refused."""
+    for line in ("SEND r1, 0", "RECV r1, 0", "TRY.RECV r1, r2, 0"):
+        try:
+            Assembler().assemble(line)
+        except AsmError:
+            continue
+        raise AssertionError("%r assembled" % line)
+
+
+# ===================================================================
 # Batch: phase6_milestone — milestone test in assembly
 # ===================================================================
 

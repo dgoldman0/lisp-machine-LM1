@@ -514,7 +514,7 @@ if queue_full(Rs_queue):
 enqueue(Rs_queue, Rt_value)
 ```
 
-Queues are identified by a queue descriptor (ref or special register). See [04-soc.md](04-soc.md) for queue topology.
+Queues are identified by a queue descriptor in a register: a fixnum whose value is *tile* × 4 + *queue*, where *queue* picks one of the tile's four queues and *tile* names the tile. A descriptor naming the core's own tile reaches its own queues, and one naming another tile reaches that tile's, so a message can go to any tile. `RECV` and `TRY.RECV` read the same descriptors. See [04-soc.md](04-soc.md) § 4.4 for queue topology.
 
 **Cycles:** 1 (fast path, if queue not full)  
 **Traps:** `TRAP_QUEUE_FULL`

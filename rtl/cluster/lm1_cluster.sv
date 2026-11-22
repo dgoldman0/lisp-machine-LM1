@@ -3,6 +3,7 @@
 //
 // Instantiates:
 //   - 8 tiles (each with DOP core, tile SRAM, queues, perf counters)
+//   - a message router between the tiles' queues
 //   - 8-port non-blocking crossbar
 //   - Cluster shared SRAM (2 MiB = 256K × 64-bit words)
 //   - GC movement engine top (scanner + copier + fixup)
@@ -89,6 +90,20 @@ module lm1_cluster
     logic [TILES_PER_CLUSTER-1:0]     tile_scan_fifo_pop;
     logic                             scan_fifo_pop_any;
 
+    // Remote queue requests from each tile's core, and their answers
+    logic [TILES_PER_CLUSTER-1:0]     rmq_req, rmq_write, rmq_ack, rmq_ok;
+    logic [XLEN-1:0]                 rmq_tile  [0:TILES_PER_CLUSTER-1];
+    logic [1:0]                       rmq_queue [0:TILES_PER_CLUSTER-1];
+    logic [XLEN-1:0]                 rmq_wdata [0:TILES_PER_CLUSTER-1];
+    logic [XLEN-1:0]                 rmq_rdata [0:TILES_PER_CLUSTER-1];
+
+    // Each tile's queues seen from outside, driven by the router
+    logic [TILES_PER_CLUSTER-1:0]     qx_wr_en, qx_wr_ready, qx_rd_en, qx_rd_valid;
+    logic [1:0]                       qx_wr_id   [0:TILES_PER_CLUSTER-1];
+    logic [1:0]                       qx_rd_id   [0:TILES_PER_CLUSTER-1];
+    logic [XLEN-1:0]                 qx_wr_data [0:TILES_PER_CLUSTER-1];
+    logic [XLEN-1:0]                 qx_rd_data [0:TILES_PER_CLUSTER-1];
+
     // ---------------------------------------------------------------
     // Tile instances
     // ---------------------------------------------------------------
@@ -135,21 +150,144 @@ module lm1_cluster
                 .scan_fifo_head_field(scan_fifo_head_field),
                 .scan_fifo_head_ref  (scan_fifo_head_ref),
                 .scan_fifo_pop       (tile_scan_fifo_pop[t]),
-                // NoC message port — tied off for now (NoC stub)
-                .noc_mq_wr_en   (1'b0),
-                .noc_mq_wr_id   (2'b0),
-                .noc_mq_wr_data ({XLEN{1'b0}}),
-                .noc_mq_wr_ready(),
-                .noc_mq_rd_en   (1'b0),
-                .noc_mq_rd_id   (2'b0),
-                .noc_mq_rd_data (),
-                .noc_mq_rd_valid(),
+                // The tile's queues, as the message router reaches them
+                .noc_mq_wr_en   (qx_wr_en[t]),
+                .noc_mq_wr_id   (qx_wr_id[t]),
+                .noc_mq_wr_data (qx_wr_data[t]),
+                .noc_mq_wr_ready(qx_wr_ready[t]),
+                .noc_mq_rd_en   (qx_rd_en[t]),
+                .noc_mq_rd_id   (qx_rd_id[t]),
+                .noc_mq_rd_data (qx_rd_data[t]),
+                .noc_mq_rd_valid(qx_rd_valid[t]),
                 // Queue status
                 .mq_empty       (),
-                .mq_full        ()
+                .mq_full        (),
+                // The core's requests on other tiles' queues
+                .rmq_req        (rmq_req[t]),
+                .rmq_write      (rmq_write[t]),
+                .rmq_tile       (rmq_tile[t]),
+                .rmq_queue      (rmq_queue[t]),
+                .rmq_wdata      (rmq_wdata[t]),
+                .rmq_ack        (rmq_ack[t]),
+                .rmq_ok         (rmq_ok[t]),
+                .rmq_rdata      (rmq_rdata[t])
             );
         end
     endgenerate
+
+    // ---------------------------------------------------------------
+    // Message router
+    //
+    // A core's SEND or RECV whose queue descriptor names another tile
+    // reaches it here (spec/02-isa.md § 8).  A tile of this cluster gets
+    // the request at its queues' external ports, which go before its own
+    // core on a queue both use, so the router answers in the cycle it
+    // grants: a SEND is taken unless the queue is full, and a RECV takes a
+    // word unless the queue is empty.  Each tile's write port and read
+    // port grant one requester a cycle, in turn from the one after the
+    // last granted.  A tile outside the cluster is answered at once as
+    // one no route reaches, a full queue for SEND and an empty one for
+    // RECV, since the NoC is a stub.
+    //
+    // The requests come from the cores' registers, and the answers depend
+    // on them and on the queues' registers, so no path runs from one
+    // core's decisions to another's in the same cycle.
+    // ---------------------------------------------------------------
+    localparam logic [XLEN-1:0] FIRST_TILE = XLEN'(CLUSTER_ID * TILES_PER_CLUSTER);
+    localparam logic [XLEN-1:0] TILE_COUNT = XLEN'(TILES_PER_CLUSTER);
+
+    logic [7:0] wr_first [0:TILES_PER_CLUSTER-1];   // who goes first at each write port
+    logic [7:0] rd_first [0:TILES_PER_CLUSTER-1];   // and at each read port
+    logic [TILES_PER_CLUSTER-1:0] wr_granted, rd_granted;
+    logic [7:0] wr_sel [0:TILES_PER_CLUSTER-1];
+    logic [7:0] rd_sel [0:TILES_PER_CLUSTER-1];
+
+    // Whether a request names a tile of this cluster: below FIRST_TILE the
+    // unsigned difference wraps past TILE_COUNT
+    function automatic logic in_cluster(logic [XLEN-1:0] tile);
+        return (tile - FIRST_TILE) < TILE_COUNT;
+    endfunction
+
+    // Grants: the queues' external ports
+    always_comb begin
+        for (int g = 0; g < TILES_PER_CLUSTER; g++) begin
+            wr_granted[g] = 1'b0;
+            rd_granted[g] = 1'b0;
+            wr_sel[g]     = '0;
+            rd_sel[g]     = '0;
+            qx_wr_en[g]   = 1'b0;
+            qx_wr_id[g]   = '0;
+            qx_wr_data[g] = '0;
+            qx_rd_en[g]   = 1'b0;
+            qx_rd_id[g]   = '0;
+            for (int k = 0; k < TILES_PER_CLUSTER; k++) begin
+                automatic int r = (int'(wr_first[g]) + k) % TILES_PER_CLUSTER;
+                if (!wr_granted[g] && rmq_req[r] && rmq_write[r] &&
+                    in_cluster(rmq_tile[r]) &&
+                    (rmq_tile[r] - FIRST_TILE) == XLEN'(g)) begin
+                    wr_granted[g] = 1'b1;
+                    wr_sel[g]     = 8'(r);
+                end
+            end
+            for (int k = 0; k < TILES_PER_CLUSTER; k++) begin
+                automatic int r = (int'(rd_first[g]) + k) % TILES_PER_CLUSTER;
+                if (!rd_granted[g] && rmq_req[r] && !rmq_write[r] &&
+                    in_cluster(rmq_tile[r]) &&
+                    (rmq_tile[r] - FIRST_TILE) == XLEN'(g)) begin
+                    rd_granted[g] = 1'b1;
+                    rd_sel[g]     = 8'(r);
+                end
+            end
+            if (wr_granted[g]) begin
+                qx_wr_en[g]   = 1'b1;
+                qx_wr_id[g]   = rmq_queue[wr_sel[g]];
+                qx_wr_data[g] = rmq_wdata[wr_sel[g]];
+            end
+            if (rd_granted[g]) begin
+                qx_rd_en[g]   = 1'b1;
+                qx_rd_id[g]   = rmq_queue[rd_sel[g]];
+            end
+        end
+    end
+
+    // Answers to the requesting cores
+    always_comb begin
+        for (int r = 0; r < TILES_PER_CLUSTER; r++) begin
+            rmq_ack[r]   = 1'b0;
+            rmq_ok[r]    = 1'b0;
+            rmq_rdata[r] = '0;
+            if (rmq_req[r] && !in_cluster(rmq_tile[r]))
+                rmq_ack[r] = 1'b1;               // no route: full, or empty
+        end
+        for (int g = 0; g < TILES_PER_CLUSTER; g++) begin
+            if (wr_granted[g]) begin
+                rmq_ack[wr_sel[g]] = 1'b1;
+                rmq_ok[wr_sel[g]]  = qx_wr_ready[g];
+            end
+            if (rd_granted[g]) begin
+                rmq_ack[rd_sel[g]]   = 1'b1;
+                rmq_ok[rd_sel[g]]    = qx_rd_valid[g];
+                rmq_rdata[rd_sel[g]] = qx_rd_data[g];
+            end
+        end
+    end
+
+    // The requester after the one granted goes first next time
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int g = 0; g < TILES_PER_CLUSTER; g++) begin
+                wr_first[g] <= '0;
+                rd_first[g] <= '0;
+            end
+        end else begin
+            for (int g = 0; g < TILES_PER_CLUSTER; g++) begin
+                if (wr_granted[g])
+                    wr_first[g] <= 8'((int'(wr_sel[g]) + 1) % TILES_PER_CLUSTER);
+                if (rd_granted[g])
+                    rd_first[g] <= 8'((int'(rd_sel[g]) + 1) % TILES_PER_CLUSTER);
+            end
+        end
+    end
 
     // ---------------------------------------------------------------
     // Cluster Crossbar

@@ -244,7 +244,8 @@ and LM-1 takes the next message it receives as the start of a new write.
 
 - **Doorbells and the message queues.** `dbi_*` and `dbo_*` are meant for
   the external ports of a tile's hardware message queue, so a doorbell
-  arrives as a message. That wiring is still to do.
+  arrives as a message. The cluster's message router drives those ports
+  now, so a doorbell joins its requesters. That wiring is still to do.
 - **The runtime's use of the ports.** Nothing in the cluster issues
   host-memory requests or lend operations yet, and the runtime has no
   `LEND` entries to send. LM-1's main memory and its collector's traffic

@@ -262,12 +262,8 @@ RTL_MAX_INSTRUCTIONS = 100_000   # the bench gives each program 100,000 cycles
 
 # Programs whose bench expectations rest on an RTL deviation from the spec,
 # with the entry of docs/test_gap_ideas.md that records it.  The two models
-# still run them and must agree on them.
-RTL_DEVIATIONS = {
-    "35_send_recv": "P0-9: the RTL and the assembler take SEND's and RECV's queue "
-                    "from the immediate; the spec and both models read a descriptor "
-                    "register",
-}
+# still run them and must agree on them.  None is set aside now.
+RTL_DEVIATIONS: dict[str, str] = {}
 
 
 def _rtl_reset(emu, words: list[int]) -> None:

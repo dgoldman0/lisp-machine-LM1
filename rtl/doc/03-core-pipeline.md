@@ -115,7 +115,7 @@ This is the big dispatch state. The opcode determines the next state:
 | Return | RET | `S_POP_FRAME_0` chain (3 loads) |
 | Allocation | ALLOC, ALLOC_CONS, ALLOCV, ALLOC_CLOSURE | Nursery check → `S_ALLOC_HDR` → zero-fill loop |
 | Stack multi | PUSH_MULTI, POP_MULTI | `S_MULTI_ITER` loop |
-| Queue | SEND, RECV, TRY.RECV | Direct or trap |
+| Queue | SEND, RECV, TRY.RECV | Own queue: direct, trap, or `S_SEND/RECV_WAIT`; another tile's: `S_SEND/RECV_WAIT` |
 | GC commands | ENQ_SCAN/COPY/FIXUP/COMPACT | Issue cmd → `S_FETCH` or `S_ENQ_WAIT` |
 | System | TRAP, ERET, SYS_INFO, HALT_NOP | Various |
 
@@ -282,7 +282,7 @@ The state register is 6 bits wide. Here is every state with its role:
 | 35–36 | `S_CLOS_CODE_*` | 2 | Read closure code pointer |
 | 37 | `S_IC_DISPATCH` | 1 | IC hit/miss resolution |
 | 38–40 | `S_BARRIER_*` | 1-3 | Write barrier check + card mark |
-| 41–42 | `S_SEND/RECV_WAIT` | 1 | Queue operations (reserved) |
+| 41–42 | `S_SEND/RECV_WAIT` | 1+ | SEND or RECV on a queue the router holds, or on another tile's |
 | 43 | `S_TRY_RECV_WB` | 1 | Non-blocking receive writeback |
 | 44 | `S_ENQ_WAIT` | 1+ | Wait for GC engine acceptance |
 | 45 | `S_FENCE_GC` | 1+ | Wait for GC engines idle |

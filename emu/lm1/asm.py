@@ -660,21 +660,29 @@ class Assembler:
             return encode_i(Op.TAILCALL_DIR, 0, 0, rel_offset(target))
 
         # ---------------------------------------------------------------
-        # Messaging: SEND, RECV, TRY.RECV
+        # Messaging: SEND, RECV, TRY.RECV (spec/07-encoding.md section 5.6)
+        # Each names a register holding a queue descriptor, a fixnum whose
+        # value is tile * 4 + queue (spec/02-isa.md section 8).
         # ---------------------------------------------------------------
         if mn == 'SEND':
-            rd = self._reg(args[0], ln)      # value register (data to send)
-            qid = self._eval_expr(args[1], ln)  # queue ID (immediate 0-3)
-            return encode_i(Op.SEND, rd, 0, qid)
+            # SEND rq, rv  (Format S: Rs = descriptor, Rt = value)
+            rq = self._reg(args[0], ln)
+            rv = self._reg(args[1], ln)
+            return encode_s(Op.SEND, rq, rv, 0)
         if mn == 'RECV':
-            rd = self._reg(args[0], ln)      # destination register
-            qid = self._eval_expr(args[1], ln)  # queue ID (immediate 0-3)
-            return encode_i(Op.RECV, rd, 0, qid)
+            # RECV rd, rq  (Format I: Rs1 = descriptor, imm16 = 0)
+            rd = self._reg(args[0], ln)
+            rq = self._reg(args[1], ln)
+            return encode_i(Op.RECV, rd, rq, 0)
         if mn == 'TRY.RECV':
-            rd = self._reg(args[0], ln)       # value dest
-            rd2 = self._reg(args[1], ln)      # status dest (must not be r0)
-            qid = self._eval_expr(args[2], ln)  # queue ID (immediate 0-3)
-            return encode_r(Op.RECV, rd, 0, 0, rd2) | (qid & 0x3)
+            # TRY.RECV rd, rd2, rq  (Format R: Rs1 = descriptor, func = Rd2)
+            rd = self._reg(args[0], ln)
+            rd2 = self._reg(args[1], ln)
+            rq = self._reg(args[2], ln)
+            if rd2 == 0:
+                raise AsmError(ln, "TRY.RECV: its status cannot go to r0, "
+                                   "since func 0 encodes RECV")
+            return encode_r(Op.RECV, rd, rq, 0, rd2)
 
         # ---------------------------------------------------------------
         # Atomics: CAS.TAGGED, FAA, FENCE.GC

@@ -77,15 +77,31 @@ module lm1_control
     output logic [31:0]        ic_inst_shape,
     output logic [XLEN-1:0]    ic_inst_target,
 
-    // -- Message queue interface (4 hardware queues) --
+    // -- Message queue interface (the tile's 4 hardware queues) --
     output logic                mq_wr_en,
     output logic [1:0]         mq_wr_id,         // which queue
     output logic [XLEN-1:0]    mq_wr_data,
-    input  logic                mq_wr_ready,      // queue not full
+    input  logic                mq_wr_ready,      // a word written now is taken
+    input  logic                mq_wr_full,       // the queue is full
     output logic                mq_rd_en,
     output logic [1:0]         mq_rd_id,         // which queue
     input  logic [XLEN-1:0]    mq_rd_data,
-    input  logic                mq_rd_valid,      // queue not empty
+    input  logic                mq_rd_valid,      // a word read now is taken
+    input  logic                mq_rd_empty,      // the queue is empty
+
+    // -- Remote queue port: a queue of another tile --
+    // Driven from registers alone while SEND or RECV waits for it.  The
+    // answer comes with rmq_ack, in the same cycle or later: rmq_ok means
+    // the word was taken (SEND) or popped into rmq_rdata (RECV); without
+    // it the queue was full or empty, or no route reaches the tile.
+    output logic                rmq_req,
+    output logic                rmq_write,        // 1 = SEND, 0 = RECV / TRY.RECV
+    output logic [XLEN-1:0]    rmq_tile,
+    output logic [1:0]         rmq_queue,
+    output logic [XLEN-1:0]    rmq_wdata,
+    input  logic                rmq_ack,
+    input  logic                rmq_ok,
+    input  logic [XLEN-1:0]    rmq_rdata,
 
     // -- GC engine command interface --
     output logic                gc_cmd_valid,
@@ -198,8 +214,8 @@ module lm1_control
         S_BARRIER_CHECK,
         S_BARRIER_MARK,
         S_BARRIER_MARK_W,
-        S_SEND_WAIT,        // reserved — not yet used (blocking SEND)
-        S_RECV_WAIT,        // reserved — not yet used (blocking RECV)
+        S_SEND_WAIT,        // SEND waits for a busy or remote queue
+        S_RECV_WAIT,        // RECV / TRY.RECV wait for a busy or remote queue
         S_TRY_RECV_WB,
         S_ENQ_WAIT,
         S_FENCE_GC,
@@ -296,6 +312,27 @@ module lm1_control
     assign halted      = (state == S_HALTED) && (thread_active == '0);
     assign pc_out      = pc;
     assign cycle_count = cyc;
+
+    // ---------------------------------------------------------------
+    // Queue descriptors (spec/02-isa.md § 8)
+    //
+    // A descriptor's value is a fixnum's integer, or the word itself when
+    // it is not a fixnum.  Its low two bits pick the queue and the rest,
+    // value / 4 rounded down, the tile; a negative value names no tile.
+    // qd_value returns the value as a 65-bit signed number.
+    // ---------------------------------------------------------------
+    function automatic logic [XLEN:0] qd_value(logic [XLEN-1:0] d);
+        return d[0] ? {1'b0, d} : {d[XLEN-1], d[XLEN-1], d[XLEN-1:1]};
+    endfunction
+
+    // While SEND or RECV waits on another tile's queue, ta holds the tile,
+    // tt[1:0] the queue and td SEND's value.
+    assign rmq_req   = ((state == S_SEND_WAIT) || (state == S_RECV_WAIT)) &&
+                       (ta != cfg_tile_id);
+    assign rmq_write = (state == S_SEND_WAIT);
+    assign rmq_tile  = ta;
+    assign rmq_queue = tt[1:0];
+    assign rmq_wdata = td;
 
     // ---------------------------------------------------------------
     // Sequential: latch next-state values
@@ -1352,66 +1389,82 @@ module lm1_control
 
             // ===== SEND/RECV =====
             //
-            // SEND Rd, #queue_id   — send opa (regs[rd]) to queue
-            //   queue_id is in imm16[1:0]
-            //   If queue full → TRAP_QUEUE_FULL
+            // SEND Rs_queue, Rt_value — opa (bits 25:21) is the descriptor,
+            //   opb (bits 20:16) the value.  A full queue, or a tile no
+            //   route reaches, traps TRAP_QUEUE_FULL.
+            // RECV Rd, Rs_queue / TRY.RECV Rd, Rd2, Rs_queue — opb (bits
+            //   20:16) is the descriptor; func != 0 makes it TRY.RECV,
+            //   whose func names Rd2.  An empty queue, or a tile no route
+            //   reaches, traps TRAP_QUEUE_EMPTY for RECV and gives nil,
+            //   nil for TRY.RECV.
             //
-            // RECV Rd, #queue_id   — receive from queue into Rd
-            //   queue_id is in imm16[1:0]
-            //   If queue empty → TRAP_QUEUE_EMPTY
-            //
+            // The tile's own queues answer here; a busy one, or another
+            // tile's, makes the instruction wait in S_SEND_WAIT or
+            // S_RECV_WAIT.
             OP_SEND: begin
-                mq_wr_id   = dr.imm16[1:0];
-                mq_wr_data = opa;              // regs[rd]
-                if (mq_wr_ready) begin
+                logic [XLEN:0] qv;
+                qv         = qd_value(opa);
+                ta_n       = {2'b00, qv[XLEN-1:2]};   // the tile
+                tt_n       = {62'b0, qv[1:0]};        // the queue
+                td_n       = opb;                     // the value
+                mq_wr_id   = qv[1:0];
+                mq_wr_data = opb;
+                if (qv[XLEN]) begin
+                    tc_n    = TRAP_QUEUE_FULL;        // no such tile
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_TRAP_LOOKUP;
+                end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_wr_ready) begin
                     mq_wr_en = 1'b1;
-                    ns = S_FETCH;
-                end else begin
+                    ns       = S_FETCH;
+                end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_wr_full) begin
                     tc_n    = TRAP_QUEUE_FULL;
                     cyc_inc = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
+                end else begin
+                    cyc_inc = 1'b0;
+                    pc_n    = pc;
+                    ns      = S_SEND_WAIT;
                 end
             end
 
             OP_RECV: begin
-                mq_rd_id  = dr.imm16[1:0];
-                if (dr.func != '0) begin
-                    // --- TRY.RECV Rd, Rd2, Rs_queue ---
-                    // Non-blocking: func[4:0] = Rd2 register index
-                    if (mq_rd_valid) begin
-                        mq_rd_en  = 1'b1;
-                        rf_we     = 1'b1;
-                        rf_w_addr = banked_addr(cur_thread, dr.rd);
-                        rf_w_data = mq_rd_data;
-                        opa_n     = VAL_T;     // remember: success
-                        cyc_inc   = 1'b0;      // defer PC advance to WB
-                        pc_n      = pc;
-                        ns = S_TRY_RECV_WB;
-                    end else begin
-                        // Empty — Rd = nil
+                logic [XLEN:0] qv;
+                qv       = qd_value(opb);
+                ta_n     = {2'b00, qv[XLEN-1:2]};
+                tt_n     = {62'b0, qv[1:0]};
+                mq_rd_id = qv[1:0];
+                cyc_inc  = 1'b0;
+                pc_n     = pc;
+                if (qv[XLEN] ||
+                    ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_rd_empty)) begin
+                    // No such tile, or an empty queue of the tile's own
+                    if (dr.func != '0) begin
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, dr.rd);
                         rf_w_data = VAL_NIL;
-                        opa_n     = VAL_NIL;   // remember: empty
-                        cyc_inc   = 1'b0;      // defer PC advance to WB
-                        pc_n      = pc;
-                        ns = S_TRY_RECV_WB;
+                        opa_n     = VAL_NIL;     // TRY.RECV's status
+                        ns        = S_TRY_RECV_WB;
+                    end else begin
+                        tc_n = TRAP_QUEUE_EMPTY;
+                        ns   = S_TRAP_LOOKUP;
+                    end
+                end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_rd_valid) begin
+                    mq_rd_en  = 1'b1;
+                    rf_we     = 1'b1;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
+                    rf_w_data = mq_rd_data;
+                    if (dr.func != '0) begin
+                        opa_n = VAL_T;           // TRY.RECV's status
+                        ns    = S_TRY_RECV_WB;
+                    end else begin
+                        cyc_inc = 1'b1;
+                        pc_n    = pc + 64'd4;
+                        ns      = S_FETCH;
                     end
                 end else begin
-                    // --- RECV (blocking) ---
-                    if (mq_rd_valid) begin
-                        mq_rd_en  = 1'b1;
-                        rf_we     = 1'b1;
-                        rf_w_addr = banked_addr(cur_thread, dr.rd);
-                        rf_w_data = mq_rd_data;
-                        ns = S_FETCH;
-                    end else begin
-                        tc_n    = TRAP_QUEUE_EMPTY;
-                        cyc_inc = 1'b0;
-                        pc_n    = pc;
-                        ns      = S_TRAP_LOOKUP;
-                    end
+                    ns = S_RECV_WAIT;
                 end
             end
 
@@ -2217,6 +2270,81 @@ module lm1_control
             end
             default: ns = S_FETCH;
             endcase
+        end
+
+        // ---------------------------------------------------------
+        // SEND_WAIT: SEND waits for a busy queue of the tile's own, or
+        // for another tile's queue through the remote port
+        //   ta = tile, tt[1:0] = queue, td = value
+        // ---------------------------------------------------------
+        S_SEND_WAIT: begin
+            if (ta == cfg_tile_id) begin
+                mq_wr_id   = tt[1:0];
+                mq_wr_data = td;
+                if (mq_wr_ready) begin
+                    mq_wr_en = 1'b1;
+                    cyc_inc  = 1'b1;
+                    pc_n     = pc + 64'd4;
+                    ns       = S_FETCH;
+                end else if (mq_wr_full) begin
+                    tc_n = TRAP_QUEUE_FULL;
+                    ns   = S_TRAP_LOOKUP;
+                end
+            end else if (rmq_ack) begin
+                if (rmq_ok) begin
+                    cyc_inc = 1'b1;
+                    pc_n    = pc + 64'd4;
+                    ns      = S_FETCH;
+                end else begin
+                    tc_n = TRAP_QUEUE_FULL;
+                    ns   = S_TRAP_LOOKUP;
+                end
+            end
+        end
+
+        // ---------------------------------------------------------
+        // RECV_WAIT: RECV and TRY.RECV wait for a busy queue of the
+        // tile's own, or for another tile's queue through the remote port
+        //   ta = tile, tt[1:0] = queue
+        // ---------------------------------------------------------
+        S_RECV_WAIT: begin
+            logic          got, none;
+            logic [XLEN-1:0] word;
+            got  = 1'b0;
+            none = 1'b0;
+            word = '0;
+            if (ta == cfg_tile_id) begin
+                mq_rd_id = tt[1:0];
+                if (mq_rd_valid) begin
+                    mq_rd_en = 1'b1;
+                    got      = 1'b1;
+                    word     = mq_rd_data;
+                end else if (mq_rd_empty) begin
+                    none = 1'b1;
+                end
+            end else if (rmq_ack) begin
+                got  = rmq_ok;
+                none = !rmq_ok;
+                word = rmq_rdata;
+            end
+            if (got || none) begin
+                if (dr.func != '0 || got) begin
+                    rf_we     = 1'b1;
+                    rf_w_addr = banked_addr(cur_thread, dr.rd);
+                    rf_w_data = got ? word : VAL_NIL;
+                end
+                if (dr.func != '0) begin
+                    opa_n = got ? VAL_T : VAL_NIL;   // TRY.RECV's status
+                    ns    = S_TRY_RECV_WB;
+                end else if (got) begin
+                    cyc_inc = 1'b1;
+                    pc_n    = pc + 64'd4;
+                    ns      = S_FETCH;
+                end else begin
+                    tc_n = TRAP_QUEUE_EMPTY;
+                    ns   = S_TRAP_LOOKUP;
+                end
+            end
         end
 
         // ---------------------------------------------------------
