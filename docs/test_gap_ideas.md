@@ -96,6 +96,84 @@ allocate different wrong sizes.  No bench test covers either.
 **Action:** give the spec ALLOCV's range of lengths, then trap outside it
 in all three.
 
+### P0-12  Cluster accesses wait for neither the grant nor the response
+
+A core raises `xbar_req_valid` for the one cycle its LSU issues an access
+to a cluster address and never looks at `xbar_req_ready`, which its own
+TODO beside the assignment notes. The LSU treats every access as a
+one-cycle SRAM access: it finishes a store at once and takes a load's data
+the next cycle, and nothing reads `xbar_resp_valid`. The crossbar grants
+one port a cycle in round-robin order, and none in the cycle after it
+grants a read, while that read's answer is pending. A request it does not
+grant is lost whether it writes or reads: an ungranted store writes
+nothing, and an ungranted load returns 0, the value of a response line that
+carries no answer for its port, with no trap in either case. One tile
+alone never meets a busy crossbar, since its accesses are at least two
+cycles apart; two tiles using cluster memory at once do.
+
+**Where:** `lm1_cpu.sv` (the crossbar request), `lm1_lsu.sv`
+(`LSU_WAIT_RD`), `lm1_crossbar.sv`.
+**Risk:** Lost stores and loads of 0 under any contention for a
+cluster's shared memory.
+**Action:** release plan Part 8e: cores wait for the grant, and each
+response returns to the request it answers, under the cluster memory model
+Part 8b states first.
+
+### P0-13  Stores narrower than a word to cluster memory write the whole word
+
+The LSU makes `STB`, `STH` and `STW` by copying the stored byte, halfword
+or 32-bit word into every lane of the 64-bit word and setting the byte
+enables of its own lanes, and the tile's SRAM honours them. The crossbar's
+ports carry no byte enables, and `lm1_cluster.sv` ties the shared SRAM's
+enables to all ones, so such a store to a cluster address writes the whole
+word: a byte store leaves the byte in all eight lanes, a halfword store its
+halfword in all four, and a 32-bit store its word in both halves. The
+write barrier's card mark is a byte store of `0xFF`, so a card table in
+cluster memory would get eight cards marked at once.
+
+**Where:** `lm1_cpu.sv` (crossbar request signals), `lm1_crossbar.sv`,
+`lm1_cluster.sv` (`a_be`).
+**Risk:** Strings, bytevectors and narrow fields in cluster memory lose
+their neighbouring bytes.
+**Action:** release plan Part 8e: the crossbar carries byte enables, as
+Part 8b's memory model states for narrow stores.
+
+### P0-14  CAS.TAGGED and FAA are atomic only within a tile
+
+Each runs as a load and then a store (`S_MEM`, then `S_ATOMIC_STORE`), as
+`rtl/doc/04-memory.md` records. In a tile's own SRAM nothing comes between
+them, since one instruction holds the core from its load to its store.
+Through the crossbar they are two requests, and another tile's request
+can be granted between them: two tiles' `FAA`s on one word of cluster
+memory can read the same old value and lose an increment, and a
+`CAS.TAGGED` can store over a value another tile wrote after the
+comparison.
+
+**Where:** `lm1_control.sv` (`OP_CAS_TAGGED`, `OP_FAA_FENCE`),
+`lm1_crossbar.sv`.
+**Risk:** Locks and counters shared between tiles are unsound.
+**Action:** release plan Part 8e: the atomics run inside the crossbar as
+single requests, as Part 8b's memory model states them for tiles and for
+a later network between clusters.
+
+### P0-15  The core switches threads only between instructions
+
+The scheduler in `lm1_control.sv` hands the core to the next active
+thread when an instruction ends, on the move to `S_FETCH`. An instruction
+that waits holds the core for its whole wait, on the LSU, the crossbar, a
+queue's port, the GC engines or the 64-cycle divider, so one thread's
+memory wait stalls all four, where spec/03-core.md section 4.2 promises
+that the other threads hide it. No bench can show either case yet:
+`thread_active` comes out of reset with thread 0 alone, and nothing starts
+threads 1 to 3 (P3-1).
+
+**Where:** `lm1_control.sv` (the thread switch in the `always_ff` block).
+**Risk:** Memory latency, small in tile SRAM, long across a cluster or
+the link, is never hidden.
+**Action:** release plan Part 8e: a thread waiting on memory gives the
+core to another ready thread, shown by a four-thread bench at realistic
+memory latency.
+
 ---
 
 ## P1 — Entirely Untested Instructions

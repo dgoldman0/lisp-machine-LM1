@@ -245,12 +245,18 @@ end
 ### Limitations
 
 - **Single outstanding request**: Each tile can have at most 1 pending
-  crossbar request. The LSU stalls until the response arrives.
+  crossbar request.
+- **No handshake**: The core neither waits for its grant nor watches for its
+  response. The LSU takes a load's data one cycle after the request and
+  finishes a store at once, so a request the crossbar does not grant is
+  lost: a store writes nothing and a load returns 0
+  (`docs/test_gap_ideas.md` P0-12).
+- **No byte enables**: The crossbar carries none, so a store narrower than
+  a word writes the whole word (P0-13).
 - **No pipelining**: Grant → SRAM access → response takes 2 cycles minimum.
-- **No write buffering**: Write requests are acknowledged immediately but
-  still consume a grant cycle.
-- **8-tile contention**: In worst case, a tile waits 7 cycles for its turn.
-  With FGMT (4 threads), this is masked by thread switching.
+- **8-tile contention**: In worst case, a tile waits 7 cycles for its turn,
+  and a thread's wait holds the core, since threads switch only between
+  instructions (P0-15).
 
 ---
 
@@ -428,14 +434,14 @@ fence instructions would be needed.
 FSM sequence:
   S_MEM:      Load old value from mem[addr]
   S_MEM_WAIT: Compare old value with expected
-              If match: store new value, Rd = old value (success)
-              If no match: Rd = old value (failure)
+              If match: Rd = t, then S_ATOMIC_STORE stores the new value
+              If no match: Rd = nil
 ```
 
 Since the tile SRAM is single-ported and the FSM is non-interruptible
 across the load-compare-store sequence, CAS is naturally atomic within
 a tile. Cross-tile atomicity would require crossbar-level support (not
-yet implemented).
+yet implemented; `docs/test_gap_ideas.md` P0-14).
 
 **FAA (Fetch-And-Add):**
 ```
