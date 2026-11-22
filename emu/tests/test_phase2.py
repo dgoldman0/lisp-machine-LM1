@@ -120,6 +120,20 @@ def test_alloc_cons_defaults_to_nil():
     assert cdr == NIL, f"cdr should be nil, got {cdr:#x}"
 
 
+@test("alloc_cons_header_size", batch="phase2_alloc")
+def test_alloc_cons_header_size():
+    """ALLOC.CONS writes the cons's two payload words into its header's
+    size, whatever size template 0 holds, as every allocation patches its
+    own.  A header of size 0 would let a collection copy the header and
+    leave the car and the cdr behind."""
+    emu = _emu()
+    emu.thread.header_templates[0] = make_header(HDR_CONS, 0, 0)
+    _load_and_run(emu, [_alloc_cons_x(1), encode_x(Op.HALT_NOP, 0)])
+    hdr = emu.mem.load_word(ref_address(emu.thread.regs[1]))
+    assert header_subtype(hdr) == HDR_CONS
+    assert header_size(hdr) == 2, f"Cons header size {header_size(hdr)}"
+
+
 @test("alloc_generic", batch="phase2_alloc")
 def test_alloc_generic():
     """ALLOC: allocate a 3-word object with template 0."""

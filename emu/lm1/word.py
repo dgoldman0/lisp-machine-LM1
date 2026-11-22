@@ -14,6 +14,7 @@ from __future__ import annotations
 WORD_MASK = 0xFFFF_FFFF_FFFF_FFFF  # 64-bit
 SIGN_BIT  = 1 << 63
 REF_ADDR_MASK = 0x0007_FFFF_FFFF_FFF8  # bits 50:3
+FIXNUM_LIMIT = 1 << 62  # a fixnum's value lies in [-FIXNUM_LIMIT, FIXNUM_LIMIT)
 
 # ---------------------------------------------------------------------------
 # Primary tags  (bits 2:0)

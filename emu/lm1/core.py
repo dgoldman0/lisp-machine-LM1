@@ -18,6 +18,11 @@ REG_TP = 27
 REG_NP = 26   # nursery pointer
 REG_NL = 25   # nursery limit
 
+# Entries in a tile's header-template table.  SET_TEMPLATE names an entry
+# with eight bits, and an allocation's template index past the table reads
+# a zero template.
+HEADER_TEMPLATES = 256
+
 
 @dataclass
 class ThreadContext:
@@ -49,9 +54,10 @@ class ThreadContext:
     tile_id: int = 0
     thread_id: int = 0
 
-    # Header-template table (indexed by 16-bit template index)
-    # Each entry is a full 64-bit header word.
-    header_templates: list[int] = field(default_factory=lambda: [0] * 256)
+    # Header-template table (indexed by 16-bit template index).  Each entry
+    # is a full 64-bit header word.  The emulator gives every thread of a
+    # tile the same list, the tile's one table.
+    header_templates: list[int] = field(default_factory=lambda: [0] * HEADER_TEMPLATES)
 
     # -- Register access helpers --
 

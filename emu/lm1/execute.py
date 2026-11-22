@@ -16,7 +16,7 @@ import sys
 from typing import Optional, TextIO
 
 from .word import (
-    WORD_MASK, SIGN_BIT, NIL, T,
+    WORD_MASK, SIGN_BIT, FIXNUM_LIMIT, NIL, T,
     is_fixnum, tag_fixnum, untag_fixnum,
     is_ref, is_cons_ref, is_any_ref, ref_address, make_ref,
     is_header, make_header, header_size, header_shape_id, header_subtype,
@@ -45,7 +45,7 @@ from .traps import (
     TRAP_UNIMPLEMENTED,
     trap_name,
 )
-from .core import ThreadContext
+from .core import ThreadContext, HEADER_TEMPLATES
 from .memory import Memory
 
 from collections import deque
@@ -114,10 +114,14 @@ class Emulator:
         self.mem = Memory(mem_size)
         self.tile_id = tile_id
 
-        # Multi-thread support (Phase 5)
+        # Multi-thread support (Phase 5).  The tile's threads share its one
+        # header-template table (spec/07-encoding.md section 6), so an object
+        # any of them allocates gets the tile's headers.
+        templates = [0] * HEADER_TEMPLATES
         self.threads: list[ThreadContext] = []
         for tid in range(num_threads):
             tc = ThreadContext(tile_id=tile_id, thread_id=tid)
+            tc.header_templates = templates
             self.threads.append(tc)
         self._current_thread_idx = 0
 
@@ -172,10 +176,17 @@ class Emulator:
         # Cluster reference for cross-tile messaging (set by Cluster)
         self.cluster: Optional['Cluster'] = None
 
-        # Initialize nursery pointers for all threads
-        for tc in self.threads:
-            tc.np = self.nursery_base
-            tc.nl = self.nursery_base + self.nursery_size
+        # The tile's threads share its nursery, each bumping its own pointer
+        # through a slice of it, so no two of them hand out the same words.
+        # A thread's slice runs from its base to its limit, the last one to
+        # the nursery's end, and a collection empties every slice.
+        slice_size = (self.nursery_size // num_threads) & ~7
+        self.nursery_slices: list[int] = []
+        for tid, tc in enumerate(self.threads):
+            base = self.nursery_base + tid * slice_size
+            self.nursery_slices.append(base)
+            tc.np = base
+            tc.nl = base + slice_size if tid + 1 < num_threads else nursery_end
 
         # Install default header templates (index 0 = cons)
         self._init_header_templates()
@@ -236,35 +247,10 @@ class Emulator:
                 # Execute
                 next_pc = self._execute(inst, next_pc)
             except LM1Trap as trap:
-                # Phase 3: handle traps
+                next_pc = self._take_trap(trap)
 
-                # Special case: nursery overflow → run GC at emulator level
-                if trap.code == TRAP_NURSERY_OVERFLOW:
-                    self._collect_for_overflow(trap)
-                    # Retry the faulting instruction (don't advance PC)
-                    next_pc = t.pc
-                # Dispatch through trap table if installed
-                elif t.trap_table_base != 0 and trap.code < 0x80:
-                    # Save state for ERET — save PC of *faulting* instruction.
-                    # For software TRAP: handler should ERET to trap_pc+4.
-                    # For faults (NURSERY_OVERFLOW etc): ERET retries the insn.
-                    t.trap_pc = t.pc
-                    t.trap_cause = trap.code
-                    t.in_trap = True
-                    # Look up handler address: trap_table[code] is a 64-bit
-                    # word containing the handler PC
-                    handler_addr = mem.load_word(
-                        t.trap_table_base + trap.code * 8
-                    )
-                    if handler_addr == 0:
-                        # No handler installed for this trap — fatal
-                        raise
-                    next_pc = handler_addr
-                else:
-                    # Emulator traps (>= 0x80) or no trap table — fatal
-                    raise
-
-            t.pc = next_pc
+            # The PC is a 64-bit register: a branch below address 0 wraps.
+            t.pc = next_pc & WORD_MASK
             t.cycle_count += 1
             self.instruction_count += 1
             count += 1
@@ -444,6 +430,9 @@ class Emulator:
         elif op == Op.PUSH_MULTI:
             bank = inst.rd
             mask = inst.imm16 & 0xFFFF
+            if bank > 1:
+                # The 32 registers form two banks of 16; no other bank exists.
+                raise LM1Trap(TRAP_UNIMPLEMENTED, f"PUSH.MULTI: no register bank {bank}")
             base_reg = bank * 16
             for i in range(16):
                 if mask & (1 << i):
@@ -454,6 +443,8 @@ class Emulator:
         elif op == Op.POP_MULTI:
             bank = inst.rd
             mask = inst.imm16 & 0xFFFF
+            if bank > 1:
+                raise LM1Trap(TRAP_UNIMPLEMENTED, f"POP.MULTI: no register bank {bank}")
             base_reg = bank * 16
             for i in range(15, -1, -1):
                 if mask & (1 << i):
@@ -463,7 +454,13 @@ class Emulator:
         # ---- TRAP ----
         elif op == Op.TRAP:
             trap_code = inst.raw26 & 0xFF
-            self._handle_trap(trap_code)
+            try:
+                self._handle_trap(trap_code)
+            except LM1Trap as trap:
+                # An explicit trap is the instruction's whole work, so ERET
+                # resumes after it, as a system call returns.
+                trap.resume_pc = next_pc
+                raise
 
         # ---- ERET ----
         elif op == Op.ERET:
@@ -475,26 +472,8 @@ class Emulator:
 
         # ---- System info ----
         elif op == Op.SYS_INFO:
-            func = inst.rd  # overloaded: func is actually in bits 25:21
-            match func:
-                case 0:  # TILE.ID  — result in rs1 field as destination
-                    dest = inst.rs1
-                    t.regs[dest] = t.tile_id
-                case 1:  # THREAD.ID
-                    dest = inst.rs1
-                    t.regs[dest] = t.thread_id
-                case 2:  # CYCLE
-                    dest = inst.rs1
-                    t.regs[dest] = t.cycle_count & WORD_MASK
-                case _:
-                    pass
-            # Alternative simpler encoding: Rd is the destination
-            #   Actually let's just use Rd (bits 25:21) as dest and
-            #   func to select.
-            #   Re-reading the encoding spec: SYS_INFO uses Format X
-            #   opcode=111110, "func selects which"
-            #   Let's use: bits 25:21 = Rd, bits 20:16 = sub-function  
-            # Fixing:
+            # Bits 25:21 name the destination Rd, the only register written,
+            # and bits 20:16 select what is read.
             sub = inst.rs1  # sub-function in rs1 position
             match sub:
                 case 0:  t.regs[inst.rd] = t.tile_id
@@ -538,25 +517,27 @@ class Emulator:
                         raise LM1Trap(TRAP_FIXNUM_OVERFLOW)
                     t.regs[inst.rd] = result
                 case 2:  # MUL.FIX
-                    va = untag_fixnum(a)
-                    # result = va * b  (b is still tagged)
-                    result = (va * b) & WORD_MASK
-                    # Check overflow: if untagged result doesn't round-trip
-                    check = untag_fixnum(result)
-                    if tag_fixnum(check) != result:
+                    # untag(a) times the still-tagged b is the tagged
+                    # product, which is a fixnum only when the exact product
+                    # fits a signed 64-bit word (spec/02-isa.md section 3.2).
+                    product = untag_fixnum(a) * s64(b)
+                    if not -SIGN_BIT <= product < SIGN_BIT:
                         raise LM1Trap(TRAP_FIXNUM_OVERFLOW)
-                    t.regs[inst.rd] = result
+                    t.regs[inst.rd] = product & WORD_MASK
                 case 3:  # DIV.FIX
                     if b == 0:
                         raise LM1Trap(TRAP_DIVIDE_BY_ZERO)
                     va = untag_fixnum(a)
                     vb = untag_fixnum(b)
-                    if vb == 0:
-                        raise LM1Trap(TRAP_DIVIDE_BY_ZERO)
-                    # Python's // truncates toward negative infinity;
-                    # use int() to truncate toward zero
-                    result = int(va / vb)
-                    t.regs[inst.rd] = tag_fixnum(result)
+                    # The quotient truncates toward zero and is exact at
+                    # every size.  Only the most negative fixnum divided by
+                    # -1 leaves the fixnum range, and that traps.
+                    quotient = abs(va) // abs(vb)
+                    if (va < 0) != (vb < 0):
+                        quotient = -quotient
+                    if quotient >= FIXNUM_LIMIT:
+                        raise LM1Trap(TRAP_FIXNUM_OVERFLOW)
+                    t.regs[inst.rd] = tag_fixnum(quotient)
 
         elif op == Op.ADD_FIX_IMM:
             a = t.regs[inst.rs1]
@@ -866,10 +847,10 @@ class Emulator:
             queue_idx = q_raw & 3
             if target_tile == self.tile_id:
                 q = self.queues[queue_idx]
-            elif self.cluster is not None:
+            elif self.cluster is not None and 0 <= target_tile < len(self.cluster.tiles):
                 q = self.cluster.tiles[target_tile].queues[queue_idx]
             else:
-                q = deque()  # empty — will trigger trap/nil
+                q = deque()  # no such tile: an empty queue, so nil or a stall
 
             if inst.func != 0:
                 # TRY.RECV: non-blocking.  Rd = value (or nil), Rd2 = status
@@ -1044,8 +1025,10 @@ class Emulator:
         """Allocate a cons cell (header + car + cdr = 24 bytes)."""
         addr = self._bump_alloc(t, 24)
 
-        # Cons header: template index 0
-        hdr = t.header_templates[0]
+        # Cons header: template index 0, with the cons's two payload words
+        # patched into its size as every allocation patches its own, so the
+        # collector copies the car and the cdr whatever the template holds.
+        hdr = (t.header_templates[0] & ~(0xFFFF << 8)) | (2 << 8)
         self.mem.store_word(addr, hdr)
         # car and cdr from register operands (default nil for backward compat)
         self.mem.store_word(addr + 8, car)
@@ -1109,23 +1092,60 @@ class Emulator:
 
         return new_addr | tag
 
+    def _take_trap(self, trap: LM1Trap) -> int:
+        """Answer a trap that the current thread's instruction raised, and
+        return the PC the thread goes on at, or let the trap stand.
+
+        A trap below 0x80 vectors through the thread's trap table to the
+        runtime's handler (spec/03-core.md section 6.1).  ERET resumes a
+        fault at the instruction that faulted, and an explicit TRAP at the
+        instruction after it.  TRAP_NURSERY_OVERFLOW with no handler in the
+        table is answered here as the runtime answers it, by a minor
+        collection after which the allocation is retried (spec/02-isa.md
+        section 4.1): the emulator stands in for a runtime that is absent,
+        and steps aside for one that installed its handler.  A trap with no
+        handler stands, and the run ends with it.
+        """
+        t = self.thread
+        if trap.code == TRAP_NURSERY_OVERFLOW and not self._handler_installed(trap.code):
+            self._collect_for_overflow(trap)
+            return t.pc
+        if t.trap_table_base != 0 and trap.code < 0x80:
+            t.trap_pc = t.pc if trap.resume_pc is None else trap.resume_pc
+            t.trap_cause = trap.code
+            t.in_trap = True
+            # trap_table[code] is a 64-bit word holding the handler's PC
+            handler_addr = self.mem.load_word(t.trap_table_base + trap.code * 8)
+            if handler_addr == 0:
+                raise trap
+            return handler_addr
+        raise trap
+
+    def _handler_installed(self, code: int) -> bool:
+        """Whether the current thread's trap table names a handler for CODE."""
+        t = self.thread
+        return (t.trap_table_base != 0 and code < 0x80
+                and self.mem.load_word(t.trap_table_base + code * 8) != 0)
+
     def _collect_for_overflow(self, trap: LM1Trap) -> None:
         """Answer TRAP_NURSERY_OVERFLOW as the runtime does: run a minor
         collection, after which the caller retries the faulting allocation
         (spec/02-isa.md § 4.1).
 
         A collection empties the nursery and can do no more.  When the
-        nursery is already empty, the allocation is larger than the whole
-        nursery and no collection makes room, so the trap stands.
+        thread's slice of the nursery is already empty, the allocation is
+        larger than the slice and no collection makes room, so the trap
+        stands.
         """
-        if self.thread.np == self.nursery_base:
+        if self.thread.np == self.nursery_slices[self._current_thread_idx]:
             raise trap
         self._gc_collect()
 
     def _gc_collect(self) -> None:
         """Cheney copy collector: evacuate live nursery objects to old-gen.
 
-        Roots: all 32 registers + the stack (from SP to stack_top).
+        Roots: the 32 registers and the stack of each of the tile's threads
+        (spec/05-memory-gc.md section 5.1), thread by thread.
         Algorithm:
           1. Scan roots, forward any nursery refs → copies to old-gen
           2. Scan the copied objects in old-gen (Cheney scan pointer),
@@ -1133,29 +1153,27 @@ class Emulator:
           3. Scan the words of every dirty card, which hold the old-gen
              refs back into the nursery that the barrier recorded, and
              clear the card
-          4. Reset the nursery
+          4. Reset the nursery: every thread's slice is empty again
         """
-        t = self.thread
         mem = self.mem
         scan_start = self.oldgen_ptr  # where new copies start
 
         # --- Phase A: forward roots ---
 
-        # 1. Registers
-        for i in range(32):
-            t.regs[i] = self._forward_ref(t.regs[i])
+        for t in self.threads:
+            # 1. Registers
+            for i in range(32):
+                t.regs[i] = self._forward_ref(t.regs[i])
 
-        # 2. Stack (SP to stack base)
-        # Stack grows downward.  We scan from SP up to the initial stack top.
-        # We don't know the exact stack base, so scan up to a reasonable limit.
-        # Convention: stack area is just below nursery_base (e.g. 0x20000-0x30000)
-        # Actually let's be safe: scan from SP up to nursery_base (exclusive).
-        stack_scan_limit = self.nursery_base
-        sp = t.sp
-        while sp < stack_scan_limit:
-            w = mem.load_word(sp)
-            mem.store_word(sp, self._forward_ref(w))
-            sp += 8
+            # 2. Stack.  It grows down toward its SP from just below the
+            # nursery, the emulator's convention, so the words from SP up to
+            # nursery_base (exclusive) are scanned.
+            stack_scan_limit = self.nursery_base
+            sp = t.sp
+            while sp < stack_scan_limit:
+                w = mem.load_word(sp)
+                mem.store_word(sp, self._forward_ref(w))
+                sp += 8
 
         # 3. Dirty cards.  A barriered store marks the card holding the word
         #    it stored (spec/05-memory-gc.md § 4.2), so the words of the
@@ -1195,8 +1213,9 @@ class Emulator:
                 scan_ptr += 8
 
         # --- Phase C: reset nursery ---
-        t.np = self.nursery_base
-        # NL stays the same (nursery limit unchanged)
+        for t, base in zip(self.threads, self.nursery_slices):
+            t.np = base
+            # NL stays the same (nursery limit unchanged)
 
         self.gc_count += 1
 
@@ -1251,13 +1270,13 @@ class Emulator:
                         data = data + b'\x00' * (BLOCK_SIZE - len(data))
                     # Write into emulator memory byte by byte
                     for i, b in enumerate(data):
-                        self.mem.store_byte(mem_addr + i, b)
+                        self.mem.store_byte((mem_addr + i) & WORD_MASK, b)
                     t.regs[0] = tag_fixnum(0)  # success
                 elif func == BLOCK_IO_WRITE:
                     # Read BLOCK_SIZE bytes from emulator memory
                     data = bytearray(BLOCK_SIZE)
                     for i in range(BLOCK_SIZE):
-                        data[i] = self.mem.load_byte(mem_addr + i)
+                        data[i] = self.mem.load_byte((mem_addr + i) & WORD_MASK)
                     # Ensure file exists and write
                     mode = 'r+b' if os.path.exists(self.block_device_path) else 'wb'
                     with open(self.block_device_path, mode) as f:
@@ -1315,12 +1334,12 @@ class Emulator:
             offset = untag_fixnum(t.regs[3]) if is_fixnum(t.regs[3]) else int(t.regs[3])
             if sub == 0:
                 # Load byte → return as tagged fixnum in r1
-                byte_val = self.mem.load_byte(addr + offset)
+                byte_val = self.mem.load_byte((addr + offset) & WORD_MASK)
                 t.regs[1] = tag_fixnum(byte_val)
             elif sub == 1:
                 # Store byte
                 val = untag_fixnum(t.regs[4]) if is_fixnum(t.regs[4]) else int(t.regs[4])
-                self.mem.store_byte(addr + offset, val & 0xFF)
+                self.mem.store_byte((addr + offset) & WORD_MASK, val & 0xFF)
                 t.regs[1] = tag_fixnum(0)  # success
 
         elif code == EMU_TRAP_DEBUG_PRINT:
@@ -1329,7 +1348,7 @@ class Emulator:
             length = t.regs[2]
             chars = []
             for i in range(length):
-                chars.append(chr(self.mem.load_byte(addr + i)))
+                chars.append(chr(self.mem.load_byte((addr + i) & WORD_MASK)))
             self._stdout.write(''.join(chars))
             self._stdout.flush()
 
@@ -1401,23 +1420,9 @@ class Emulator:
                     try:
                         next_pc = self._execute(inst, next_pc)
                     except LM1Trap as trap:
-                        if trap.code == TRAP_NURSERY_OVERFLOW:
-                            self._collect_for_overflow(trap)
-                            next_pc = t.pc
-                        elif t.trap_table_base != 0 and trap.code < 0x80:
-                            t.trap_pc = t.pc
-                            t.trap_cause = trap.code
-                            t.in_trap = True
-                            handler_addr = mem.load_word(
-                                t.trap_table_base + trap.code * 8
-                            )
-                            if handler_addr == 0:
-                                raise
-                            next_pc = handler_addr
-                        else:
-                            raise
+                        next_pc = self._take_trap(trap)
 
-                    t.pc = next_pc
+                    t.pc = next_pc & WORD_MASK
                     t.cycle_count += 1
                     self.instruction_count += 1
                     count += 1
@@ -1526,23 +1531,9 @@ class Cluster:
                         try:
                             next_pc = tile._execute(inst, next_pc)
                         except LM1Trap as trap:
-                            if trap.code == TRAP_NURSERY_OVERFLOW:
-                                tile._collect_for_overflow(trap)
-                                next_pc = t.pc
-                            elif t.trap_table_base != 0 and trap.code < 0x80:
-                                t.trap_pc = t.pc
-                                t.trap_cause = trap.code
-                                t.in_trap = True
-                                handler_addr = mem.load_word(
-                                    t.trap_table_base + trap.code * 8
-                                )
-                                if handler_addr == 0:
-                                    raise
-                                next_pc = handler_addr
-                            else:
-                                raise
+                            next_pc = tile._take_trap(trap)
 
-                        t.pc = next_pc
+                        t.pc = next_pc & WORD_MASK
                         t.cycle_count += 1
                         tile.instruction_count += 1
                         count += 1

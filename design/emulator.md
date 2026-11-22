@@ -74,10 +74,10 @@ Performance target: ~10–100 MIPS on a modern host. Fast enough for interactive
 | **Tagged words** | Native 64-bit host integers. Tag operations are just bitmasks. |
 | **Registers** | Array of 32 uint64 per thread context. |
 | **Instruction decode + execute** | Giant switch on opcode. Each case implements the pseudocode from the ISA spec. |
-| **Nursery allocator** | Per-tile: a base pointer, bump pointer (np), and limit (nl). `ALLOC` bumps; overflow calls the GC slow path. |
+| **Nursery allocator** | Per-tile: a base pointer, bump pointer (np), and limit (nl). The tile's threads share its nursery in slices, each bumping its own np up to its nl, and share its header-template table. `ALLOC` bumps; overflow calls the GC slow path, a minor collection that scans every thread's registers and stack and empties every slice. |
 | **Write barriers** | `ST.WB`, `ST.CAR`, `ST.CDR` and `CAS.TAGGED` check tags and generations and mark the card holding the stored word in a card-table byte array, the barrier the spec gives the hardware. |
 | **IC table** | A hash map per tile: key = (callsite, shape), value = code_entry. `CALL.IC` probes it; miss triggers the trap handler. |
-| **Traps** | On trap: save PC, switch to handler address from trap table, set trap-code register. `ERET` restores. |
+| **Traps** | On trap: save PC, switch to handler address from trap table, set trap-code register. `ERET` restores: a fault retries its instruction, an explicit `TRAP` resumes after itself. With no handler installed for `TRAP_NURSERY_OVERFLOW`, the emulator's own minor collection answers it, standing in for the runtime. |
 | **Message queues** | Per-tile array of ring buffers. `SEND` enqueues, `RECV` dequeues. Cross-tile: route through a simulated NoC (just a function call in the emulator). |
 | **Movement engines** | `ENQ.SCAN/COPY/FIXUP` run their logic synchronously (in the emulator, they just execute immediately, not concurrently). |
 | **Memory map** | One big host-allocated array. Tile SRAMs, cluster SRAMs, and HBM are just offset ranges within it. |

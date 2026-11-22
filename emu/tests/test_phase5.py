@@ -539,3 +539,39 @@ def test_producer_consumer_sum():
     # 1+2+...+10 = 55
     assert result == tag_fixnum(55), \
         f"Consumer sum should be fixnum(55), got {untag_fixnum(result)}"
+
+
+@test("recv_from_absent_tile_is_empty", batch="phase5_multitile")
+def test_recv_from_absent_tile_is_empty():
+    """A queue descriptor that names a tile the cluster lacks, past its last
+    tile or below tile 0, names an empty queue, so TRY.RECV finds nothing.
+    A descriptor below tile 0 does not wrap to the last tile."""
+    cluster = Cluster(
+        n_tiles=2,
+        mem_size=512 * 1024,
+        nursery_base=NURSERY_BASE,
+        nursery_size=NURSERY_SIZE,
+        oldgen_base=OLDGEN_BASE,
+        oldgen_size=OLDGEN_SIZE,
+    )
+    tile0, tile1 = cluster.tiles
+    tile1.queues[0].append(tag_fixnum(9))     # tile 1, queue 0 holds a message
+    program = [
+        encode_i(Op.LI, 1, 0, tag_fixnum((5 << 2) | 1) & 0xFFFF),   # tile 5, queue 1
+        encode_r(Op.RECV, 3, 1, 0, 4),                                # TRY.RECV r3, r4
+        encode_i(Op.LI, 7, 0, tag_fixnum(-4) & 0xFFFF),             # tile -1, queue 0
+        encode_r(Op.RECV, 5, 7, 0, 6),                                # TRY.RECV r5, r6
+        encode_x(Op.HALT_NOP, 0),
+    ]
+    for i, insn in enumerate(program):
+        tile0.mem.store_u32(i * 4, insn)
+    tile0.thread.pc = 0
+    tile0.thread.sp = STACK_TOP
+    tile1.thread.halted = True
+    cluster.run(max_instructions=100)
+
+    regs = tile0.thread.regs
+    assert tile0.thread.halted
+    assert regs[3] == NIL and regs[4] == NIL, "Tile 5 is not in the cluster"
+    assert regs[5] == NIL and regs[6] == NIL, "Tile -1 is not the cluster's last tile"
+    assert len(tile1.queues[0]) == 1

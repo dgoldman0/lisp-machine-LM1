@@ -85,4 +85,8 @@ class LM1Trap(Exception):
     def __init__(self, code: int, message: str = ""):
         self.code = code
         self.message = message or trap_name(code)
+        # Where ERET resumes when the trap table answers this trap.  A fault
+        # leaves it None, so ERET retries the faulting instruction; an
+        # explicit TRAP sets the address of the instruction after it.
+        self.resume_pc: int | None = None
         super().__init__(f"{self.message} (code={code:#04x})")

@@ -78,6 +78,51 @@ uninitialized template slots.
 **Action:** Add a reset-sequencer that clears all 64 entries, or add a
 "template valid" bit and trap on access to invalid entries.
 
+### P0-6  MUL.FIX never traps on overflow
+
+`lm1_alu.sv` checks the product's truncated low 64 bits by untagging and
+retagging them.  The product of a fixnum and a tagged fixnum is always
+even, so the check always passes: `2**40 * 2**40` returns fixnum 0.  The
+spec traps `TRAP_FIXNUM_OVERFLOW` when the product leaves the fixnum range
+(spec/02-isa.md § 3.2), and the emulator checks the exact product.
+
+**Where:** `lm1_alu.sv`, `fix_mul_overflow`.
+**Action:** compare the product's high 64 bits with the sign extension of
+its low half, and trap when they differ.
+
+### P0-7  DIV.FIX of the most negative fixnum by -1 wraps
+
+The divider's sign correction yields 2**62, which `tag_fixnum` shifts into
+the sign bit, so `-2**62 / -1` returns the most negative fixnum.  The spec
+lists `TRAP_FIXNUM_OVERFLOW` for DIV.FIX, and the emulator traps there.
+
+**Where:** `lm1_alu.sv`, `FUNC_DIV_FIX` result.
+
+### P0-8  FAA adds raw words without the fixnum check
+
+`S_MEM_WAIT` adds the delta to the loaded word whatever their tags.  The
+spec traps `TRAP_NOT_FIXNUM` when either is not a fixnum (spec/02-isa.md
+§ 8.5), as the emulator does.
+
+**Where:** `lm1_control.sv`, `OP_FAA_FENCE` in `S_MEM_WAIT`.
+
+### P0-9  SEND and RECV take a queue number from the immediate
+
+The RTL and the assembler put a queue number in imm16 and SEND's value in
+Rd (bits 25:21), so a core reaches only its own four queues.  The spec
+reads a queue descriptor from a register: Rs (bits 25:21) for SEND, whose
+value is Rt (bits 20:16), and Rs1 for RECV and TRY.RECV (spec/07-encoding.md
+§ 5.6).  The descriptor names a tile as well as a queue, so a message can
+reach another tile.  The emulator follows the spec, and bench test 35,
+written in the RTL's form, does not run on it: its first SEND reads the
+value 42 as a descriptor and traps `TRAP_QUEUE_FULL`.
+
+**Where:** `lm1_control.sv` (`OP_SEND`, `OP_RECV`), `emu/lm1/asm.py`
+(`SEND`, `RECV`, `TRY.RECV`), `tb/gen_gap_tests.py` test 35.
+**Action:** settle the encoding: descriptors in the RTL, the assembler and
+test 35, as the spec has them, or queue numbers in the spec, which gives up
+messages between tiles.
+
 ---
 
 ## P1 — Entirely Untested Instructions
@@ -374,30 +419,6 @@ Testing NoC message arrival requires testbench stimulus on these ports.
 
 ---
 
-## Emulator Considerations
-
-### E-1  SYS_INFO dead code in emulator
-
-`emu/lm1/cpu.py` lines 478-492 still have the old `func`-based
-SYS_INFO dispatch path.  The live path (lines 499+) uses `rs1`.
-The dead code should be removed or clearly marked, to avoid confusion
-if someone edits the emulator.
-
-### E-2  LI32 sign-extension divergence
-
-RTL zero-extends the 32-bit immediate via `lsu_rdata` (which is the
-full 64-bit memory word, zero-padded on the upper 32 bits for
-`LSU_LOAD32`).  If the emulator sign-extends, there's a divergence
-for negative 32-bit immediates.  Needs a cross-check.
-
-### E-3  Tagged DIV/MOD — emulator vs RTL
-
-The emulator probably uses Python's `//` and `%` which handle signs
-correctly.  The RTL uses an unsigned divider (P0-4).  These will
-diverge for negative operands.
-
----
-
 ## Suggested Test Ordering
 
 If implementing these tests, a natural order based on dependency and
@@ -407,7 +428,7 @@ value:
 2. **P0-1/P0-2** (CAS/FAA lsu_ready) — audit and prove or fix
 3. **P1-1** (DIV/MOD) — exercises the divider, catches P0-4
 4. **P1-5** (TST all tags) — trivial, high value
-5. **P1-6** (LI32) — catches E-2 divergence
+5. **P1-6** (LI32)
 6. **P1-3** (TST.SHAPE) — needed before CALL.IC tests
 7. **P1-4** (sub-word loads/stores) — fundamental memory correctness
 8. **P1-2** (SEND/RECV) — self-contained, no stubs needed

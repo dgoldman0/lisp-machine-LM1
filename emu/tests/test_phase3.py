@@ -23,7 +23,9 @@ from lm1.word import (
     header_shape_id, header_subtype, header_size,
     is_header, WORD_MASK,
 )
-from lm1.traps import TRAP_NURSERY_OVERFLOW, TRAP_DIVIDE_BY_ZERO
+from lm1.traps import (
+    LM1Trap, TRAP_NURSERY_OVERFLOW, TRAP_DIVIDE_BY_ZERO, TRAP_UNIMPLEMENTED,
+)
 
 
 # -------------------------------------------------------------------
@@ -253,6 +255,60 @@ def test_eret_resumes_correctly():
     assert t.regs[4] == 0x55, f"Execution didn't continue past trap: r4={t.regs[4]:#x}"
 
 
+@test("explicit_trap_resumes_after_itself", batch="phase3_trap")
+def test_explicit_trap_resumes_after_itself():
+    """ERET after an explicit TRAP resumes at the instruction after it, as
+    a system call returns, while ERET after a fault retries the faulting
+    instruction.  A handler has no way to move trap_pc on itself."""
+    emu = _emu()
+    t = emu.thread
+    handler_addr = 0x100
+    emu.mem.store_word(TRAP_TABLE + 0x42 * 8, handler_addr)
+    t.trap_table_base = TRAP_TABLE
+    for i, insn in enumerate([encode_i(Op.LI, 5, 0, 0x55), encode_x(Op.ERET, 0)]):
+        emu.mem.store_u32(handler_addr + i * 4, insn)
+    _load_and_run(emu, [
+        encode_x(Op.TRAP, 0x42),
+        encode_i(Op.LI, 6, 0, 0x66),
+        encode_x(Op.HALT_NOP, 0),
+    ], max_instructions=100)
+    assert t.halted, "ERET returned to the TRAP and ran it again"
+    assert t.regs[5] == 0x55 and t.regs[6] == 0x66
+    assert t.trap_pc == 4 and t.trap_cause == 0x42
+    assert emu.instruction_count == 5   # TRAP, LI, ERET, LI, HALT
+
+
+@test("nursery_overflow_runs_installed_handler", batch="phase3_trap")
+def test_nursery_overflow_runs_installed_handler():
+    """A runtime that installed a handler for TRAP_NURSERY_OVERFLOW gets the
+    trap, and the emulator's own collection, which stands in for an absent
+    runtime, stays out of the way.  The handler here empties the nursery
+    and ERET retries the allocation."""
+    emu = Emulator(mem_size=512 * 1024, nursery_base=NURSERY_BASE, nursery_size=48,
+                   oldgen_base=OLDGEN_BASE, oldgen_size=OLDGEN_SIZE)
+    t = emu.thread
+    handler_addr = 0x100
+    emu.mem.store_word(TRAP_TABLE + TRAP_NURSERY_OVERFLOW * 8, handler_addr)
+    t.trap_table_base = TRAP_TABLE
+    for i, insn in enumerate([
+        encode_i(Op.LI, 20, 0, 0x77),
+        encode_i(Op.LUI, 26, 0, NURSERY_BASE >> 16),   # np = nursery base
+        encode_x(Op.ERET, 0),
+    ]):
+        emu.mem.store_u32(handler_addr + i * 4, insn)
+    _load_and_run(emu, [
+        _alloc_cons_x(1),
+        _alloc_cons_x(2),
+        _alloc_cons_x(3),          # overflows: the handler runs, the retry fits
+        encode_x(Op.HALT_NOP, 0),
+    ])
+    assert t.halted
+    assert emu.gc_count == 0, f"The emulator collected {emu.gc_count} times"
+    assert t.regs[20] == 0x77, "The installed handler did not run"
+    assert t.trap_cause == TRAP_NURSERY_OVERFLOW and t.trap_pc == 8
+    assert ref_address(t.regs[3]) == NURSERY_BASE
+
+
 # ===================================================================
 # Batch: phase3_pushpop — PUSH.MULTI / POP.MULTI
 # ===================================================================
@@ -373,6 +429,22 @@ def test_push_multi_high_bank():
 
     assert t.regs[16] == 0x1616, f"r16 = {t.regs[16]:#x}"
     assert t.regs[17] == 0x1717, f"r17 = {t.regs[17]:#x}"
+
+
+@test("push_pop_multi_bank_past_one_traps", batch="phase3_pushpop")
+def test_push_pop_multi_bank_past_one_traps():
+    """The 32 registers form two banks of 16, so PUSH.MULTI and POP.MULTI
+    with a bank past 1 name no registers: the instruction traps as
+    unimplemented and leaves SP as it was."""
+    for op in (Op.PUSH_MULTI, Op.POP_MULTI):
+        emu = _emu()
+        try:
+            _load_and_run(emu, [encode_i(op, 2, 0, 0x0001), encode_x(Op.HALT_NOP, 0)])
+        except LM1Trap as trap:
+            assert trap.code == TRAP_UNIMPLEMENTED, f"Wrong trap: {trap.code:#x}"
+        else:
+            raise AssertionError(f"{op.name} with bank 2 returned")
+        assert emu.thread.sp == STACK_TOP, f"{op.name} moved SP to {emu.thread.sp:#x}"
 
 
 # ===================================================================
@@ -695,6 +767,46 @@ def test_gc_keeps_young_car_of_old_cons():
     assert not emu._is_nursery_addr(ref_address(car)), \
         f"The old cons's car still points into the nursery: {ref_address(car):#x}"
     assert emu.mem.load_word(ref_address(car) + 8) == tag_fixnum(9)
+
+
+@test("gc_keeps_every_threads_objects", batch="phase3_gc")
+def test_gc_keeps_every_threads_objects():
+    """The threads of a tile allocate from their own slices of its nursery
+    with the tile's one template table, and a collection keeps the young
+    objects that every thread's registers hold (spec/05-memory-gc.md
+    section 5.1), then empties every slice."""
+    emu = _emu(num_threads=2)
+    program = [
+        _alloc_cons_x(1),                                   # r1 = young cons
+        encode_i(Op.SYS_INFO, 3, 1, 0),                     # r3 = thread id
+        encode_r(Op.ARITH_RAW, 3, 3, 3, FUNC_ADD),          # r3 = fixnum(id)
+        encode_s(Op.ST_CAR_CDR, 1, 3, 0),                   # car(r1) = id
+        encode_x(Op.HALT_NOP, 0),
+    ]
+    for i, insn in enumerate(program):
+        emu.mem.store_u32(i * 4, insn)
+    slices = (NURSERY_BASE, NURSERY_BASE + NURSERY_SIZE // 2)
+    for tid, t in enumerate(emu.threads):
+        t.pc = 0
+        t.sp = STACK_TOP - tid * 0x1000
+        assert t.np == slices[tid], f"Thread {tid} allocates from {t.np:#x}"
+    emu.run_round_robin(max_instructions=100)
+
+    for tid, t in enumerate(emu.threads):
+        assert t.halted
+        assert ref_address(t.regs[1]) == slices[tid]
+    emu._gc_collect()
+
+    moved = [ref_address(t.regs[1]) for t in emu.threads]
+    assert moved[0] != moved[1]
+    for tid, (t, addr) in enumerate(zip(emu.threads, moved)):
+        assert is_cons_ref(t.regs[1]) and not emu._is_nursery_addr(addr), \
+            f"Thread {tid}'s cons was not promoted: {t.regs[1]:#x}"
+        hdr = emu.mem.load_word(addr)
+        assert header_subtype(hdr) == HDR_CONS and header_size(hdr) == 2, \
+            f"Thread {tid}'s cons has header {hdr:#x}"
+        assert emu.mem.load_word(addr + 8) == tag_fixnum(tid)
+        assert t.np == slices[tid], f"Thread {tid}'s slice was not emptied"
 
 
 @test("gc_overflow_triggers_gc", batch="phase3_gc")

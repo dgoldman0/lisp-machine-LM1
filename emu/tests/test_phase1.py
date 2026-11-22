@@ -11,7 +11,8 @@ import io
 from lm1.testing.harness import test
 from lm1.asm import Assembler
 from lm1.decode import Op, encode_i, encode_r, encode_b, encode_x
-from lm1.execute import Emulator, EMU_TRAP_PUTCHAR
+from lm1.execute import Emulator, EMU_TRAP_PUTCHAR, EMU_TRAP_MEM_BYTE
+from lm1.traps import LM1Trap, TRAP_FIXNUM_OVERFLOW
 from lm1.word import tag_fixnum, untag_fixnum, T, NIL
 
 
@@ -278,6 +279,28 @@ def test_load_store_offset():
     assert emu.thread.regs[3] == 0x3EEF
 
 
+@test("mem_byte_address_wraps", batch="phase1_memory")
+def test_mem_byte_address_wraps():
+    """TRAP 0x84 adds its offset to its address in 64 bits.
+
+    Address 0 with offset -1 names the last byte of the 64-bit address
+    space, which lies outside memory, and not the last byte of memory.
+    """
+    emu = _emu()
+    emu.mem.store_byte(64 * 1024 - 1, 0xAB)   # the last byte of memory
+    emu.thread.regs[1] = tag_fixnum(0)        # load
+    emu.thread.regs[2] = 0                    # address
+    emu.thread.regs[3] = tag_fixnum(-1)       # offset
+    try:
+        _load_and_run(emu, [encode_x(Op.TRAP, EMU_TRAP_MEM_BYTE), encode_x(Op.HALT_NOP, 0)])
+    except IndexError:
+        pass
+    else:
+        raise AssertionError(f"Read byte {untag_fixnum(emu.thread.regs[1]):#x} "
+                             "below address 0")
+    assert emu.thread.regs[1] == tag_fixnum(0)
+
+
 # ===================================================================
 # Batch: phase1_branch
 # ===================================================================
@@ -362,6 +385,21 @@ def test_br_nil():
     _load_and_run(emu, program)
     assert emu.thread.regs[5] == 0, "BR.NIL should have skipped LI r5"
     assert emu.thread.regs[6] == 1
+
+
+@test("branch_below_zero_wraps", batch="phase1_branch")
+def test_branch_below_zero_wraps():
+    """The PC is a 64-bit register, so a branch below address 0 wraps to
+    the top of the address space, and the fetch there lies outside memory."""
+    emu = _emu()
+    try:
+        _load_and_run(emu, [encode_b(Op.BR, 0, 0, (-1) & 0xFFFF)], max_instructions=10)
+    except IndexError:
+        pass
+    else:
+        raise AssertionError(f"Fetched from {emu.thread.pc:#x} and ran on")
+    assert emu.thread.pc == 0xFFFF_FFFF_FFFF_FFFC, f"PC = {emu.thread.pc:#x}"
+    assert emu.instruction_count == 1
 
 
 # ===================================================================
@@ -456,6 +494,62 @@ def test_eq():
     assert emu.thread.regs[5] == NIL
 
 
+def _run_expecting_trap(emu, program, code):
+    try:
+        _load_and_run(emu, program)
+    except LM1Trap as trap:
+        assert trap.code == code, f"Wrong trap: {trap.code:#x}"
+    else:
+        raise AssertionError(f"No trap {code:#x}")
+
+
+@test("mul_fix_range", batch="phase1_tagged")
+def test_mul_fix_range():
+    """MUL.FIX returns a product inside the fixnum range and traps on one
+    outside it (spec/02-isa.md section 3.2).
+
+    -2**31 times 2**31 is -2**62, the most negative fixnum.  2**31 times
+    2**31 is 2**62, one past the largest.  2**40 times 2**40 is 2**80, whose
+    low 64 bits are all zero, so the product's truncated word alone would
+    read as fixnum 0.
+    """
+    for a, b, product in ((-(1 << 31), 1 << 31, -(1 << 62)), (-3, 5, -15)):
+        emu = _emu()
+        emu.thread.regs[1] = tag_fixnum(a)
+        emu.thread.regs[2] = tag_fixnum(b)
+        _load_and_run(emu, [encode_r(Op.ARITH_FIX, 3, 1, 2, 2), encode_x(Op.HALT_NOP, 0)])
+        assert emu.thread.regs[3] == tag_fixnum(product), \
+            f"{a} * {b}: got {untag_fixnum(emu.thread.regs[3])}"
+    for a, b in ((1 << 31, 1 << 31), (1 << 40, 1 << 40), (-(1 << 62), -1)):
+        emu = _emu()
+        emu.thread.regs[1] = tag_fixnum(a)
+        emu.thread.regs[2] = tag_fixnum(b)
+        _run_expecting_trap(emu, [encode_r(Op.ARITH_FIX, 3, 1, 2, 2),
+                                  encode_x(Op.HALT_NOP, 0)], TRAP_FIXNUM_OVERFLOW)
+        assert emu.thread.regs[3] == 0, f"{a} * {b} wrote {emu.thread.regs[3]:#x}"
+
+
+@test("div_fix_exact", batch="phase1_tagged")
+def test_div_fix_exact():
+    """DIV.FIX truncates toward zero and is exact for the largest fixnums,
+    which a division through floating point rounds; the most negative
+    fixnum divided by -1 leaves the fixnum range and traps."""
+    big = (1 << 62) - 1
+    for a, b, quotient in ((big, 1, big), (big, -1, -big), (-7, 2, -3), (7, -2, -3),
+                           (-(1 << 62), 1, -(1 << 62))):
+        emu = _emu()
+        emu.thread.regs[1] = tag_fixnum(a)
+        emu.thread.regs[2] = tag_fixnum(b)
+        _load_and_run(emu, [encode_r(Op.ARITH_FIX, 3, 1, 2, 3), encode_x(Op.HALT_NOP, 0)])
+        assert emu.thread.regs[3] == tag_fixnum(quotient), \
+            f"{a} / {b}: got {untag_fixnum(emu.thread.regs[3])}"
+    emu = _emu()
+    emu.thread.regs[1] = tag_fixnum(-(1 << 62))
+    emu.thread.regs[2] = tag_fixnum(-1)
+    _run_expecting_trap(emu, [encode_r(Op.ARITH_FIX, 3, 1, 2, 3),
+                              encode_x(Op.HALT_NOP, 0)], TRAP_FIXNUM_OVERFLOW)
+
+
 # ===================================================================
 # Batch: phase1_system
 # ===================================================================
@@ -496,6 +590,27 @@ def test_cycle_count():
     ]
     _load_and_run(emu, program)
     assert emu.thread.regs[1] >= 3, f"CYCLE: expected >= 3, got {emu.thread.regs[1]}"
+
+
+@test("sys_info_writes_only_rd", batch="phase1_system")
+def test_sys_info_writes_only_rd():
+    """SYS_INFO writes its result to Rd and leaves every other register,
+    including the one its selector bits would name, as it was."""
+    emu = _emu()
+    for r in range(4):
+        emu.thread.regs[r] = 0x1000 + r
+    program = [
+        encode_i(Op.SYS_INFO, 1, 2, 0),   # CYCLE r1
+        encode_i(Op.SYS_INFO, 2, 0, 0),   # TILE.ID r2
+        encode_i(Op.SYS_INFO, 1, 3, 0),   # TRAP.CAUSE r1
+        encode_x(Op.HALT_NOP, 0),
+    ]
+    _load_and_run(emu, program)
+    regs = emu.thread.regs
+    assert regs[0] == 0x1000, f"r0 = {regs[0]:#x}"
+    assert regs[1] == 0, f"r1 = {regs[1]:#x}"       # no trap yet
+    assert regs[2] == 0, f"r2 = {regs[2]:#x}"       # tile 0
+    assert regs[3] == 0x1003, f"r3 = {regs[3]:#x}"
 
 
 @test("max_instructions_limit", batch="phase1_system", timeout=5.0)
