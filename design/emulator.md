@@ -154,8 +154,9 @@ def run(emu: Emulator) -> None:
             check_interrupts(tile, thread)
 ```
 
-When the C++ accelerator is loaded, `run()` delegates to `_accel.run_loop(emu)` which
-implements the same logic in compiled C++ and only calls back into Python for traps and I/O.
+The same loop runs in C++ in the chiplet module (`chiplet/`, design/chiplet-module.md), a
+separate model of LM-1 that follows this one step for step and calls back into Python only
+for the console and block traps.
 
 ## 6. Debug Interface
 
@@ -194,7 +195,7 @@ These traps are **not** part of the ISA spec — they're emulator-specific stand
 
 ## 8. Implementation Language
 
-Python + C++ acceleration.
+Python, with the chiplet module as its C++ counterpart.
 
 **Core in Python:**
 - Clean, readable implementation of the ISA semantics
@@ -204,19 +205,14 @@ Python + C++ acceleration.
 - Match/case (Python 3.10+) for decode dispatch
 - Debug interface and CLI trivially built with Python's standard library
 
-**C++ extension for the hot loop:**
-- The fetch-decode-execute inner loop compiled as a CPython C extension (via `setuptools` / `setup.py`)
-- Provides 10–50× speedup over pure Python for sustained execution
-- Built by default with `pip install -e .`
-- Uses `numpy`-style `uint64` arrays or raw `malloc` for the memory backing store
-- Exposes the same API as the pure-Python fallback
-
-**PyPy fallback:**
-- If the C++ extension isn't available (e.g., no compiler on the system), the pure-Python code runs as-is
-- Under PyPy, the JIT gets the inner loop to ~5–15× over CPython, making it a viable fallback
-- Detection is automatic: `try: from lm1._accel import ...` / `except ImportError: <pure Python path>`
-
-Estimated size: ~2000–3000 lines Python, ~800–1200 lines C++.
+**The chiplet module in C++:**
+- `chiplet/` builds one shared library, the model MegaPad attaches as LM-1's chiplet and
+  LM-1's own tests drive through `ctypes` (`lm1/chiplet.py`, design/chiplet-module.md)
+- Its first stage models what this emulator executes, and the tests in
+  `tests/test_chiplet_core.py` run every program of this emulator's tests, the RTL bench's
+  programs and random instruction streams on both and compare them state for state
+- This emulator stays the reference until the module passes every test it passes; then
+  the module becomes the reference and this emulator retires (decision F of that plan)
 
 ## 9. Bringup Sequence
 

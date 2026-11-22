@@ -6,7 +6,7 @@
 # make test-kill         Kill a hanging test run
 # make test-list         Show available batches and tests
 # make test-results      Show results of the last completed run
-# make build             Build the C++ accelerator extension
+# make build             Build the chiplet module's library (../chiplet)
 # make clean             Clean build artifacts
 
 SHELL   := /bin/bash
@@ -61,16 +61,18 @@ test-results:
 
 .PHONY: build clean install
 
-## Build the C++ accelerator extension in-place.
+## Build the chiplet module's library, which lm1.chiplet also builds when
+## its sources change.
 build:
-	@cd $(EMU_DIR) && $(PYTHON) setup.py build_ext --inplace
+	@$(MAKE) --no-print-directory -C $(EMU_DIR)../chiplet
 
-## Editable install (includes C++ extension build).
+## Editable install.
 install:
 	@cd $(EMU_DIR) && pip install -e .
 
 ## Clean build artifacts.
 clean:
-	@cd $(EMU_DIR) && rm -rf build/ dist/ *.egg-info lm1/*.so lm1/_accel_ext*.so
+	@cd $(EMU_DIR) && rm -rf build/ dist/ *.egg-info
+	@$(MAKE) --no-print-directory -C $(EMU_DIR)../chiplet clean
 	@find $(EMU_DIR) -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 	@find $(EMU_DIR) -name '*.pyc' -delete 2>/dev/null || true

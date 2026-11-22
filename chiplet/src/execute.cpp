@@ -1,0 +1,883 @@
+// LM-1 chiplet module: instruction execution, traps and the run loops.
+//
+// Model::step is one turn of the reference's run loop (Emulator.run in
+// emu/lm1/execute.py): fetch, execute, answer a trap, then advance the PC
+// and the counters.  execute() follows Emulator._execute case by case, in
+// the same order of effects, so a fault part way through an instruction
+// leaves the state the reference leaves.
+#include <cstring>
+
+#include "memory.h"
+#include "model.h"
+
+namespace lm1 {
+
+namespace {
+
+// Opcodes (bits 31:26, emu/lm1/decode.py).
+enum Op : unsigned {
+    OP_TST = 0, OP_TST_SHAPE = 1, OP_ARITH_FIX = 2, OP_ADD_FIX_IMM = 3, OP_CMP_TAGGED = 4,
+    OP_LDW = 5, OP_STW = 6,
+    OP_ALLOC = 8, OP_ALLOC_CONS = 9, OP_ALLOCV = 10, OP_ALLOC_CLOSURE = 11,
+    OP_LD = 16, OP_LD_CAR_CDR = 17, OP_ST = 18, OP_ST_WB = 19, OP_ST_CAR_CDR = 20,
+    OP_CALL_IC = 24, OP_IC_INSTALL = 25, OP_CALL_DIRECT = 26, OP_CALL_CLOSURE = 27,
+    OP_RET = 28, OP_TAILCALL_IC = 29, OP_TAILCALL_DIR = 30, OP_JR = 31,
+    OP_PREFETCH_REF = 32, OP_PREFETCH_FLD = 33, OP_PREFETCH_CDR = 34, OP_GATHER_PRE = 35,
+    OP_SEND = 36, OP_RECV = 37, OP_CAS_TAGGED = 38, OP_FAA_FENCE = 39,
+    OP_LDB = 44, OP_STB = 45, OP_LDH = 46, OP_STH = 47,
+    OP_ARITH_RAW = 48, OP_BITWISE = 49, OP_LDR = 50, OP_STR = 51, OP_BR = 52, OP_BR_COND = 53,
+    OP_PUSH_POP = 54, OP_LI = 55, OP_LUI = 56, OP_PUSH_MULTI = 57, OP_POP_MULTI = 58,
+    OP_LI32 = 59,
+    OP_TRAP = 60, OP_ERET = 61, OP_SYS_INFO = 62, OP_HALT_NOP = 63
+};
+
+// Emulator I/O and configuration traps (design/emulator.md section 7).
+enum : uint32_t {
+    EMU_TRAP_PUTCHAR = 0x80, EMU_TRAP_GETCHAR = 0x81, EMU_TRAP_BLOCK_IO = 0x82,
+    EMU_TRAP_MEM_BYTE = 0x84, EMU_TRAP_SET_TRAP_TABLE = 0x90, EMU_TRAP_SET_TEMPLATE = 0x91,
+    EMU_TRAP_SET_CARD_BASE = 0x92, EMU_TRAP_SET_CARD_SHIFT = 0x93,
+    EMU_TRAP_SET_GEN_BOUNDARY = 0x94, EMU_TRAP_SET_QUEUE_BASE = 0x95,
+    EMU_TRAP_GC_ENGINE_CMD = 0x96, EMU_TRAP_DEBUG_PRINT = 0x9F
+};
+
+struct Inst {
+    unsigned op, rd, rs1, rs2, func;
+    i64 imm16;     // sign-extended
+    u64 raw26;
+};
+
+inline Inst decode(u64 raw) {
+    Inst d;
+    d.op = unsigned(raw >> 26) & 0x3F;
+    d.rd = unsigned(raw >> 21) & 0x1F;
+    d.rs1 = unsigned(raw >> 16) & 0x1F;
+    d.rs2 = unsigned(raw >> 11) & 0x1F;
+    d.func = unsigned(raw >> 6) & 0x1F;
+    d.imm16 = int16_t(uint16_t(raw & 0xFFFF));
+    d.raw26 = raw & 0x03FFFFFFull;
+    return d;
+}
+
+// The tagged-fixnum value of a queue descriptor, or the raw word when it
+// is not a fixnum, as the reference decodes one.
+inline i128 descriptor_value(u64 desc) {
+    return is_fixnum(desc) ? i128(untag_fixnum(desc)) : i128(desc);
+}
+
+class Executor {
+public:
+    Executor(Model &m, Tile &tile, Thread &t) : m_(m), tile_(tile), t_(t) {}
+
+    Flow raise(uint32_t code) {
+        m_.trap.code = code;
+        m_.trap.resumes = false;
+        return Flow::Trap;
+    }
+
+    Flow execute(const Inst &in, u64 &next_pc);
+
+private:
+    Flow write_barrier(u64 store_addr, u64 stored);
+    Flow bump_alloc(i128 total_bytes, u64 &addr);
+    Flow alloc_object(unsigned rd, i128 total_bytes, u64 tmpl_idx, i64 n_words,
+                      bool init, u64 init_value);
+    Flow alloc_cons(unsigned rd, u64 car, u64 cdr);
+    Flow push_frame(u64 return_addr);
+    Flow pop_frame(u64 &return_addr);
+    Flow handle_trap(uint32_t code);
+    Flow block_io();
+    Flow shape_of(u64 receiver, u64 &shape);
+
+    u64 &reg(unsigned i) { return t_.regs[i & 31]; }
+    uint32_t tile_index() const { return uint32_t(&tile_ - m_.tiles.data()); }
+
+    Model &m_;
+    Tile &tile_;
+    Thread &t_;
+};
+
+// The card-table barrier of ST.WB, ST.CAR, ST.CDR and CAS.TAGGED: a young
+// ref stored into an old word marks the card holding that word, in the
+// model's table and in the one the runtime configured in memory
+// (spec/02-isa.md section 5.4, spec/05-memory-gc.md section 4.2).
+Flow Executor::write_barrier(u64 store_addr, u64 stored) {
+    if (!is_any_ref(stored)) return Flow::Next;
+    u64 val_addr = ref_address(stored);
+    if (store_addr < tile_.gen_boundary) return Flow::Next;
+    if (val_addr >= tile_.gen_boundary) return Flow::Next;
+    u64 card_idx = tile_.card_shift < 64 ? store_addr >> tile_.card_shift : 0;
+    if (tile_.card_table_base != 0) {
+        if (!store_byte(m_, tile_, u128(tile_.card_table_base) + card_idx, 0xFF)) return Flow::Stop;
+    }
+    if (card_idx < tile_.cards.size()) tile_.cards[card_idx] = 0xFF;
+    return Flow::Next;
+}
+
+Flow Executor::bump_alloc(i128 total_bytes, u64 &addr) {
+    addr = t_.regs[REG_NP];
+    i128 new_np = i128(addr) + total_bytes;
+    if (new_np > i128(t_.regs[REG_NL])) return raise(TRAP_NURSERY_OVERFLOW);
+    t_.regs[REG_NP] = u64(new_np);
+    return Flow::Next;
+}
+
+Flow Executor::alloc_object(unsigned rd, i128 total_bytes, u64 tmpl_idx, i64 n_words,
+                            bool init, u64 init_value) {
+    u64 addr;
+    Flow f = bump_alloc(total_bytes, addr);
+    if (f != Flow::Next) return f;
+    // The header comes from the template, with the object's size patched in.
+    u64 tmpl = tmpl_idx < HEADER_TEMPLATES ? tile_.templates[tmpl_idx] : 0;
+    u64 hdr = (tmpl & ~(0xFFFFull << 8)) | ((u64(n_words) & 0xFFFF) << 8);
+    if (!store_word(m_, tile_, addr, hdr)) return Flow::Stop;
+    for (i64 i = 1; i <= n_words; ++i) {
+        if (!store_word(m_, tile_, u128(addr) + u128(i) * 8, 0)) return Flow::Stop;
+    }
+    if (init && !store_word(m_, tile_, u128(addr) + 8, init_value)) return Flow::Stop;
+    reg(rd) = make_ref(addr, false);
+    return Flow::Next;
+}
+
+Flow Executor::alloc_cons(unsigned rd, u64 car, u64 cdr) {
+    u64 addr;
+    Flow f = bump_alloc(24, addr);
+    if (f != Flow::Next) return f;
+    // Template 0 with the cons's two payload words as its size.
+    u64 hdr = (tile_.templates[0] & ~(0xFFFFull << 8)) | (u64(2) << 8);
+    if (!store_word(m_, tile_, addr, hdr)) return Flow::Stop;
+    if (!store_word(m_, tile_, u128(addr) + 8, car)) return Flow::Stop;
+    if (!store_word(m_, tile_, u128(addr) + 16, cdr)) return Flow::Stop;
+    reg(rd) = make_ref(addr, true);
+    return Flow::Next;
+}
+
+// A call frame: LR then FP pushed, LR set to the return address, FP to SP.
+Flow Executor::push_frame(u64 return_addr) {
+    u64 *r = t_.regs;
+    r[REG_SP] -= 8;
+    if (!store_word(m_, tile_, r[REG_SP], r[REG_LR])) return Flow::Stop;
+    r[REG_SP] -= 8;
+    if (!store_word(m_, tile_, r[REG_SP], r[REG_FP])) return Flow::Stop;
+    r[REG_LR] = return_addr;
+    r[REG_FP] = r[REG_SP];
+    return Flow::Next;
+}
+
+Flow Executor::pop_frame(u64 &return_addr) {
+    u64 *r = t_.regs;
+    return_addr = r[REG_LR];
+    r[REG_SP] = r[REG_FP];
+    u64 v;
+    if (!load_word(m_, tile_, r[REG_SP], v)) return Flow::Stop;
+    r[REG_FP] = v;
+    r[REG_SP] += 8;
+    if (!load_word(m_, tile_, r[REG_SP], v)) return Flow::Stop;
+    r[REG_LR] = v;
+    r[REG_SP] += 8;
+    return Flow::Next;
+}
+
+// The shape a receiver's header names, 0 for a header-less word.
+Flow Executor::shape_of(u64 receiver, u64 &shape) {
+    u64 hdr;
+    if (!load_word(m_, tile_, ref_address(receiver), hdr)) return Flow::Stop;
+    shape = is_header(hdr) ? header_shape_id(hdr) : 0;
+    return Flow::Next;
+}
+
+Flow Executor::block_io() {
+    u64 func = t_.regs[1], block = t_.regs[2], mem_addr = t_.regs[3];
+    if (m_.host.block_io == nullptr) {  // no block device attached
+        t_.regs[0] = tag_fixnum(-1);
+        return Flow::Next;
+    }
+    uint8_t data[BLOCK_SIZE];
+    if (func == 0) {
+        int r = m_.host.block_io(m_.host.context, tile_index(), 0, block, data, BLOCK_SIZE);
+        if (r == LM1C_HOST_FAIL) return m_.host_failure();
+        if (r != LM1C_HOST_OK) { t_.regs[0] = tag_fixnum(-1); return Flow::Next; }
+        for (u64 i = 0; i < BLOCK_SIZE; ++i) {
+            if (!store_byte(m_, tile_, mem_addr + i, data[i])) return Flow::Stop;
+        }
+        t_.regs[0] = tag_fixnum(0);
+    } else if (func == 1) {
+        for (u64 i = 0; i < BLOCK_SIZE; ++i) {
+            u64 b;
+            if (!load_byte(m_, tile_, mem_addr + i, b)) return Flow::Stop;
+            data[i] = uint8_t(b);
+        }
+        int r = m_.host.block_io(m_.host.context, tile_index(), 1, block, data, BLOCK_SIZE);
+        if (r == LM1C_HOST_FAIL) return m_.host_failure();
+        t_.regs[0] = tag_fixnum(r == LM1C_HOST_OK ? 0 : -1);
+    } else {
+        t_.regs[0] = tag_fixnum(-2);  // no such sub-function
+    }
+    return Flow::Next;
+}
+
+// TRAP #code: the emulator's I/O and configuration traps, and otherwise a
+// trap for the trap table (Emulator._handle_trap).
+Flow Executor::handle_trap(uint32_t code) {
+    u64 *r = t_.regs;
+    switch (code) {
+    case EMU_TRAP_PUTCHAR: {
+        u64 val = r[1];
+        u64 ch;
+        if (is_fixnum(val)) ch = u64(untag_fixnum(val)) & 0xFF;
+        else if ((val & 0xFF) == 0x35) ch = (val >> 8) & 0x1FFFFF;  // a character
+        else ch = val & 0xFF;
+        if (m_.host.put_char == nullptr ||
+            m_.host.put_char(m_.host.context, tile_index(), uint32_t(ch)) != LM1C_HOST_OK)
+            return m_.host_failure();
+        return Flow::Next;
+    }
+    case EMU_TRAP_GETCHAR: {
+        int64_t ch = -1;
+        if (m_.host.get_char == nullptr ||
+            m_.host.get_char(m_.host.context, tile_index(), &ch) != LM1C_HOST_OK)
+            return m_.host_failure();
+        r[0] = tag_fixnum(ch < 0 ? -1 : ch);
+        return Flow::Next;
+    }
+    case EMU_TRAP_BLOCK_IO:
+        return block_io();
+    case EMU_TRAP_SET_TRAP_TABLE:
+        t_.trap_table_base = r[1];
+        return Flow::Next;
+    case EMU_TRAP_SET_TEMPLATE:
+        tile_.templates[r[1] & 0xFF] = r[2];
+        return Flow::Next;
+    case EMU_TRAP_SET_CARD_BASE:
+        tile_.card_table_base = r[1];
+        return Flow::Next;
+    case EMU_TRAP_SET_CARD_SHIFT:
+        tile_.card_shift = r[1] & 0x3F;
+        card_table_reset(tile_);
+        return Flow::Next;
+    case EMU_TRAP_SET_GEN_BOUNDARY:
+        tile_.gen_boundary = r[1];
+        return Flow::Next;
+    case EMU_TRAP_SET_QUEUE_BASE:  // queues are modeled, not placed in memory
+    case EMU_TRAP_GC_ENGINE_CMD:   // the movement engines are not modeled yet
+        return Flow::Next;
+    case EMU_TRAP_MEM_BYTE: {
+        // r1 = 0 to load or 1 to store, r2 = address, r3 = offset, r4 = value
+        i128 sub = descriptor_value(r[1]);
+        u64 addr = r[2] + u64(descriptor_value(r[3]));
+        if (sub == 0) {
+            u64 b;
+            if (!load_byte(m_, tile_, addr, b)) return Flow::Stop;
+            r[1] = tag_fixnum(i64(b));
+        } else if (sub == 1) {
+            u64 val = u64(descriptor_value(r[4]));
+            if (!store_byte(m_, tile_, addr, val & 0xFF)) return Flow::Stop;
+            r[1] = tag_fixnum(0);
+        }
+        return Flow::Next;
+    }
+    case EMU_TRAP_DEBUG_PRINT: {
+        // r1 = address of a byte string, r2 = its length.  The string is
+        // read in full before anything is written.
+        u64 addr = r[1], length = r[2];
+        std::string text;
+        for (u64 i = 0; i < length; ++i) {
+            u64 b;
+            if (!load_byte(m_, tile_, addr + i, b)) return Flow::Stop;
+            text.push_back(char(b));
+        }
+        for (unsigned char c : text) {
+            if (m_.host.put_char == nullptr ||
+                m_.host.put_char(m_.host.context, tile_index(), c) != LM1C_HOST_OK)
+                return m_.host_failure();
+        }
+        return Flow::Next;
+    }
+    default:
+        return raise(code);
+    }
+}
+
+Flow Executor::execute(const Inst &in, u64 &next_pc) {
+    u64 *r = t_.regs;
+    switch (in.op) {
+
+    // ---- Scalar arithmetic (raw, untagged 64-bit) ----
+    case OP_ARITH_RAW: {
+        u64 a = r[in.rs1], b = r[in.rs2];
+        switch (in.func) {
+        case 0: r[in.rd] = a + b; break;
+        case 1: r[in.rd] = a - b; break;
+        case 2: r[in.rd] = a * b; break;
+        case 3: if (b == 0) return raise(TRAP_DIVIDE_BY_ZERO); r[in.rd] = a / b; break;
+        case 4: if (b == 0) return raise(TRAP_DIVIDE_BY_ZERO); r[in.rd] = a % b; break;
+        default: break;
+        }
+        return Flow::Next;
+    }
+
+    case OP_BITWISE: {
+        u64 a = r[in.rs1], b = r[in.rs2];
+        unsigned shift = unsigned(b & 63);
+        switch (in.func) {
+        case 0: r[in.rd] = a & b; break;
+        case 1: r[in.rd] = a | b; break;
+        case 2: r[in.rd] = a ^ b; break;
+        case 3: r[in.rd] = a << shift; break;
+        case 4: r[in.rd] = a >> shift; break;
+        case 5: r[in.rd] = u64(i64(a) >> shift); break;
+        case 6: r[in.rd] = ~a; break;
+        default: break;
+        }
+        return Flow::Next;
+    }
+
+    // ---- Raw loads and stores ----
+    case OP_LDR: {
+        u64 addr = (r[in.rs1] + u64(in.imm16)) & ~7ull;
+        u64 v;
+        if (!load_word(m_, tile_, addr, v)) return Flow::Stop;
+        r[in.rd] = v;
+        return Flow::Next;
+    }
+    case OP_STR: {
+        u64 addr = (r[in.rd] + u64(in.imm16)) & ~7ull;  // Format S: Rs in rd
+        if (!store_word(m_, tile_, addr, r[in.rs1])) return Flow::Stop;
+        return Flow::Next;
+    }
+    case OP_LDB: case OP_LDH: case OP_LDW: {
+        u64 addr = r[in.rs1] + u64(in.imm16);
+        unsigned width = in.op == OP_LDB ? 8 : in.op == OP_LDH ? 16 : 32;
+        if (width == 16) addr &= ~1ull;
+        if (width == 32) addr &= ~3ull;
+        u64 v;
+        if (!load_bits(m_, tile_, addr, width, v)) return Flow::Stop;
+        r[in.rd] = v;
+        return Flow::Next;
+    }
+    case OP_STB: case OP_STH: case OP_STW: {
+        u64 addr = r[in.rd] + u64(in.imm16);
+        unsigned width = in.op == OP_STB ? 8 : in.op == OP_STH ? 16 : 32;
+        if (width == 16) addr &= ~1ull;
+        if (width == 32) addr &= ~3ull;
+        if (!store_bits(m_, tile_, addr, width, r[in.rs1])) return Flow::Stop;
+        return Flow::Next;
+    }
+
+    // ---- Immediates ----
+    case OP_LI:
+        r[in.rd] = u64(in.imm16);
+        return Flow::Next;
+    case OP_LI32: {
+        u64 imm;
+        if (!load_u32(m_, tile_, next_pc, imm)) return Flow::Stop;
+        r[in.rd] = imm;
+        next_pc += 4;  // skip the immediate word
+        return Flow::Next;
+    }
+    case OP_LUI:
+        r[in.rd] = (u64(in.imm16) & 0xFFFF) << 16;
+        return Flow::Next;
+
+    // ---- Branches ----
+    case OP_BR:
+        next_pc = t_.pc + u64(in.imm16) * 4;
+        return Flow::Next;
+    case OP_BR_COND: {
+        // B format: bits 25:21 hold the register, bits 20:16 the condition.
+        u64 v = r[in.rd];
+        bool taken = false;
+        switch (in.rs1) {
+        case 0: taken = v != NIL && v != 0; break;              // BR.T
+        case 1: taken = v == NIL; break;                        // BR.NIL
+        case 2: taken = is_fixnum(v) && i64(v) < 0; break;      // BR.FIX.LT
+        case 3: taken = v == 0; break;                          // BR.FIX.EQ
+        case 4: taken = is_fixnum(v) && i64(v) > 0; break;      // BR.FIX.GT
+        case 5: taken = v == 0; break;                          // BR.EQ
+        default: break;
+        }
+        if (taken) next_pc = t_.pc + u64(in.imm16) * 4;
+        return Flow::Next;
+    }
+
+    // ---- Stack ----
+    case OP_PUSH_POP:
+        if (in.func == 0) {
+            r[REG_SP] -= 8;
+            if (!store_word(m_, tile_, r[REG_SP], r[in.rd])) return Flow::Stop;
+        } else if (in.func == 1) {
+            u64 v;
+            if (!load_word(m_, tile_, r[REG_SP], v)) return Flow::Stop;
+            r[in.rd] = v;
+            r[REG_SP] += 8;
+        }
+        return Flow::Next;
+    case OP_PUSH_MULTI: {
+        // Format I: rd = bank of 16 registers, imm16 = register mask.
+        if (in.rd > 1) return raise(TRAP_UNIMPLEMENTED);
+        unsigned base = in.rd * 16;
+        u64 mask = u64(in.imm16) & 0xFFFF;
+        for (unsigned i = 0; i < 16; ++i) {
+            if (mask & (1u << i)) {
+                r[REG_SP] -= 8;
+                if (!store_word(m_, tile_, r[REG_SP], r[base + i])) return Flow::Stop;
+            }
+        }
+        return Flow::Next;
+    }
+    case OP_POP_MULTI: {
+        if (in.rd > 1) return raise(TRAP_UNIMPLEMENTED);
+        unsigned base = in.rd * 16;
+        u64 mask = u64(in.imm16) & 0xFFFF;
+        for (int i = 15; i >= 0; --i) {
+            if (mask & (1u << i)) {
+                u64 v;
+                if (!load_word(m_, tile_, r[REG_SP], v)) return Flow::Stop;
+                r[base + unsigned(i)] = v;
+                r[REG_SP] += 8;
+            }
+        }
+        return Flow::Next;
+    }
+
+    // ---- System ----
+    case OP_TRAP: {
+        Flow f = handle_trap(uint32_t(in.raw26 & 0xFF));
+        if (f == Flow::Trap) {
+            // An explicit trap resumes after itself, as a system call returns.
+            m_.trap.resumes = true;
+            m_.trap.resume_pc = next_pc;
+        }
+        return f;
+    }
+    case OP_ERET:
+        if (!t_.in_trap) return raise(TRAP_UNIMPLEMENTED);
+        t_.in_trap = false;
+        next_pc = t_.trap_pc;
+        return Flow::Next;
+    case OP_SYS_INFO: {
+        // Bits 25:21 name Rd, bits 20:16 select what is read.
+        u64 v;
+        switch (in.rs1) {
+        case 0: v = t_.tile_id; break;
+        case 1: v = t_.thread_id; break;
+        case 2: v = t_.cycle_count; break;
+        case 3: v = t_.trap_cause; break;
+        case 4: v = t_.trap_pc; break;
+        case 5: v = tile_.card_table_base; break;
+        case 6: v = tile_.card_shift; break;
+        case 7: v = tile_.gen_boundary; break;
+        case 8: case 9: case 10: case 11: case 12: case 13: case 14:
+            v = 0;  // queue base, GC status, counters and scan results: not modeled
+            break;
+        default:
+            return Flow::Next;
+        }
+        r[in.rd] = v;
+        return Flow::Next;
+    }
+    case OP_HALT_NOP:
+        if (((in.raw26 >> 21) & 0x1F) == 0) t_.halted = true;  // else NOP
+        return Flow::Next;
+
+    // ---- Tagged arithmetic ----
+    case OP_ARITH_FIX: {
+        u64 a = r[in.rs1], b = r[in.rs2];
+        if (!is_fixnum(a) || !is_fixnum(b)) return raise(TRAP_NOT_FIXNUM);
+        switch (in.func) {
+        case 0: {
+            i64 s;
+            if (__builtin_add_overflow(i64(a), i64(b), &s)) return raise(TRAP_FIXNUM_OVERFLOW);
+            r[in.rd] = u64(s);
+            break;
+        }
+        case 1: {
+            i64 s;
+            if (__builtin_sub_overflow(i64(a), i64(b), &s)) return raise(TRAP_FIXNUM_OVERFLOW);
+            r[in.rd] = u64(s);
+            break;
+        }
+        case 2: {
+            // untag(a) times the tagged b is the tagged product.
+            i64 p;
+            if (__builtin_mul_overflow(untag_fixnum(a), i64(b), &p))
+                return raise(TRAP_FIXNUM_OVERFLOW);
+            r[in.rd] = u64(p);
+            break;
+        }
+        case 3: {
+            if (b == 0) return raise(TRAP_DIVIDE_BY_ZERO);
+            i64 va = untag_fixnum(a), vb = untag_fixnum(b);
+            u64 q = (va < 0 ? 0 - u64(va) : u64(va)) / (vb < 0 ? 0 - u64(vb) : u64(vb));
+            bool negative = (va < 0) != (vb < 0);
+            if (!negative && q >= u64(FIXNUM_LIMIT)) return raise(TRAP_FIXNUM_OVERFLOW);
+            r[in.rd] = tag_fixnum(negative ? -i64(q) : i64(q));
+            break;
+        }
+        default:
+            break;
+        }
+        return Flow::Next;
+    }
+    case OP_ADD_FIX_IMM: {
+        u64 a = r[in.rs1];
+        if (!is_fixnum(a)) return raise(TRAP_NOT_FIXNUM);
+        i64 s;
+        if (__builtin_add_overflow(i64(a), in.imm16, &s)) return raise(TRAP_FIXNUM_OVERFLOW);
+        r[in.rd] = u64(s);
+        return Flow::Next;
+    }
+    case OP_CMP_TAGGED: {
+        u64 a = r[in.rs1], b = r[in.rs2];
+        if (in.func == 0) {
+            if (is_fixnum(a) && is_fixnum(b)) {
+                i64 va = i64(a), vb = i64(b);
+                r[in.rd] = tag_fixnum(va < vb ? -1 : va == vb ? 0 : 1);
+            } else if ((a & 7) == (b & 7)) {
+                r[in.rd] = tag_fixnum(a == b ? 0 : 1);
+            } else {
+                return raise(TRAP_TYPE_MISMATCH);
+            }
+        } else if (in.func == 1) {
+            r[in.rd] = a == b ? T : NIL;
+        }
+        return Flow::Next;
+    }
+    case OP_TST: {
+        u64 v = r[in.rs1];
+        bool m = false;
+        switch (u64(in.imm16) & 7) {
+        case 0: m = is_fixnum(v); break;
+        case 1: m = (v & 3) == 1; break;
+        case 2: m = (v & 7) == 3; break;
+        case 3: m = (v & 7) == 5; break;
+        case 4: m = v == NIL; break;
+        case 5: m = (v & 0xFF) == 0x35; break;
+        case 6: m = (v & 0xFF) == 0x3D; break;
+        case 7: m = (v & 7) == 7; break;
+        }
+        r[in.rd] = m ? T : NIL;
+        return Flow::Next;
+    }
+
+    case OP_PREFETCH_REF: case OP_PREFETCH_FLD: case OP_PREFETCH_CDR: case OP_GATHER_PRE:
+        return Flow::Next;
+
+    // ---- Allocation ----
+    case OP_ALLOC: {
+        unsigned rd = unsigned(in.raw26 >> 21) & 0x1F;
+        i64 n_words = i64(in.raw26 >> 16) & 0x1F;
+        return alloc_object(rd, i128(1 + n_words) * 8, in.raw26 & 0xFFFF, n_words, false, 0);
+    }
+    case OP_ALLOC_CONS: {
+        unsigned rd = unsigned(in.raw26 >> 21) & 0x1F;
+        u64 car = in.rs1 != 0 ? r[in.rs1] : NIL;  // register 0 stands for nil
+        u64 cdr = in.rs2 != 0 ? r[in.rs2] : NIL;
+        return alloc_cons(rd, car, cdr);
+    }
+    case OP_ALLOCV: {
+        unsigned rd = unsigned(in.raw26 >> 21) & 0x1F;
+        u64 length = r[(in.raw26 >> 16) & 0x1F];
+        if (!is_fixnum(length)) return raise(TRAP_NOT_FIXNUM);
+        // A header, the length word, then the elements.
+        i64 n_words = 1 + untag_fixnum(length);
+        return alloc_object(rd, (1 + i128(n_words)) * 8, in.raw26 & 0xFFFF, n_words,
+                            true, length);
+    }
+    case OP_ALLOC_CLOSURE: {
+        unsigned rd = unsigned(in.raw26 >> 21) & 0x1F;
+        u64 code_ptr = r[(in.raw26 >> 16) & 0x1F];
+        i64 n_words = 1 + (i64(in.raw26 >> 11) & 0x1F);  // the code entry, then the env
+        return alloc_object(rd, i128(1 + n_words) * 8, 1, n_words, true, code_ptr);
+    }
+
+    // ---- Tagged field access ----
+    case OP_LD: {
+        u64 obj = r[in.rs1];
+        if (!is_any_ref(obj)) return raise(TRAP_NOT_REF);
+        u64 v;
+        if (!load_word(m_, tile_, ref_address(obj) + ((u64(in.imm16) & 0x1F) + 1) * 8, v))
+            return Flow::Stop;
+        r[in.rd] = v;
+        return Flow::Next;
+    }
+    case OP_LD_CAR_CDR: {
+        u64 obj = r[in.rs1];
+        if (!is_any_ref(obj)) return raise(TRAP_NOT_REF);
+        u64 v;
+        if (!load_word(m_, tile_, ref_address(obj) + ((u64(in.imm16) & 1) + 1) * 8, v))
+            return Flow::Stop;
+        r[in.rd] = v;
+        return Flow::Next;
+    }
+    case OP_ST: case OP_ST_WB: case OP_ST_CAR_CDR: {
+        // Format S: Rs (the object) in rd, Rt (the value) in rs1, the field
+        // in rs2.  ST stores without the barrier; ST.WB, ST.CAR and ST.CDR
+        // run it after the store.
+        u64 obj = r[in.rd], val = r[in.rs1];
+        if (!is_any_ref(obj)) return raise(TRAP_NOT_REF);
+        u64 field_addr = ref_address(obj) + (u64(in.rs2) + 1) * 8;
+        if (!store_word(m_, tile_, field_addr, val)) return Flow::Stop;
+        if (in.op == OP_ST) return Flow::Next;
+        return write_barrier(field_addr, val);
+    }
+    case OP_TST_SHAPE: {
+        u64 v = r[in.rs1];
+        u64 shape_test = u64(in.imm16) & 0xFFFF;
+        if (is_any_ref(v)) {
+            u64 hdr;
+            if (!load_word(m_, tile_, ref_address(v), hdr)) return Flow::Stop;
+            r[in.rd] = is_header(hdr) && (header_shape_id(hdr) & 0xFFFF) == shape_test ? T : NIL;
+        } else {
+            r[in.rd] = NIL;
+        }
+        return Flow::Next;
+    }
+
+    // ---- Dispatch ----
+    case OP_CALL_IC: case OP_TAILCALL_IC: {
+        u64 receiver = r[in.rd];
+        if (!is_any_ref(receiver)) return raise(TRAP_NOT_REF);
+        u64 shape;
+        if (shape_of(receiver, shape) != Flow::Next) return Flow::Stop;
+        auto hit = tile_.ic.find(IcKey{t_.pc, shape});  // the call site is the PC
+        if (hit == tile_.ic.end()) return raise(TRAP_IC_MISS);
+        if (in.op == OP_CALL_IC) {
+            Flow f = push_frame(next_pc);
+            if (f != Flow::Next) return f;
+        }
+        next_pc = hit->second;
+        return Flow::Next;
+    }
+    case OP_IC_INSTALL: {
+        // Format R: Rs1 = receiver, Rs2 = code entry, Rd = call-site PC.
+        u64 receiver = r[in.rs1], code_entry = r[in.rs2], callsite = r[in.rd];
+        u64 shape = 0;
+        if (is_any_ref(receiver) && shape_of(receiver, shape) != Flow::Next) return Flow::Stop;
+        tile_.ic[IcKey{callsite, shape}] = code_entry;
+        return Flow::Next;
+    }
+    case OP_CALL_DIRECT: {
+        Flow f = push_frame(next_pc);
+        if (f != Flow::Next) return f;
+        next_pc = t_.pc + u64(in.imm16) * 4;
+        return Flow::Next;
+    }
+    case OP_CALL_CLOSURE: {
+        u64 closure = r[in.rd];
+        if (!is_any_ref(closure)) return raise(TRAP_NOT_CLOSURE);
+        u64 caddr = ref_address(closure), hdr, code_entry;
+        if (!load_word(m_, tile_, caddr, hdr)) return Flow::Stop;
+        if (!is_header(hdr) || header_subtype(hdr) != HDR_CLOSURE) return raise(TRAP_NOT_CLOSURE);
+        if (!load_word(m_, tile_, caddr + 8, code_entry)) return Flow::Stop;
+        Flow f = push_frame(next_pc);
+        if (f != Flow::Next) return f;
+        next_pc = code_entry;
+        return Flow::Next;
+    }
+    case OP_RET: {
+        u64 ret;
+        Flow f = pop_frame(ret);
+        if (f != Flow::Next) return f;
+        next_pc = ret;
+        return Flow::Next;
+    }
+    case OP_JR:
+        next_pc = r[in.rd];
+        return Flow::Next;
+    case OP_TAILCALL_DIR:
+        next_pc = t_.pc + u64(in.imm16) * 4;
+        return Flow::Next;
+
+    // ---- Messaging and atomics ----
+    case OP_SEND: {
+        // Format S: Rs (bits 25:21) holds the queue descriptor, a fixnum
+        // (tile << 2) | queue, and Rt (bits 20:16) the value.
+        i128 q = descriptor_value(r[in.rd]);
+        u64 value = r[in.rs1];
+        i128 target = q >> 2;
+        unsigned queue = unsigned(u64(q) & 3);
+        Tile *dest = target == i128(tile_.id) ? &tile_ : m_.tile_by_id(target > INT64_MAX ? -1 : i64(target));
+        if (dest == nullptr || dest->queues[queue].full()) return raise(TRAP_QUEUE_FULL);
+        dest->queues[queue].push(value);
+        return Flow::Next;
+    }
+    case OP_RECV: {
+        i128 q = descriptor_value(r[in.rs1]);
+        i128 target = q >> 2;
+        unsigned queue = unsigned(u64(q) & 3);
+        Tile *src = target == i128(tile_.id) ? &tile_ : m_.tile_by_id(target > INT64_MAX ? -1 : i64(target));
+        Queue *qu = src == nullptr ? nullptr : &src->queues[queue];  // no tile: an empty queue
+        bool any = qu != nullptr && qu->size() > 0;
+        if (in.func != 0) {
+            // TRY.RECV: Rd gets the value or nil, the register named by func
+            // gets t or nil.
+            if (any) { r[in.rd] = qu->pop(); r[in.func] = T; }
+            else { r[in.rd] = NIL; r[in.func] = NIL; }
+        } else if (any) {
+            r[in.rd] = qu->pop();
+        } else {
+            // RECV on an empty queue stalls the thread, to retry the RECV.
+            t_.stalled = true;
+            t_.stall_queue = queue;
+            next_pc = t_.pc;
+        }
+        return Flow::Next;
+    }
+    case OP_CAS_TAGGED: {
+        // Format X: Rd, Rs_addr (bits 20:16), Rs_expected (15:11),
+        // Rt_new (10:6).
+        u64 a = r[in.rs1];
+        u64 addr = is_any_ref(a) ? ref_address(a) : a;
+        u64 old;
+        if (!load_word(m_, tile_, addr, old)) return Flow::Stop;
+        if (old == r[in.rs2]) {
+            u64 nv = r[in.func];
+            if (!store_word(m_, tile_, addr, nv)) return Flow::Stop;
+            if (is_any_ref(nv) && write_barrier(addr, nv) != Flow::Next) return Flow::Stop;
+            r[in.rd] = T;
+        } else {
+            r[in.rd] = NIL;
+        }
+        return Flow::Next;
+    }
+    case OP_FAA_FENCE: {
+        if (in.func == 0x1F) return Flow::Next;  // FENCE.GC: nothing is pending
+        u64 a = r[in.rs1];
+        u64 addr = is_any_ref(a) ? ref_address(a) : a;
+        u64 old;
+        if (!load_word(m_, tile_, addr, old)) return Flow::Stop;
+        u64 delta = r[in.rs2];
+        if (!is_fixnum(old) || !is_fixnum(delta)) return raise(TRAP_NOT_FIXNUM);
+        if (!store_word(m_, tile_, addr, old + delta)) return Flow::Stop;
+        r[in.rd] = old;
+        return Flow::Next;
+    }
+
+    default:
+        return raise(TRAP_UNIMPLEMENTED);
+    }
+}
+
+}  // namespace
+
+Model::Model(const Config &config)
+    : first_tile_id(config.tile_id), queue_depth(size_t(config.queue_depth)) {
+    tiles.resize(size_t(config.tiles));
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        Tile &tile = tiles[i];
+        tile.id = config.tile_id + i;
+        tile.mem_size = config.mem;
+        tile.mem.assign(size_t(config.mem / 8), 0);
+        tile.nursery_base = config.nursery_base;
+        tile.nursery_size = config.nursery_size;
+        tile.oldgen_base = config.oldgen_base;
+        tile.oldgen_size = config.oldgen_size;
+        tile.oldgen_ptr = config.oldgen_base;
+        tile.card_shift = config.card_shift;
+        // The barrier counts addresses at or above the boundary as old, so
+        // it starts at the nursery's end, with old-gen above.
+        tile.gen_boundary = config.nursery_base + config.nursery_size;
+        card_table_reset(tile);
+        for (Queue &q : tile.queues) q.reset(queue_depth);
+        // The tile's threads share its nursery, each bumping its own
+        // pointer through a slice of it, the last slice to the nursery's end.
+        u64 n = config.threads;
+        u64 slice = (config.nursery_size / n) & ~7ull;
+        tile.threads.resize(size_t(n));
+        for (u64 tid = 0; tid < n; ++tid) {
+            Thread &t = tile.threads[size_t(tid)];
+            t.tile_id = tile.id;
+            t.thread_id = tid;
+            t.slice_base = config.nursery_base + tid * slice;
+            t.regs[REG_NP] = t.slice_base;
+            t.regs[REG_NL] = tid + 1 < n ? t.slice_base + slice
+                                         : config.nursery_base + config.nursery_size;
+        }
+        // The default templates: a cons, a closure and a vector.
+        tile.templates[0] = make_header(HDR_CONS, 2, 0);
+        tile.templates[1] = make_header(HDR_CLOSURE, 0, 1);
+        tile.templates[2] = make_header(HDR_VECTOR, 0, 2);
+    }
+}
+
+Tile *Model::tile_by_id(i64 id) {
+    if (id < 0 || u64(id) < first_tile_id) return nullptr;
+    u64 index = u64(id) - first_tile_id;
+    return index < tiles.size() ? &tiles[size_t(index)] : nullptr;
+}
+
+Flow Model::memory_fault(u128 address) {
+    stop.stop = LM1C_STOP_MEMORY;
+    stop.address = address > ~0ull ? ~0ull : u64(address);
+    return Flow::Stop;
+}
+
+Flow Model::host_failure() {
+    stop.stop = LM1C_STOP_HOST;
+    return Flow::Stop;
+}
+
+void card_table_reset(Tile &tile) {
+    u64 entries = tile.card_shift < 64 ? tile.mem_size >> tile.card_shift : 0;
+    tile.cards.assign(size_t(entries), 0);
+}
+
+// One step of a thread, a turn of the reference's run loop.  A trap below
+// 0x80 vectors through the thread's trap table (Emulator._take_trap): ERET
+// resumes a fault at the faulting instruction and an explicit TRAP after
+// itself.  TRAP_NURSERY_OVERFLOW with no handler in the table is answered
+// by a minor collection, the stand-in for an absent runtime, after which
+// the allocation is retried; when the thread's slice of the nursery is
+// already empty no collection makes room, and the trap stands.
+Flow Model::step(Tile &tile, Thread &t) {
+    u64 raw;
+    if (!load_u32(*this, tile, t.pc, raw)) return Flow::Stop;
+    u64 next_pc = t.pc + 4;
+    Executor ex(*this, tile, t);
+    Flow f = ex.execute(decode(raw), next_pc);
+    if (f == Flow::Trap) {
+        uint32_t code = trap.code;
+        bool handled_by_table = false;
+        if (code == TRAP_NURSERY_OVERFLOW && t.trap_table_base != 0) {
+            u64 handler;
+            if (!load_word(*this, tile, u128(t.trap_table_base) + u128(code) * 8, handler))
+                return Flow::Stop;
+            handled_by_table = handler != 0;
+        }
+        if (code == TRAP_NURSERY_OVERFLOW && !handled_by_table) {
+            if (t.regs[REG_NP] == t.slice_base) {
+                stop.stop = LM1C_STOP_TRAP;
+                stop.trap = code;
+                return Flow::Stop;
+            }
+            Flow c = collect(tile);
+            if (c != Flow::Next) return c;
+            next_pc = t.pc;
+        } else if (t.trap_table_base != 0 && code < 0x80) {
+            t.trap_pc = trap.resumes ? trap.resume_pc : t.pc;
+            t.trap_cause = code;
+            t.in_trap = true;
+            u64 handler;
+            if (!load_word(*this, tile, u128(t.trap_table_base) + u128(code) * 8, handler))
+                return Flow::Stop;
+            if (handler == 0) {
+                stop.stop = LM1C_STOP_TRAP;
+                stop.trap = code;
+                return Flow::Stop;
+            }
+            next_pc = handler;
+        } else {
+            stop.stop = LM1C_STOP_TRAP;
+            stop.trap = code;
+            return Flow::Stop;
+        }
+    } else if (f == Flow::Stop) {
+        return f;
+    }
+    t.pc = next_pc;
+    t.cycle_count += 1;
+    tile.instruction_count += 1;
+    return Flow::Next;
+}
+
+}  // namespace lm1

@@ -1,0 +1,8 @@
+/* The library's exported names: its C interfaces, and nothing of the C++
+   standard library its model uses inside. */
+{
+    global:
+        lm1c_*;
+    local:
+        *;
+};
