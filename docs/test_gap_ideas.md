@@ -124,6 +124,18 @@ value 42 as a descriptor and traps `TRAP_QUEUE_FULL`.
 test 35, as the spec has them, or queue numbers in the spec, which gives up
 messages between tiles.
 
+### P0-10  ALLOCV zeroes at most 31 words and takes any length
+
+`S_ALLOC_ZERO` counts the words to zero in the 5-bit `acnt`, which ALLOCV
+loads from `nw[4:0]`, so a vector of 31 or more elements gets only
+`(len + 1) mod 32` words zeroed and keeps whatever memory held in the
+rest, which a collection then reads as fields.  ALLOCV also uses its
+length without checking its tag, where the spec traps `TRAP_NOT_FIXNUM`
+for a length that is not a fixnum (spec/02-isa.md § 4.3), as the emulator
+does.
+
+**Where:** `lm1_control.sv`, `OP_ALLOCV` and `S_ALLOC_ZERO`.
+
 ---
 
 ## P1 — Entirely Untested Instructions
