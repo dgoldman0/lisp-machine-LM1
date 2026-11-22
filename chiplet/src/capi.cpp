@@ -96,6 +96,8 @@ LM1C_API int lm1c_tile_get(const lm1c_model *model, uint32_t tile, int field, ui
     case LM1C_TILE_CARD_TABLE_SIZE: *value = t->cards.size(); break;
     case LM1C_TILE_GC_COUNT: *value = t->gc_count; break;
     case LM1C_TILE_INSTRUCTION_COUNT: *value = t->instruction_count; break;
+    case LM1C_TILE_NURSERY_CHUNK: *value = t->nursery_chunk; break;
+    case LM1C_TILE_NURSERY_FREE: *value = t->nursery_free; break;
     default: return LM1C_BAD_FIELD;
     }
     return LM1C_OK;
@@ -124,6 +126,7 @@ LM1C_API int lm1c_tile_set(lm1c_model *model, uint32_t tile, int field, uint64_t
     case LM1C_TILE_GEN_BOUNDARY: t->gen_boundary = value; break;
     case LM1C_TILE_GC_COUNT: t->gc_count = value; break;
     case LM1C_TILE_INSTRUCTION_COUNT: t->instruction_count = value; break;
+    case LM1C_TILE_NURSERY_FREE: t->nursery_free = value; break;
     default: return LM1C_BAD_FIELD;
     }
     return LM1C_OK;

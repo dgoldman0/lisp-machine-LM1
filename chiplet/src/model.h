@@ -101,7 +101,7 @@ struct Thread {
     bool in_trap = false;
     u64 tile_id = 0;
     u64 thread_id = 0;
-    u64 slice_base = 0;  // where this thread's slice of the nursery begins
+    u64 slice_base = 0;  // where this thread's chunk of the nursery begins
 };
 
 // A bounded FIFO.  SEND refuses a full queue; a host push onto one drops
@@ -148,6 +148,9 @@ struct Tile {
     size_t current = 0;    // the thread that lm1c_run runs
     u64 templates[HEADER_TEMPLATES] = {};
     u64 nursery_base = 0, nursery_size = 0;
+    // The chunk a thread takes at a time, and the nursery's first free byte
+    // after the chunks threads hold (spec/04-soc.md section 4.3).
+    u64 nursery_chunk = 0, nursery_free = 0;
     u64 oldgen_base = 0, oldgen_size = 0, oldgen_ptr = 0;
     u64 card_shift = 6, card_table_base = 0, gen_boundary = 0;
     u64 queue_base = 0;  // SET_QUEUE_BASE records it, SYS_INFO 8 reads it back
@@ -167,6 +170,7 @@ enum class Flow {
 
 struct PendingTrap {
     uint32_t code = 0;
+    u64 alloc_bytes = 0;   // TRAP_NURSERY_OVERFLOW: the bytes the allocation needs
     bool resumes = false;  // an explicit TRAP: ERET resumes at resume_pc
     u64 resume_pc = 0;
 };
@@ -190,6 +194,7 @@ struct Config {
     u64 oldgen_size = 0x40000;
     u64 card_shift = 6;
     u64 queue_depth = 512;
+    u64 nursery_chunk = 0x1000;   // at most an equal slice for each thread
     // LM-1's end of the link (link.cpp), with the RTL's parameters as
     // defaults: lm1_link_boot's LOAD_BASE and BURST_WORDS, and lm1_link's
     // RANGES.  lend holds the ranges the runtime's stand-in lends once the
@@ -284,6 +289,8 @@ struct Model {
     Flow step(Tile &tile, Thread &t);
     // The minor collection, as TRAP_NURSERY_OVERFLOW's stand-in runs it.
     Flow collect(Tile &tile);
+    // Every thread's chunk from the nursery's base on, the rest free.
+    void fresh_chunks(Tile &tile);
 
     // The run loops (run.cpp).  run_tiles gives the threads of tiles
     // [first, last) their quanta in turn.

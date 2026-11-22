@@ -155,7 +155,7 @@ The nursery belongs to the tile, and the tile's hardware threads share it. Each 
 3. **Minor GC:** Only when the nursery has no free space left does the runtime collect. It (or a movement engine) scans the nursery, copies survivors to the cluster's shared SRAM (old-gen region), and gives every thread fresh space.
 4. **Card table reset:** After minor GC, the card table is cleared.
 
-The emulators give a tile's threads equal slices of the nursery and collect when a thread's slice runs out. That division is a default for their tests, not a rule of the architecture.
+The emulators, the Python reference and the chiplet module alike, divide the nursery this way, as the runtime they stand in for would: each thread starts with a chunk of `nursery_chunk` bytes, 4 KiB by default and at most an equal slice for each thread; a thread whose chunk runs out takes a fresh one from the nursery's free space, at least as large as the allocation that ran out; and they collect only when no free space is left, after which every thread starts a fresh chunk. The chunk size is the runtime's choice, not a rule of the architecture.
 
 ### 4.4 Message Queue Hardware
 

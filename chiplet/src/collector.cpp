@@ -111,8 +111,8 @@ public:
             }
         }
 
-        // Every thread's slice of the nursery is empty again.
-        for (Thread &t : tile_.threads) t.regs[REG_NP] = t.slice_base;
+        // Every thread has a fresh chunk of an empty nursery.
+        m_.fresh_chunks(tile_);
         tile_.gc_count += 1;
         return Flow::Next;
     }

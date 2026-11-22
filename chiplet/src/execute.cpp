@@ -101,6 +101,7 @@ public:
     Flow raise(uint32_t code) {
         m_.trap.code = code;
         m_.trap.resumes = false;
+        m_.trap.alloc_bytes = 0;
         return Flow::Trap;
     }
 
@@ -156,7 +157,11 @@ Flow Executor::write_barrier(u64 store_addr, u64 stored) {
 Flow Executor::bump_alloc(i128 total_bytes, u64 &addr) {
     addr = t_.regs[REG_NP];
     i128 new_np = i128(addr) + total_bytes;
-    if (new_np > i128(t_.regs[REG_NL])) return raise(TRAP_NURSERY_OVERFLOW);
+    if (new_np > i128(t_.regs[REG_NL])) {
+        Flow f = raise(TRAP_NURSERY_OVERFLOW);
+        m_.trap.alloc_bytes = total_bytes > i128(~0ull) ? ~0ull : u64(total_bytes);
+        return f;
+    }
     t_.regs[REG_NP] = u64(new_np);
     return Flow::Next;
 }
@@ -866,20 +871,19 @@ void Model::init_tiles() {
         tile.gen_boundary = config.nursery_base + config.nursery_size;
         card_table_reset(tile);
         for (Queue &q : tile.queues) q.reset(queue_depth);
-        // The tile's threads share its nursery, each bumping its own
-        // pointer through a slice of it, the last slice to the nursery's end.
+        // The tile's threads share its nursery as the runtime divides it
+        // (spec/04-soc.md section 4.3): each bumps its own pointer through a
+        // chunk of it, nursery_chunk bytes and at most an equal slice.
         u64 n = config.threads;
         u64 slice = (config.nursery_size / n) & ~7ull;
+        tile.nursery_chunk = std::min(config.nursery_chunk, slice);
         tile.threads.assign(size_t(n), Thread{});
         for (u64 tid = 0; tid < n; ++tid) {
             Thread &t = tile.threads[size_t(tid)];
             t.tile_id = tile.id;
             t.thread_id = tid;
-            t.slice_base = config.nursery_base + tid * slice;
-            t.regs[REG_NP] = t.slice_base;
-            t.regs[REG_NL] = tid + 1 < n ? t.slice_base + slice
-                                         : config.nursery_base + config.nursery_size;
         }
+        fresh_chunks(tile);
         // The default templates: a cons, a closure and a vector.
         tile.templates[0] = make_header(HDR_CONS, 2, 0);
         tile.templates[1] = make_header(HDR_CLOSURE, 0, 1);
@@ -924,6 +928,16 @@ Flow Model::host_failure() {
     return Flow::Stop;
 }
 
+void Model::fresh_chunks(Tile &tile) {
+    for (size_t tid = 0; tid < tile.threads.size(); ++tid) {
+        Thread &t = tile.threads[tid];
+        t.slice_base = tile.nursery_base + tid * tile.nursery_chunk;
+        t.regs[REG_NP] = t.slice_base;
+        t.regs[REG_NL] = t.slice_base + tile.nursery_chunk;
+    }
+    tile.nursery_free = tile.nursery_base + tile.threads.size() * tile.nursery_chunk;
+}
+
 void card_table_reset(Tile &tile) {
     u64 entries = tile.card_shift < 64 ? tile.mem_size >> tile.card_shift : 0;
     tile.cards.assign(size_t(entries), 0);
@@ -932,10 +946,13 @@ void card_table_reset(Tile &tile) {
 // One step of a thread, a turn of the reference's run loop.  A trap below
 // 0x80 vectors through the thread's trap table (Emulator._take_trap): ERET
 // resumes a fault at the faulting instruction and an explicit TRAP after
-// itself.  TRAP_NURSERY_OVERFLOW with no handler in the table is answered
-// by a minor collection, the stand-in for an absent runtime, after which
-// the allocation is retried; when the thread's slice of the nursery is
-// already empty no collection makes room, and the trap stands.
+// itself.  TRAP_NURSERY_OVERFLOW with no handler in the table is answered as
+// the runtime answers it (spec/04-soc.md section 4.3), after which the
+// allocation is retried: a fresh chunk for the thread from the nursery's
+// free space, the allocation's size at least, while any is left, and a minor
+// collection only when none is.  When the thread's chunk is already empty
+// and no thread has taken free space since the last collection, no
+// collection makes room, and the trap stands.
 Flow Model::step(Tile &tile, Thread &t) {
     u64 raw;
     if (!load_u32(*this, tile, t.pc, raw)) return Flow::Stop;
@@ -952,13 +969,23 @@ Flow Model::step(Tile &tile, Thread &t) {
             handled_by_table = handler != 0;
         }
         if (code == TRAP_NURSERY_OVERFLOW && !handled_by_table) {
-            if (t.regs[REG_NP] == t.slice_base) {
-                stop.stop = LM1C_STOP_TRAP;
-                stop.trap = code;
-                return Flow::Stop;
+            const u128 need = (u128(trap.alloc_bytes) + 7) & ~u128(7);
+            const u128 chunk = std::max<u128>(tile.nursery_chunk, need);
+            if (u128(tile.nursery_free) + chunk <= u128(tile.nursery_base) + tile.nursery_size) {
+                t.slice_base = tile.nursery_free;
+                t.regs[REG_NP] = tile.nursery_free;
+                t.regs[REG_NL] = u64(tile.nursery_free + chunk);
+                tile.nursery_free = u64(tile.nursery_free + chunk);
+            } else {
+                const u64 fresh = tile.nursery_base + tile.threads.size() * tile.nursery_chunk;
+                if (t.regs[REG_NP] == t.slice_base && tile.nursery_free == fresh) {
+                    stop.stop = LM1C_STOP_TRAP;
+                    stop.trap = code;
+                    return Flow::Stop;
+                }
+                Flow c = collect(tile);
+                if (c != Flow::Next) return c;
             }
-            Flow c = collect(tile);
-            if (c != Flow::Next) return c;
             next_pc = t.pc;
         } else if (t.trap_table_base != 0 && code < SYSTEM_TRAPS) {
             t.trap_pc = trap.resumes ? trap.resume_pc : t.pc;

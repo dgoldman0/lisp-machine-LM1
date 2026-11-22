@@ -47,6 +47,7 @@ const Key KEYS[] = {
     {"oldgen_size", &Config::oldgen_size},
     {"card_shift", &Config::card_shift},
     {"queue_depth", &Config::queue_depth},
+    {"nursery_chunk", &Config::nursery_chunk},
     {"load_base", &Config::load_base},
     {"burst_words", &Config::burst_words},
     {"lend_ranges", &Config::lend_ranges},
@@ -141,6 +142,10 @@ bool parse_config(const char *text, Config &config, std::string &error) {
     if (config.mem % 8 != 0) { error = "a tile's memory is a whole number of 8-byte words"; return false; }
     if (config.card_shift > 63) { error = "card_shift is at most 63"; return false; }
     if (config.queue_depth < 1) { error = "a queue holds at least one message"; return false; }
+    if (config.nursery_chunk < 8 || config.nursery_chunk % 8 != 0) {
+        error = "nursery_chunk is a multiple of 8 from 8 up";
+        return false;
+    }
     if (u128(config.nursery_base) + config.nursery_size > ~0ull ||
         u128(config.oldgen_base) + config.oldgen_size > ~0ull ||
         u128(config.tile_id) + config.tiles > u128(INT64_MAX)) {

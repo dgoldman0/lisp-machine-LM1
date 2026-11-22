@@ -58,7 +58,7 @@ HOST_OK, HOST_IO_ERROR, HOST_FAIL = 0, 1, 2
 (TILE_ID, TILE_MEM_SIZE, TILE_THREADS, TILE_CURRENT_THREAD, TILE_NURSERY_BASE,
  TILE_NURSERY_SIZE, TILE_OLDGEN_BASE, TILE_OLDGEN_SIZE, TILE_OLDGEN_PTR,
  TILE_CARD_SHIFT, TILE_CARD_TABLE_BASE, TILE_GEN_BOUNDARY, TILE_CARD_TABLE_SIZE,
- TILE_GC_COUNT, TILE_INSTRUCTION_COUNT) = range(15)
+ TILE_GC_COUNT, TILE_INSTRUCTION_COUNT, TILE_NURSERY_CHUNK, TILE_NURSERY_FREE) = range(17)
 
 BLOCK_SIZE = 4096
 
@@ -1003,6 +1003,7 @@ class Emulator:
     DEFAULT_OLDGEN_BASE = 0x0008_0000
     DEFAULT_OLDGEN_SIZE = 0x0004_0000
     DEFAULT_CARD_SHIFT = 6
+    DEFAULT_NURSERY_CHUNK = 0x1000
     QUEUE_DEPTH = 512
     NUM_QUEUES = 4
 
@@ -1020,6 +1021,7 @@ class Emulator:
         tile_id: int = 0,
         num_threads: int = 1,
         block_device: str | None = None,
+        nursery_chunk: int | None = None,
         _model: Model | None = None,
         _tile: int = 0,
     ):
@@ -1028,7 +1030,7 @@ class Emulator:
         if _model is None:
             _model = Model(_config(mem_size, nursery_base, nursery_size, oldgen_base,
                                    oldgen_size, tiles=1, threads=num_threads,
-                                   tile_id=tile_id))
+                                   tile_id=tile_id, nursery_chunk=nursery_chunk))
             _attach_host(_model)
         self._model = _model
         self._tile = _tile
@@ -1056,6 +1058,8 @@ class Emulator:
     card_table_size = _tile_field(TILE_CARD_TABLE_SIZE)
     gc_count = _tile_field(TILE_GC_COUNT)
     instruction_count = _tile_field(TILE_INSTRUCTION_COUNT)
+    nursery_chunk = _tile_field(TILE_NURSERY_CHUNK)
+    nursery_free = _tile_field(TILE_NURSERY_FREE)
     _current_thread_idx = _tile_field(TILE_CURRENT_THREAD)
 
     @property
@@ -1138,7 +1142,7 @@ class Cluster:
 
 
 def _config(mem_size, nursery_base, nursery_size, oldgen_base, oldgen_size, *,
-            tiles: int, threads: int, tile_id: int) -> str:
+            tiles: int, threads: int, tile_id: int, nursery_chunk: int | None = None) -> str:
     """The configuration of a model laid out as the reference's Emulator
     lays itself out from the same arguments, which it also checks."""
     assert mem_size % 8 == 0, "Memory size must be a multiple of 8"
@@ -1150,8 +1154,10 @@ def _config(mem_size, nursery_base, nursery_size, oldgen_base, oldgen_size, *,
         raise ValueError(
             f"old-gen at {ob:#x} lies below the nursery's end {nb + ns:#x}; the "
             f"barrier's generation boundary needs old-gen above the nursery")
+    chunk = Emulator.DEFAULT_NURSERY_CHUNK if nursery_chunk is None else nursery_chunk
     return (f"tiles={tiles},threads={threads},mem={mem_size},tile_id={tile_id},"
-            f"nursery_base={nb},nursery_size={ns},oldgen_base={ob},oldgen_size={os_}")
+            f"nursery_base={nb},nursery_size={ns},oldgen_base={ob},oldgen_size={os_},"
+            f"nursery_chunk={chunk}")
 
 
 def _attach_host(model: Model, *, blocks: bool = False) -> None:

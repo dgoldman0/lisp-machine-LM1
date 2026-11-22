@@ -112,7 +112,7 @@ enum lm1c_thread_field {
     LM1C_THREAD_IN_TRAP,         /* 0 or 1 */
     LM1C_THREAD_TILE_ID,
     LM1C_THREAD_THREAD_ID,
-    LM1C_THREAD_SLICE_BASE,      /* where its slice of the nursery begins; read only */
+    LM1C_THREAD_SLICE_BASE,      /* where its chunk of the nursery begins; read only */
     LM1C_THREAD_FIELDS
 };
 
@@ -133,6 +133,8 @@ enum lm1c_tile_field {
     LM1C_TILE_CARD_TABLE_SIZE,   /* entries; read only */
     LM1C_TILE_GC_COUNT,          /* minor collections so far */
     LM1C_TILE_INSTRUCTION_COUNT,
+    LM1C_TILE_NURSERY_CHUNK,     /* bytes of the chunk a thread takes at a time; read only */
+    LM1C_TILE_NURSERY_FREE,      /* the nursery's first free byte after the chunks threads hold */
     LM1C_TILE_FIELDS
 };
 
@@ -151,9 +153,13 @@ LM1C_API uint32_t lm1c_chiplet_abi(void);
  * for KiB, MiB or GiB.  Keys and their defaults, the reference's own:
  *   tiles=1 threads=1 mem=4M tile_id=0 nursery_base=0x30000
  *   nursery_size=0x10000 oldgen_base=0x80000 oldgen_size=0x40000
- *   card_shift=6 queue_depth=512
+ *   card_shift=6 queue_depth=512 nursery_chunk=0x1000
  * threads counts a tile's hardware threads, mem the bytes of each tile's
- * memory (a multiple of 8), tile_id the first tile's ID.  LM-1's end of the
+ * memory (a multiple of 8), tile_id the first tile's ID.  A thread takes the
+ * nursery in chunks of nursery_chunk bytes, at most an equal slice for each
+ * thread, and a fresh chunk from the nursery's free space when its chunk
+ * runs out; a minor collection comes only when none is left
+ * (spec/04-soc.md section 4.3).  LM-1's end of the
  * link takes these, with the RTL's parameters as defaults:
  *   load_base=0      where in the first tile's memory the image lands
  *   burst_words=8    words to a request of the boot fetch, 1 to 256

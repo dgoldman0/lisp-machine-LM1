@@ -83,9 +83,10 @@ def _thread_state(t) -> dict:
     }
 
 
-_TILE_FIELDS = ("nursery_base", "nursery_size", "oldgen_base", "oldgen_size", "oldgen_ptr",
-                "card_shift", "card_table_base", "gen_boundary", "card_table_size",
-                "gc_count", "instruction_count", "tile_id", "_current_thread_idx")
+_TILE_FIELDS = ("nursery_base", "nursery_size", "nursery_chunk", "nursery_free", "oldgen_base",
+                "oldgen_size", "oldgen_ptr", "card_shift", "card_table_base", "gen_boundary",
+                "card_table_size", "gc_count", "instruction_count", "tile_id",
+                "_current_thread_idx")
 
 
 def _memory(emu) -> bytes:

@@ -922,10 +922,10 @@ def test_gc_keeps_young_car_of_old_cons():
 
 @test("gc_keeps_every_threads_objects", batch="phase3_gc")
 def test_gc_keeps_every_threads_objects():
-    """The threads of a tile allocate from their own slices of its nursery
+    """The threads of a tile allocate from their own chunks of its nursery
     with the tile's one template table, and a collection keeps the young
     objects that every thread's registers hold (spec/05-memory-gc.md
-    section 5.1), then empties every slice."""
+    section 5.1), then gives every thread a fresh chunk."""
     emu = _emu(num_threads=2)
     program = [
         _alloc_cons_x(1),                                   # r1 = young cons
@@ -936,7 +936,7 @@ def test_gc_keeps_every_threads_objects():
     ]
     for i, insn in enumerate(program):
         emu.mem.store_u32(i * 4, insn)
-    slices = (NURSERY_BASE, NURSERY_BASE + NURSERY_SIZE // 2)
+    slices = (NURSERY_BASE, NURSERY_BASE + emu.nursery_chunk)
     for tid, t in enumerate(emu.threads):
         t.pc = 0
         t.sp = STACK_TOP - tid * 0x1000
@@ -957,7 +957,7 @@ def test_gc_keeps_every_threads_objects():
         assert header_subtype(hdr) == HDR_CONS and header_size(hdr) == 2, \
             f"Thread {tid}'s cons has header {hdr:#x}"
         assert emu.mem.load_word(addr + 8) == tag_fixnum(tid)
-        assert t.np == slices[tid], f"Thread {tid}'s slice was not emptied"
+        assert t.np == slices[tid], f"Thread {tid}'s chunk was not fresh again"
 
 
 @test("gc_overflow_triggers_gc", batch="phase3_gc")
@@ -1119,3 +1119,37 @@ def test_gc_stack_refs_updated():
     car = t.regs[11]
     assert car == tag_fixnum(77), \
         f"car of stack-saved cons should be 77, got {untag_fixnum(car)}"
+
+
+@test("gc_refills_chunks_before_collecting", batch="phase3_gc")
+def test_gc_refills_chunks_before_collecting():
+    """A thread whose chunk of the nursery runs out takes another from the
+    nursery's free space, its allocation's size at least, and the runtime
+    collects only when none is left (spec/04-soc.md section 4.3): a nursery
+    of four 64-byte chunks for two threads gives thread 0 its chunk and the
+    two free ones before its first collection."""
+    emu = Emulator(nursery_base=NURSERY_BASE, nursery_size=256, nursery_chunk=64, num_threads=2)
+    assert (emu.nursery_slices, emu.nursery_free) == ([NURSERY_BASE, NURSERY_BASE + 64],
+                                                    NURSERY_BASE + 128)
+    t = emu.thread
+    t.sp = emu.nursery_base
+    program = [_alloc_cons_x(1)] * 7 + [encode_x(Op.HALT_NOP, 0)]
+    for i, insn in enumerate(program):
+        emu.mem.store_u32(i * 4, insn)
+    t.pc = 0
+    # Two 24-byte conses fit a chunk: the third takes the first free chunk,
+    # the fifth the second, and the seventh finds none left and collects.
+    for steps, chunk, collections in ((2, NURSERY_BASE, 0), (4, NURSERY_BASE + 128, 0),
+                                      (6, NURSERY_BASE + 192, 0), (7, NURSERY_BASE, 1)):
+        emu.run(max_instructions=steps - (emu.thread.pc // 4))
+        assert emu.nursery_slices[0] == chunk, f"after {steps} conses: chunk {emu.nursery_slices[0]:#x}"
+        assert emu.gc_count == collections
+    assert emu.nursery_free == NURSERY_BASE + 128
+    # A larger allocation than a chunk takes a chunk of its own size.
+    emu2 = Emulator(nursery_base=NURSERY_BASE, nursery_size=512, nursery_chunk=64)
+    emu2.thread.sp = emu2.nursery_base
+    for i, insn in enumerate([_alloc_x(2, 16, 2), encode_x(Op.HALT_NOP, 0)]):
+        emu2.mem.store_u32(i * 4, insn)
+    emu2.run(max_instructions=10)
+    assert (emu2.gc_count, emu2.nursery_slices[0]) == (0, NURSERY_BASE + 64)
+    assert emu2.nursery_free == NURSERY_BASE + 64 + 136

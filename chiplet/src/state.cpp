@@ -178,6 +178,8 @@ void save_tile(Writer &w, const Tile &tile) {
     for (u64 v : tile.templates) w.word64(v);
     w.word64(tile.nursery_base);
     w.word64(tile.nursery_size);
+    w.word64(tile.nursery_chunk);
+    w.word64(tile.nursery_free);
     w.word64(tile.oldgen_base);
     w.word64(tile.oldgen_size);
     w.word64(tile.oldgen_ptr);
@@ -219,7 +221,8 @@ bool restore_tile(Reader &r, Tile &tile, size_t queue_depth) {
     for (u64 &v : tile.templates) {
         if (!r.word64(v)) return false;
     }
-    if (!r.word64(tile.nursery_base) || !r.word64(tile.nursery_size) || !r.word64(tile.oldgen_base) ||
+    if (!r.word64(tile.nursery_base) || !r.word64(tile.nursery_size) || !r.word64(tile.nursery_chunk) ||
+        !r.word64(tile.nursery_free) || !r.word64(tile.oldgen_base) ||
         !r.word64(tile.oldgen_size) || !r.word64(tile.oldgen_ptr) || !r.word64(tile.card_shift) ||
         tile.card_shift > 63 || !r.word64(tile.card_table_base) || !r.word64(tile.gen_boundary) ||
         !r.word64(tile.queue_base) || !r.word64(cards))

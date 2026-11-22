@@ -84,6 +84,10 @@ class Emulator:
              multi-thread round-robin scheduling, multi-tile cluster support.
     """
 
+    # The chunk of the nursery a thread takes at a time, at most an equal
+    # slice of it for each thread.
+    DEFAULT_NURSERY_CHUNK = 0x1000
+
     # Default nursery: 64 KiB at the top of the first 256 KiB
     DEFAULT_NURSERY_BASE  = 0x0003_0000   # 192 KiB offset
     DEFAULT_NURSERY_SIZE  = 0x0001_0000   # 64 KiB
@@ -113,6 +117,7 @@ class Emulator:
         tile_id: int = 0,
         num_threads: int = 1,
         block_device: str | None = None,
+        nursery_chunk: int | None = None,
     ):
         self.mem = Memory(mem_size)
         self.tile_id = tile_id
@@ -182,17 +187,22 @@ class Emulator:
         # Cluster reference for cross-tile messaging (set by Cluster)
         self.cluster: Optional['Cluster'] = None
 
-        # The tile's threads share its nursery, each bumping its own pointer
-        # through a slice of it, so no two of them hand out the same words.
-        # A thread's slice runs from its base to its limit, the last one to
-        # the nursery's end, and a collection empties every slice.
+        # The tile's threads share its nursery, as the runtime divides it
+        # (spec/04-soc.md section 4.3): each thread bumps its own pointer
+        # through a chunk of it, so no two of them hand out the same words.
+        # A thread whose chunk runs out takes another from the nursery's free
+        # space, and only when none is left does a collection empty the
+        # nursery and give every thread a fresh chunk.  A chunk is
+        # nursery_chunk bytes, at most an equal slice for each thread, and
+        # nursery_slices holds where each thread's chunk begins.
         slice_size = (self.nursery_size // num_threads) & ~7
-        self.nursery_slices: list[int] = []
-        for tid, tc in enumerate(self.threads):
-            base = self.nursery_base + tid * slice_size
-            self.nursery_slices.append(base)
-            tc.np = base
-            tc.nl = base + slice_size if tid + 1 < num_threads else nursery_end
+        wanted = self.DEFAULT_NURSERY_CHUNK if nursery_chunk is None else nursery_chunk
+        if wanted < 8 or wanted % 8:
+            raise ValueError("nursery_chunk is a multiple of 8 from 8 up, not %r" % (wanted,))
+        self.nursery_chunk = min(wanted, slice_size)
+        self.nursery_slices: list[int] = [0] * num_threads
+        self.nursery_free = 0
+        self._give_fresh_chunks()
 
         # Install default header templates (index 0 = cons)
         self._init_header_templates()
@@ -1018,9 +1028,11 @@ class Emulator:
         addr = t.np
         new_np = addr + total_bytes
         if new_np > t.nl:
-            raise LM1Trap(TRAP_NURSERY_OVERFLOW,
-                          f"Nursery overflow: need {total_bytes} bytes, "
-                          f"have {t.nl - t.np}")
+            trap = LM1Trap(TRAP_NURSERY_OVERFLOW,
+                           f"Nursery overflow: need {total_bytes} bytes, "
+                           f"have {t.nl - t.np}")
+            trap.alloc_bytes = total_bytes
+            raise trap
         t.np = new_np
         return addr
 
@@ -1154,17 +1166,42 @@ class Emulator:
         return (t.trap_table_base != 0 and code < 0x80
                 and self.mem.load_word(t.trap_table_base + code * 8) != 0)
 
+    def _give_fresh_chunks(self) -> None:
+        """Every thread's chunk from the nursery's base on, one after
+        another, and the rest of the nursery free (spec/04-soc.md section
+        4.3)."""
+        for tid, tc in enumerate(self.threads):
+            base = self.nursery_base + tid * self.nursery_chunk
+            self.nursery_slices[tid] = base
+            tc.np = base
+            tc.nl = base + self.nursery_chunk
+        self.nursery_free = self.nursery_base + len(self.threads) * self.nursery_chunk
+
     def _collect_for_overflow(self, trap: LM1Trap) -> None:
-        """Answer TRAP_NURSERY_OVERFLOW as the runtime does: run a minor
-        collection, after which the caller retries the faulting allocation
-        (spec/02-isa.md § 4.1).
+        """Answer TRAP_NURSERY_OVERFLOW as the runtime does (spec/02-isa.md
+        § 4.1, spec/04-soc.md § 4.3), after which the caller retries the
+        faulting allocation: a fresh chunk for the thread from the nursery's
+        free space, the allocation's size at least, while any is left, and a
+        minor collection only when none is.
 
         A collection empties the nursery and can do no more.  When the
-        thread's slice of the nursery is already empty, the allocation is
-        larger than the slice and no collection makes room, so the trap
+        thread's chunk is already empty and no thread has taken free space
+        since the last collection, the nursery is as empty as a collection
+        leaves it, the allocation is larger than it can hold, and the trap
         stands.
         """
-        if self.thread.np == self.nursery_slices[self._current_thread_idx]:
+        idx = self._current_thread_idx
+        t = self.thread
+        need = (getattr(trap, "alloc_bytes", 0) + 7) & ~7
+        chunk = max(self.nursery_chunk, need)
+        if self.nursery_free + chunk <= self.nursery_base + self.nursery_size:
+            t.np = self.nursery_free
+            t.nl = self.nursery_free + chunk
+            self.nursery_slices[idx] = self.nursery_free
+            self.nursery_free += chunk
+            return
+        fresh = self.nursery_base + len(self.threads) * self.nursery_chunk
+        if t.np == self.nursery_slices[idx] and self.nursery_free == fresh:
             raise trap
         self._gc_collect()
 
@@ -1180,7 +1217,7 @@ class Emulator:
           3. Scan the words of every dirty card, which hold the old-gen
              refs back into the nursery that the barrier recorded, and
              clear the card
-          4. Reset the nursery: every thread's slice is empty again
+          4. Reset the nursery: every thread has a fresh chunk again
         """
         mem = self.mem
         scan_start = self.oldgen_ptr  # where new copies start
@@ -1239,10 +1276,8 @@ class Emulator:
                 # Not a header — shouldn't happen in well-formed heap
                 scan_ptr += 8
 
-        # --- Phase C: reset nursery ---
-        for t, base in zip(self.threads, self.nursery_slices):
-            t.np = base
-            # NL stays the same (nursery limit unchanged)
+        # --- Phase C: reset nursery: every thread a fresh chunk ---
+        self._give_fresh_chunks()
 
         self.gc_count += 1
 
