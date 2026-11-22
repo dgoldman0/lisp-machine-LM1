@@ -156,7 +156,7 @@ through the real code at both ends in the emulator and the simulator.
 *Built.* With `runtime=1` in its configuration the module's stand-in
 (`chiplet/src/managed.cpp`) reads the control block, offers managed data
 and serves it as this stage lists, and MegaPad's `chiplet.f` is its other
-end. MegaPad's `tests/test_managed_data.py` runs the 27 tests through both:
+end. MegaPad's `tests/test_lm1_managed_data.py` runs the 27 tests through both:
 21 in the emulator and the simulator alike, and the six that need a second
 MegaPad core in the emulator, until the simulator has several cores. The
 same file checks a moving hold's writes against recovery's stage 0 order,
