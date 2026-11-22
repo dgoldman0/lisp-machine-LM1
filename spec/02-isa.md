@@ -828,7 +828,7 @@ A trap's code picks its entry in the trap table, whose base `TRAP 0x90` sets: en
 | 0x60 | `TRAP_CAPABILITY_VIOLATION` | Capability check failure |
 | 0x61 | `TRAP_SHARED_REF` | A tagged load from the shared heap that yields a reference outside it ([05-memory-gc.md](05-memory-gc.md) § 12.8) |
 | 0x70 | `TRAP_STACK_OVERFLOW` | A stack check finds the stack past its region; no instruction checks a stack's bounds, so the check's explicit `TRAP` raises it |
-| 0x7E | `TRAP_UNIMPLEMENTED` | A reserved encoding ([07-encoding.md](07-encoding.md) § 2), an opcode no instruction has, a reserved system trap code, or `ERET` outside a handler |
+| 0x7E | `TRAP_UNIMPLEMENTED` | A reserved encoding ([07-encoding.md](07-encoding.md) § 2), an opcode the core implements no instruction for, a reserved system trap code, or `ERET` outside a handler |
 | 0x7F | `TRAP_USER` | A user program's call into the runtime, by an explicit `TRAP` |
 
 ---
