@@ -17,30 +17,6 @@ _Generated 2026-02-17 — based on RTL review of all modules, FSM states, opcode
 
 ## P0 — Potential Bugs to Investigate
 
-### P0-1  CAS.TAGGED store fires without checking `lsu_ready`
-
-In `S_MEM_WAIT` for `OP_CAS_TAGGED`, when the compare succeeds the FSM
-issues `lsu_req = 1` / `lsu_op = LSU_STORE64` and immediately transitions
-to `S_FETCH`.  It never checks `lsu_ready`.  If the LSU isn't ready to
-accept a new request the cycle after completing the read response, the
-store is silently dropped — the CAS reports success (returns `T`) but memory
-is unchanged.
-
-**Where:** `lm1_control.sv`, S_MEM_WAIT → OP_CAS_TAGGED branch.
-**Risk:** Silent data loss on successful CAS — correctness of all
-lock-free data structures.
-**Action:** Verify the LSU is always ready after a load response (it
-transitions from `S_RESP` → `S_IDLE` in one cycle, so `ready` should
-be high).  If that invariant can break under back-pressure, add a
-`S_CAS_WRITE` wait-state.
-
-### P0-2  FAA store fires without checking `lsu_ready`
-
-Identical issue to P0-1, but in the `OP_FAA_FENCE` branch of `S_MEM_WAIT`.
-
-**Where:** `lm1_control.sv`, S_MEM_WAIT → OP_FAA_FENCE branch.
-**Action:** Same analysis as P0-1 — prove or add a wait-state.
-
 ### P0-3  I-Cache has no invalidation mechanism
 
 `lm1_icache.sv` stores lines in a direct-mapped cache with tag+valid
@@ -53,30 +29,6 @@ cached, the CPU executes the stale cached copy.
 are all silently broken.
 **Action:** Either (a) add an I-cache flush instruction, or (b) document
 that code regions are immutable and enforce it architecturally.
-
-### P0-4  Tagged fixnum DIV uses unsigned divider
-
-`lm1_alu.sv` untags fixnums with `$signed(op) >>> 1`, but then feeds
-the result to the same unsigned iterative divider.  For negative
-fixnums the `$unsigned()` cast means the divider sees a huge positive
-number, producing a wrong quotient and remainder.
-
-**Where:** `lm1_alu.sv`, `FUNC_DIV_FIX` / `FUNC_MOD_FIX` paths.
-**Risk:** All negative fixnum division gives wrong results.
-**Action:** Either add sign correction logic around the divider or
-switch to a signed divider.
-
-### P0-5  Template table uses `initial` block, not `rst_n`
-
-`lm1_tmpl_table.sv` zeroes the template RAM in an `initial` block,
-which is ignored by synthesis.  On real silicon the template entries
-are undefined after reset.
-
-**Where:** `lm1_tmpl_table.sv:37`.
-**Risk:** Post-synthesis mismatch; real hardware reads garbage from
-uninitialized template slots.
-**Action:** Add a reset-sequencer that clears all 64 entries, or add a
-"template valid" bit and trap on access to invalid entries.
 
 ### P0-12  Cluster accesses wait for neither the grant nor the response
 
@@ -163,119 +115,20 @@ memory latency.
 
 ## P1 — Entirely Untested Instructions
 
-### P1-1  DIV / MOD (raw and tagged fixnum)
+### P1-2  SEND to a full queue
 
-No test for `FUNC_DIV`, `FUNC_MOD`, `FUNC_DIV_FIX`, or `FUNC_MOD_FIX`.
-The iterative divider runs for up to 64 cycles — never exercised.
+Bench test 35 covers SEND and RECV round trips, two of the four queues
+kept apart, FIFO order, TRY.RECV on empty and holding queues, and the
+descriptor traps, and tb/cluster test 02 covers RECVs that wait for a
+word. No bench fills a queue, so the path by which a SEND to a full queue
+traps `TRAP_QUEUE_FULL` has no test.
 
-**Test ideas:**
-- Basic: `100 / 10 = 10`, `100 % 10 = 0`
-- Boundary: `x / 1 = x`, `0 / x = 0`
-- Division by zero → `TRAP_DIVIDE_BY_ZERO`
-- Large 64-bit dividend, small divisor
-- Tagged: fixnum divide positive/positive, negative/positive, negative/negative
-- Tagged: divide by fixnum-zero → trap
-- P0-4 regression: `-6 / 3` must equal `-2`, not a huge positive number
-
-### P1-2  SEND / RECV / TRY.RECV (message queues)
-
-Same-core SEND→RECV is fully wired and testable without external stubs.
-4 independent hardware queues (IDs 0-3), depth 512 each.
-
-**Test ideas:**
-- SEND value, RECV it back — round-trip
-- SEND to all 4 queues, RECV each — correct routing
-- RECV on empty queue → `TRAP_QUEUE_EMPTY`
-- SEND to full queue → `TRAP_QUEUE_FULL` (needs 512 SENDs)
-- TRY.RECV on empty → returns NIL + NIL (status)
-- TRY.RECV on non-empty → returns value + T
-- FIFO ordering: SEND A, SEND B, RECV → should get A first
-
-### P1-3  TST.SHAPE (header-based type testing)
-
-Allocate objects with known template shape IDs, then use `TST.SHAPE`
-to check.  Also test fast-path: non-ref operands (fixnum, NIL,
-cons-ref) should return NIL without a memory access.
-
-**Test ideas:**
-- Allocate object with shape ID 42, `TST.SHAPE 42` → T
-- Same object, `TST.SHAPE 99` → NIL
-- Fixnum input → NIL (fast path, no memory access)
-- NIL input → NIL
-- Cons-ref input → NIL (cons has no header to read)
-- Shape ID 0 and 0xFFFF boundary values
-
-### P1-4  Sub-word memory ops (LDB, LDH, LDW, STB, STH, STW)
-
-Card-table barrier uses internal `STB` but no user-level sub-word
-instruction is tested.
-
-**Test ideas:**
-- STB + LDB round-trip at each of the 8 byte offsets within a 64-bit word
-- STH + LDH at each of the 4 halfword positions
-- STW + LDW at top/bottom word positions
-- Verify surrounding bytes/words are not clobbered
-- Alignment masking: LDH with odd address → bit 0 forced to 0
-
-### P1-5  TST with all tag constants (1–7)
-
-`test_09` only checks `TST.FIX` (tag constant 0).  Tag constants 1–7
-(ref, cons, special, nil, char, sfloat, header) are never tested.
-
-**Test ideas:**
-- Construct values of each tag type and TST each
-- Cross-check: `TST.REF` on a fixnum → NIL, on a ref → T
-- Char-tagged value → `TST.CHAR` → T
-- Sfloat-tagged value → `TST.SFLOAT` → T
-- Header-tagged value → `TST.HDR` → T
-- NIL → `TST.NIL` → T, `TST.FIX` → NIL
-
-### P1-6  LI32 — 32-bit immediate loading
-
-The assembler auto-expands `LI` for large values, so LI32 is used
-implicitly but never verified in isolation.
-
-**Test ideas:**
-- LI of a value > 32767 (triggers LI32 expansion)
-- LI of a negative 32-bit value — **check zero-extend vs sign-extend**
-  (`lsu_rdata` from `LSU_LOAD32` may zero-extend; does the emulator agree?)
-- LI of 0x7FFFFFFF (max positive 32-bit)
-- LI of 0xFFFFFFFF (-1 as 32-bit) — should become 0x00000000FFFFFFFF, NOT
-  0xFFFFFFFFFFFFFFFF, if zero-extended
-- LI at different PC alignments within a cache line
-
-### P1-7  CAS.TAGGED — compare-and-swap
-
-**Test ideas:**
-- Successful CAS: `mem[addr] == expected` → swap + return T
-- Failed CAS: `mem[addr] != expected` → no swap + return NIL
-- CAS on a ref-tagged address (tag stripping for address computation)
-- P0-1 regression: verify the store actually lands in memory, not just
-  that T is returned
-
-### P1-8  FAA — fetch-and-add
-
-**Test ideas:**
-- Basic: `mem[addr] = 10`, FAA with delta 5 → returns 10, mem = 15
-- Delta = 0 → returns old value, no change
-- Negative delta (if raw DIV is unsigned, what about raw ADD overflow?)
-- P0-2 regression: verify the store actually lands
+**Test idea:** 512 SENDs into one queue, a 513th that traps and adds
+nothing, then 512 RECVs that return the words in order.
 
 ---
 
 ## P2 — Partially Tested Features, Missing Edge Cases
-
-### P2-1  CALL.CLOSURE end-to-end
-
-`CALL.DIR` is tested (test_16), but `CALL.CLOSURE` takes a completely
-different path through `S_HDR_WAIT` → header verification → field 0
-read for code entry.
-
-**Test ideas:**
-- Allocate a closure, install code entry, call it → verify execution
-  at the code entry address and env slot accessibility
-- Call a non-closure object → `TRAP_NOT_CLOSURE`
-- Closure with 0 environment slots (minimal closure)
 
 ### P2-2  CALL.IC / TAILCALL.IC / IC.INSTALL (inline cache dispatch)
 
@@ -287,17 +140,6 @@ The entire inline-cache dispatch system is untested.
 - IC miss handler installs, retry hits
 - IC table fill + FIFO eviction (install 65 entries, verify oldest evicted)
 - TAILCALL.IC (no frame push variant)
-
-### P2-3  PUSH.MULTI / POP.MULTI
-
-Multi-register push/pop with 16-bit mask never tested.
-
-**Test ideas:**
-- Empty mask (mm=0) → no-op, no stack change
-- Single-bit mask → push/pop one register
-- All 16 bits set → push/pop 16 registers, verify ordering
-- Alternating bits (0xAAAA) → only even/odd registers
-- Both banks (rd[0]=0 and rd[0]=1) → different register ranges
 
 ### P2-4  Nested traps
 
@@ -313,11 +155,13 @@ no trap context stack.
 
 ### P2-5  ERET when not in trap
 
-Executing ERET with `in_trap == 0` should trigger `TRAP_UNIMPLEMENTED`.
+Executing ERET with `in_trap == 0` should trigger `TRAP_UNIMPLEMENTED`,
+which is 0x7E now, below 0x80, so a handler can count it and the program
+go on.
 
 **Test ideas:**
-- Execute ERET without a preceding trap → verify trap fires
-- This is a one-liner test
+- Execute ERET and ERET.NEXT without a preceding trap → verify each traps
+  at its own PC
 
 ### P2-6  Trap table entry = 0 (halt-on-unhandled-trap)
 
@@ -326,14 +170,6 @@ When the loaded trap handler address is 0, the CPU halts.
 **Test ideas:**
 - Trigger a trap for a vector that was never configured → verify HALT
 - Set a vector to 0 explicitly, trigger it → verify HALT
-
-### P2-7  JR (jump register) and TAILCALL.DIR
-
-Both are simple but never tested as standalone instructions.
-
-**Test ideas:**
-- JR: load address into register, JR to it, verify execution continues there
-- TAILCALL.DIR: verify no frame push (SP unchanged), correct target
 
 ### P2-8  SYS_PERF_CTR readback
 
@@ -347,35 +183,19 @@ Counter wiring is present but no test reads any counter.
 - Verify counter IDs are encoded in the correct instruction field
   (`imm16[4:0]` per RTL)
 
-### P2-10  Backward branch boundary
-
-No test verifies a branch with the maximum negative offset, or a
-branch to self (offset=0, infinite loop).
-
-**Test ideas:**
-- Branch backward across a known distance, verify target
-- BR with offset 0 — this creates an infinite loop; verify with a
-  cycle limit that the PC doesn't advance
-
-### P2-11 BR.T (truthy) edge cases
-
-**Test ideas:**
-- val = 1 → truthy (non-zero, non-NIL)
-- val = NIL → not truthy
-- val = 0 → not truthy
-- val = ref pointer → truthy
-
 ### P2-12 CMP.TAGGED cross-type comparison
 
-Comparing a cons-ref (tag 011) and a general-ref (tag 001) — should
-this be a type-mismatch trap, or a valid identity comparison?  The RTL
-checks `a[2:0] == b[2:0]`, so different primary tags → trap.
+spec/02-isa.md section 3.2 settles the rules: a cons ref (tag 011) and a
+general ref (tag 001) are different types, so comparing them traps
+`TRAP_TYPE_MISMATCH`, and two words of one other primary tag compare by
+identity, giving fixnum 0 when equal and +2 when not. The RTL checks
+`a[2:0] == b[2:0]` as the models do, and no bench test covers the rules.
 
 **Test ideas:**
 - cons-ref vs general-ref → verify trap fires
 - NIL vs NIL → same tag, identity match → returns fixnum 0
 - Same ref vs same ref → returns fixnum 0
-- Different refs, same tag → what ordering?
+- Different refs, same tag → returns fixnum +2
 
 ---
 
@@ -435,11 +255,15 @@ FIFO stimulus mechanism in the testbench.
 
 ### P3-5  Cluster / crossbar / tile modules
 
-`lm1_cluster.sv`, `lm1_crossbar.sv`, `lm1_tile.sv` have zero coverage.
-The crossbar arbiter, multi-tile memory routing, and clock gating are
-all untested.
+`tb/cluster` runs programs on a two-tile `lm1_cluster.sv`, and the
+MegaPad link bench joins a cluster to MegaPad's RTL through its memory
+write port, so the tiles, the message router and the write port are
+tested. The crossbar arbiter, multi-tile memory routing and clock gating
+are not: no program uses a cluster's shared memory, and P0-12 to P0-14
+record what such a program would meet.
 
-**Infrastructure needed:** A cluster-level testbench.
+**Infrastructure needed:** cluster programs that use the shared memory,
+once Part 8e's crossbar keeps the memory model.
 
 ### P3-6  External message queue injection
 
@@ -455,17 +279,12 @@ cluster is answered as one no route reaches.
 If implementing these tests, a natural order based on dependency and
 value:
 
-1. **P0-4** (tagged DIV sign bug) — investigate and fix first
-2. **P0-1/P0-2** (CAS/FAA lsu_ready) — audit and prove or fix
-3. **P1-1** (DIV/MOD) — exercises the divider, catches P0-4
-4. **P1-5** (TST all tags) — trivial, high value
-5. **P1-6** (LI32)
-6. **P1-3** (TST.SHAPE) — needed before CALL.IC tests
-7. **P1-4** (sub-word loads/stores) — fundamental memory correctness
-8. **P1-2** (SEND/RECV) — self-contained, no stubs needed
-9. **P1-7/P1-8** (CAS/FAA) — catches P0-1/P0-2
-10. **P2-3** (PUSH.MULTI/POP.MULTI) — important for real programs
-11. **P2-1** (CALL.CLOSURE) — needed before P2-2
-12. **P2-2** (CALL.IC) — the dispatch system
-13. **P2-4 through P2-12** — remaining edge cases
-14. **P3-**** — infrastructure-dependent, tackle when cluster TB exists
+1. **P0-12 to P0-15** (the crossbar and thread switching) — release plan
+   Part 8e builds them under the memory model Part 8b states, with their
+   tests
+2. **P1-2** (SEND to a full queue) — one bench program
+3. **P2-5, P2-6, P2-12** — short programs on the trap paths and
+   `CMP.TAGGED`
+4. **P2-2** (CALL.IC) — the dispatch system
+5. **P2-4, P2-8** — nested traps and the performance counters
+6. **P0-3, P3-*** — need a design decision or new infrastructure
