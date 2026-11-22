@@ -170,7 +170,7 @@ Each tile has **4 hardware message queues**, configurable as input or output:
 
 Queue entries are single tagged words (64 bits). Queue depth: configurable, default 512 entries (4 KiB).
 
-**Flow control:** `SEND` to a full queue traps (`TRAP_QUEUE_FULL`). The runtime can either back-pressure (stall the sender) or spill to SRAM.
+**Flow control:** `SEND` to a full queue traps (`TRAP_QUEUE_FULL`). The runtime can either back-pressure (stall the sender) or spill to SRAM. `RECV` on an empty queue stalls its thread until a word arrives, and `TRY.RECV` polls ([02-isa.md](02-isa.md) § 8).
 
 **Doorbells:** The host link to MegaPad (MegaPad's `docs/chiplet-link.md`) reaches the message queues of the cluster's first tile, and its doorbells travel as messages on two of them. A doorbell from MegaPad arrives on Q0 as the fixnum of its source, the ID of the participant that rang. When Q0 is full the tile declines the doorbell, which stays pending at MegaPad until Q0 has room, so no doorbell is lost. LM-1 rings participant *N* by sending the fixnum *N*, from 0 to 255, to Q1 of that tile. The link takes every word sent there and rings the participant each such fixnum names; any other word names no participant, and the link drops it.
 

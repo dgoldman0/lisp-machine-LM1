@@ -104,7 +104,8 @@ enum lm1c_thread_field {
     LM1C_THREAD_CYCLE_COUNT,
     LM1C_THREAD_HALTED,          /* 0 or 1 */
     LM1C_THREAD_STALLED,         /* 0 or 1 */
-    LM1C_THREAD_STALL_QUEUE,     /* the queue a stalled RECV waits on, or -1 */
+    LM1C_THREAD_STALL_QUEUE,     /* the descriptor value, tile * 4 + queue, of the
+                                    queue a stalled RECV waits on, or -1 */
     LM1C_THREAD_TRAP_TABLE_BASE,
     LM1C_THREAD_TRAP_CAUSE,
     LM1C_THREAD_TRAP_PC,

@@ -47,7 +47,7 @@ lm1c_result Model::run_tiles(size_t first, size_t last, u64 max_instructions, u6
             for (size_t tid = 0; tid < tile.threads.size(); ++tid) {
                 tile.current = tid;
                 Thread &t = tile.threads[tid];
-                if (t.halted || !unstall(tile, t)) continue;
+                if (t.halted || !unstall(*this, t)) continue;
                 any_runnable = true;
                 for (u64 q = 0; q < quanta; ++q) {
                     if (t.halted || t.stalled) break;

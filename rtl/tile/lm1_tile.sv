@@ -88,6 +88,7 @@ module lm1_tile
     output logic [XLEN-1:0]   rmq_wdata,
     input  logic               rmq_ack,
     input  logic               rmq_ok,
+    input  logic               rmq_noroute,      // with rmq_ack: no route reaches the tile
     input  logic [XLEN-1:0]   rmq_rdata
 );
 
@@ -172,6 +173,7 @@ module lm1_tile
         .rmq_wdata      (rmq_wdata),
         .rmq_ack        (rmq_ack),
         .rmq_ok         (rmq_ok),
+        .rmq_noroute    (rmq_noroute),
         .rmq_rdata      (rmq_rdata),
         // Cluster crossbar port
         .xbar_req_valid (xbar_req_valid),

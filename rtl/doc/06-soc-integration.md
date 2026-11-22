@@ -226,12 +226,13 @@ port on the same cycle.
 Each tile's core reaches another tile's queues through its remote queue
 port: `rmq_req` with `rmq_write`, `rmq_tile`, `rmq_queue` and
 `rmq_wdata`, driven from the core's registers while SEND or RECV waits,
-and answered by `rmq_ack` with `rmq_ok` and `rmq_rdata`. The router grants
-each tile's external write port and external read port to one request a
-cycle, starting after the requester it granted last, and answers in the
-cycle it grants: `rmq_ok` says that a SEND's word was taken or that a RECV
-took one. A request naming a tile outside the cluster is answered at once
-without `rmq_ok`, since the NoC is a stub. The requests come from
+and answered by `rmq_ack` with `rmq_ok`, `rmq_noroute` and `rmq_rdata`. The
+router grants each tile's external write port and external read port to
+one request a cycle, starting after the requester it granted last, and
+answers in the cycle it grants: `rmq_ok` says that a SEND's word was taken
+or that a RECV took one. A request naming a tile outside the cluster is
+answered at once with `rmq_noroute`, since the NoC is a stub, and the core
+traps `TRAP_NO_ROUTE`. The requests come from
 registers, and the answers from the grants and the queues' registers, so
 no combinational path runs from one core's decisions to another's. The
 tile's clock gate opens for the router's accesses (`noc_mq_wr_en`,
@@ -242,7 +243,8 @@ tile's clock gate opens for the router's accesses (`noc_mq_wr_en`,
 `tb/cluster/gen_cluster_tests.py` writes for its two tiles: 64 words from
 each tile into one queue of tile 1, the two tiles emptying it together,
 a word tile 0 takes from tile 1's queue, a remote queue found empty, and a
-tile outside the cluster. The bench counts the cycles in which a tile's
+tile outside the cluster; and RECVs that wait for words, on a tile's own
+queue and on the other tile's. The bench counts the cycles in which a tile's
 core waited on its own queue because the router used it, and the test
 requires some of each kind.
 
@@ -374,19 +376,24 @@ message router can therefore answer another tile in the cycle it grants.
 
 | Instruction | Queue Op | Behavior |
 |-------------|----------|----------|
-| `SEND Rs, Rt` | Write | Push `Rt` to the queue the descriptor in `Rs` names. Trap `QUEUE_FULL` if it is full, or if no route reaches its tile. |
-| `RECV Rd, Rs` | Read (blocking) | Pop a word of the queue `Rs` names into `Rd`. Trap `QUEUE_EMPTY` if it is empty, or if no route reaches its tile. |
+| `SEND Rs, Rt` | Write | Push `Rt` to the queue the descriptor in `Rs` names. Trap `QUEUE_FULL` if it is full. |
+| `RECV Rd, Rs` | Read (blocking) | Pop a word of the queue `Rs` names into `Rd`, waiting while it is empty. |
 | `TRY.RECV Rd, Rd2, Rs` | Read (non-blocking) | If a word: `Rd = value`, `Rd2 = VAL_T`. Else: `Rd = VAL_NIL`, `Rd2 = VAL_NIL`. |
 
 A queue descriptor is a fixnum whose value is tile × 4 + queue
-(spec/02-isa.md § 8). The control FSM takes a word that is not a fixnum
-as its own value, as both models do. A descriptor naming the core's own
-tile reaches its queues in `S_EXECUTE`, and waits in `S_SEND_WAIT` or
-`S_RECV_WAIT` while an external port holds the queue. Any other
-descriptor goes out through the core's remote queue port from
-`S_SEND_WAIT` or `S_RECV_WAIT`, and a negative value names no tile, so
-SEND traps `QUEUE_FULL` and RECV finds the queue empty. The single-core
-bench answers every remote request as one no route reaches.
+(spec/02-isa.md § 8): a word that is not a fixnum traps `NOT_FIXNUM`, and
+a negative value, or a tile no route reaches, `NO_ROUTE`, for all three
+instructions. A descriptor naming the core's own tile reaches its queues
+in `S_EXECUTE`, and waits in `S_SEND_WAIT` or `S_RECV_WAIT` while an
+external port holds the queue. Any other descriptor goes out through the
+core's remote queue port from `S_SEND_WAIT` or `S_RECV_WAIT`. The
+single-core bench answers every remote request as one no route reaches.
+
+A RECV that finds its queue empty, its own tile's or another's, waits by
+ending its turn without retiring: the PC stays at the RECV, the scheduler
+moves to the next active thread, and the thread runs the RECV again at its
+next turn, until a word arrives. With one active thread the core runs the
+RECV again at once.
 
 ### Usage Model
 

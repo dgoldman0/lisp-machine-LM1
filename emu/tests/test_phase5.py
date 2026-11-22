@@ -20,7 +20,8 @@ from lm1.word import (
     WORD_MASK,
 )
 from lm1.traps import (
-    TRAP_QUEUE_FULL, TRAP_QUEUE_EMPTY,
+    LM1Trap,
+    TRAP_QUEUE_FULL, TRAP_NO_ROUTE,
     TRAP_NOT_FIXNUM,
 )
 
@@ -541,37 +542,96 @@ def test_producer_consumer_sum():
         f"Consumer sum should be fixnum(55), got {untag_fixnum(result)}"
 
 
-@test("recv_from_absent_tile_is_empty", batch="phase5_multitile")
-def test_recv_from_absent_tile_is_empty():
-    """A queue descriptor that names a tile the cluster lacks, past its last
-    tile or below tile 0, names an empty queue, so TRY.RECV finds nothing.
-    A descriptor below tile 0 does not wrap to the last tile."""
-    cluster = Cluster(
-        n_tiles=2,
-        mem_size=512 * 1024,
-        nursery_base=NURSERY_BASE,
-        nursery_size=NURSERY_SIZE,
-        oldgen_base=OLDGEN_BASE,
-        oldgen_size=OLDGEN_SIZE,
-    )
-    tile0, tile1 = cluster.tiles
-    tile1.queues[0].append(tag_fixnum(9))     # tile 1, queue 0 holds a message
-    program = [
-        encode_i(Op.LI, 1, 0, tag_fixnum((5 << 2) | 1) & 0xFFFF),   # tile 5, queue 1
-        encode_r(Op.RECV, 3, 1, 0, 4),                                # TRY.RECV r3, r4
-        encode_i(Op.LI, 7, 0, tag_fixnum(-4) & 0xFFFF),             # tile -1, queue 0
-        encode_r(Op.RECV, 5, 7, 0, 6),                                # TRY.RECV r5, r6
-        encode_x(Op.HALT_NOP, 0),
-    ]
-    for i, insn in enumerate(program):
-        tile0.mem.store_u32(i * 4, insn)
-    tile0.thread.pc = 0
-    tile0.thread.sp = STACK_TOP
-    tile1.thread.halted = True
-    cluster.run(max_instructions=100)
+def _cluster(n_tiles=2):
+    return Cluster(n_tiles=n_tiles, mem_size=512 * 1024, nursery_base=NURSERY_BASE,
+                   nursery_size=NURSERY_SIZE, oldgen_base=OLDGEN_BASE,
+                   oldgen_size=OLDGEN_SIZE)
 
-    regs = tile0.thread.regs
-    assert tile0.thread.halted
-    assert regs[3] == NIL and regs[4] == NIL, "Tile 5 is not in the cluster"
-    assert regs[5] == NIL and regs[6] == NIL, "Tile -1 is not the cluster's last tile"
-    assert len(tile1.queues[0]) == 1
+
+def _trap_of(run) -> int | None:
+    try:
+        run()
+    except LM1Trap as trap:
+        return trap.code
+    return None
+
+
+@test("descriptor_naming_no_reachable_tile_traps", batch="phase5_multitile")
+def test_descriptor_naming_no_reachable_tile_traps():
+    """A descriptor naming a tile no route reaches, past the cluster's last
+    tile or below tile 0, makes SEND, RECV and TRY.RECV trap TRAP_NO_ROUTE
+    and write nothing, rather than look like a full or an empty queue
+    (spec/02-isa.md section 8).  A descriptor below tile 0 does not wrap to
+    the last tile, and a lone tile reaches no other."""
+    for desc in (tag_fixnum((5 << 2) | 1), tag_fixnum(-4)):    # tile 5; tile -1
+        for insn in (encode_s(Op.SEND, 1, 2, 0),               # SEND r1, r2
+                     encode_r(Op.RECV, 3, 1, 0, 4),            # TRY.RECV r3, r4, r1
+                     encode_i(Op.RECV, 3, 1, 0)):              # RECV r3, r1
+            cluster = _cluster()
+            tile0, tile1 = cluster.tiles
+            tile1.queues[1].append(tag_fixnum(9))     # tile 1, queue 1 holds a message
+            tile0.mem.store_u32(0, encode_i(Op.LI, 1, 0, desc & 0xFFFF))
+            tile0.mem.store_u32(4, insn)
+            tile0.mem.store_u32(8, encode_x(Op.HALT_NOP, 0))
+            tile0.thread.regs[3] = tile0.thread.regs[4] = 0x77
+            tile1.thread.halted = True
+            code = _trap_of(lambda: cluster.run(max_instructions=100))
+            assert code == TRAP_NO_ROUTE, f"{desc:#x}: trap {code}"
+            assert tile0.thread.pc == 4 and not tile0.thread.halted
+            assert (tile0.thread.regs[3], tile0.thread.regs[4]) == (0x77, 0x77)
+            assert list(tile1.queues[1]) == [tag_fixnum(9)]
+    emu = _emu()
+    code = _trap_of(lambda: _load_and_run(emu, [
+        encode_i(Op.LI, 1, 0, tag_fixnum(1 << 2) & 0xFFFF),     # tile 1
+        encode_s(Op.SEND, 1, 2, 0),
+        encode_x(Op.HALT_NOP, 0)]))
+    assert code == TRAP_NO_ROUTE, f"a lone tile's SEND to tile 1: trap {code}"
+
+
+@test("descriptor_not_a_fixnum_traps", batch="phase5_queue")
+def test_descriptor_not_a_fixnum_traps():
+    """A queue descriptor that is not a fixnum makes SEND, RECV and TRY.RECV
+    trap TRAP_NOT_FIXNUM and write nothing; the raw word 3 names no queue,
+    though fixnum 3 names tile 0's queue 3."""
+    for insn in (encode_s(Op.SEND, 1, 2, 0), encode_r(Op.RECV, 3, 1, 0, 4),
+                 encode_i(Op.RECV, 3, 1, 0)):
+        emu = _emu()
+        emu.queues[3].append(tag_fixnum(9))
+        emu.thread.regs[3] = emu.thread.regs[4] = 0x77
+        code = _trap_of(lambda: _load_and_run(emu, [
+            encode_i(Op.LI, 1, 0, 3),                # odd: no fixnum
+            insn,
+            encode_x(Op.HALT_NOP, 0)]))
+        assert code == TRAP_NOT_FIXNUM, f"trap {code}"
+        assert (emu.thread.regs[3], emu.thread.regs[4]) == (0x77, 0x77)
+        assert list(emu.queues[3]) == [tag_fixnum(9)]
+
+
+@test("recv_waits_on_another_tiles_queue", batch="phase5_multitile")
+def test_recv_waits_on_another_tiles_queue():
+    """A RECV on another tile's empty queue stalls its thread until that
+    queue holds a word, however long the thread's own queue of the same
+    number stays empty, and then takes the word."""
+    cluster = _cluster()
+    tile0, tile1 = cluster.tiles
+    for i, insn in enumerate([
+        encode_i(Op.LI, 1, 0, tag_fixnum((1 << 2) | 2) & 0xFFFF),   # tile 1, queue 2
+        encode_i(Op.RECV, 5, 1, 0),
+        encode_x(Op.HALT_NOP, 0),
+    ]):
+        tile0.mem.store_u32(i * 4, insn)
+    countdown = 40
+    for i, insn in enumerate([
+        encode_i(Op.LI, 1, 0, tag_fixnum((1 << 2) | 2) & 0xFFFF),   # its own queue 2
+        encode_i(Op.LI, 2, 0, tag_fixnum(countdown) & 0xFFFF),
+        encode_i(Op.ADD_FIX_IMM, 2, 2, tag_fixnum(-1) & 0xFFFF),     # 0x08
+        encode_b(Op.BR_COND, 2, 4, -1 & 0xFFFF),                    # BR.FIX.GT r2, 0x08
+        encode_i(Op.LI, 3, 0, tag_fixnum(42) & 0xFFFF),
+        encode_s(Op.SEND, 1, 3, 0),
+        encode_x(Op.HALT_NOP, 0),
+    ]):
+        tile1.mem.store_u32(i * 4, insn)
+    cluster.run(max_instructions=1000)
+    t0 = tile0.thread
+    assert t0.halted and t0.regs[5] == tag_fixnum(42), f"r5 = {t0.regs[5]:#x}"
+    assert not tile0.queues[2] and not tile1.queues[2]

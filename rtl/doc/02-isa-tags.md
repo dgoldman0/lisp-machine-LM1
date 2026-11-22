@@ -210,8 +210,8 @@ This implements **monomorphic inline caching** — the key optimization for dyna
 
 | Opcode | Mnemonic | Format | Operation |
 |--------|----------|--------|-----------|
-| 36 | SEND | S | `SEND Rs, Rt`: send `Rt` to the queue the descriptor in `Rs` names. Traps if full or unreachable. |
-| 37 | RECV | I | `RECV Rd, Rs`: blocking receive from the queue `Rs` names. Traps if empty or unreachable. |
+| 36 | SEND | S | `SEND Rs, Rt`: send `Rt` to the queue the descriptor in `Rs` names. Traps if full, unreachable or not a fixnum. |
+| 37 | RECV | I | `RECV Rd, Rs`: blocking receive from the queue `Rs` names, waiting while it is empty. Traps if unreachable or not a fixnum. |
 | 37 | TRY.RECV | R | `TRY.RECV Rd, Rd2, Rs`: non-blocking receive. `Rd = value or nil`, `Rd2 = t or nil`. |
 | 38 | CAS.TAGGED | X | Compare-and-swap on a tagged word in memory. |
 | 39 | FAA / FENCE.GC | R | Fetch-and-add / GC fence (wait for all engines idle). |
@@ -315,7 +315,7 @@ The LM-1 implements a vectored trap system:
 | 0x01–0x07 | Type errors | NOT_FIXNUM, DIVIDE_BY_ZERO, NOT_REF, NOT_CONS |
 | 0x10 | GC | NURSERY_OVERFLOW |
 | 0x20 | IC | IC_MISS |
-| 0x30–0x31 | Queue | QUEUE_FULL, QUEUE_EMPTY |
+| 0x30, 0x32 | Queue | QUEUE_FULL, NO_ROUTE |
 | 0x40 | Engine | ENGINE_BUSY |
 | 0x50 | Barrier | BARRIER_OVERFLOW |
 | 0x60 | Security | CAPABILITY_VIOLATION |

@@ -98,6 +98,8 @@ The scheduler selects which thread enters the pipeline each cycle. Policies:
 | **Priority** | Higher-priority threads (e.g., GC coordination) get first pick | When GC is active |
 | **Stall-skip** | Stalled threads (waiting on memory) are skipped | Always |
 
+A thread also stalls in `RECV` while its queue is empty, and runs the `RECV` again once the queue holds a word ([02-isa.md](02-isa.md) § 8.2).
+
 ### 4.2 Latency Hiding
 
 With 4 threads and a 6-stage pipeline, a memory access with 4-cycle SRAM latency is fully hidden: by the time thread A's load returns, threads B, C, D have each had a cycle, and thread A's turn comes around exactly when the data is ready.

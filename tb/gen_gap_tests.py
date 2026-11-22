@@ -8,7 +8,7 @@ Tests cover:
   32: TST all tag types (0-7)
   33: LI32 / large immediates
   34: Sub-word memory ops (LDB/STB/LDH/STH/LDW/STW)
-  35: SEND/RECV (message queue round-trip)
+  35: SEND/RECV: queue descriptors, TRAP_NO_ROUTE and TRAP_NOT_FIXNUM
   36: CAS.TAGGED (compare-and-swap)
   37: FAA (fetch-and-add)
   38: PUSH.MULTI / POP.MULTI
@@ -393,14 +393,17 @@ def gen_test_35():
     ; Test 35: SEND, RECV and TRY.RECV name their queue by a descriptor in a
     ; register (spec/02-isa.md section 8), a fixnum whose value is
     ; tile * 4 + queue.  The bench's core is tile 0 alone: descriptors 0 to
-    ; 3 name its own four queues, and one naming another tile reaches no
-    ; queue, so SEND traps TRAP_QUEUE_FULL and TRY.RECV finds no word.  A
-    ; negative value names no tile at all.
+    ; 3 name its own four queues.  One naming another tile names a tile no
+    ; route reaches, as does a negative value, and each of the three
+    ; instructions traps TRAP_NO_ROUTE on it; a descriptor that is not a
+    ; fixnum traps TRAP_NOT_FIXNUM.  Neither writes a register.
 
     LI  r1, {TRAP_TABLE}
     TRAP 0x90
     LI  r14, skip_handler
-    LI  r15, {TRAP_TABLE + 0x30 * 8}   ; slot 0x30 = TRAP_QUEUE_FULL
+    LI  r15, {TRAP_TABLE + 0x32 * 8}   ; slot 0x32 = TRAP_NO_ROUTE
+    STR r15, r14, 0
+    LI  r15, {TRAP_TABLE + 0x01 * 8}   ; slot 0x01 = TRAP_NOT_FIXNUM
     STR r15, r14, 0
     LI  r20, 0
 
@@ -436,15 +439,25 @@ def gen_test_35():
     TRY.RECV r18, r19, r15
     RECV r21, r16         ; 77
 
-    ; --- another tile, and no tile: SEND traps, TRY.RECV finds nothing ---
+    ; --- another tile, and no tile: each traps TRAP_NO_ROUTE ---
     LI  r14, -4           ; fixnum -2: tile -1, queue 2
     LI  r11, 5
-    SEND r17, r11         ; traps TRAP_QUEUE_FULL
-    SEND r14, r11         ; traps TRAP_QUEUE_FULL
-    TRY.RECV r10, r11, r17
-    TRY.RECV r16, r17, r14
+    LI  r10, 0x77
+    LI  r16, 0x77
+    SEND r17, r11         ; tile 1
+    SEND r14, r11         ; tile -1
+    TRY.RECV r10, r16, r17
+    RECV r10, r14
     MOV r12, r20
     MOV r13, r22
+
+    ; --- a descriptor that is not a fixnum traps TRAP_NOT_FIXNUM ---
+    LI  r15, 3
+    SEND r15, r11
+    TRY.RECV r10, r16, r15
+    RECV r10, r15
+    MOV r14, r20
+    MOV r17, r22
     HALT
 
 {SKIP_HANDLER}"""
@@ -461,12 +474,12 @@ def gen_test_35():
         'r18': NIL,  # queue 0 empty while queue 2 holds 77
         'r19': NIL,
         'r21': 77,   # queue 2's word
-        'r10': NIL,  # TRY.RECV on another tile's queue finds no word
-        'r11': NIL,
-        'r16': NIL,  # nor on no tile's
-        'r17': NIL,
-        'r12': 2,    # both SENDs trapped
-        'r13': 0x30, # TRAP_QUEUE_FULL
+        'r10': 0x77, # no trapping TRY.RECV or RECV wrote a register
+        'r16': 0x77,
+        'r12': 4,    # SEND, SEND, TRY.RECV and RECV trapped on tiles 1 and -1
+        'r13': 0x32, # TRAP_NO_ROUTE
+        'r14': 7,    # and SEND, TRY.RECV and RECV on a descriptor of 3
+        'r17': 0x01, # TRAP_NOT_FIXNUM
     })
 
 

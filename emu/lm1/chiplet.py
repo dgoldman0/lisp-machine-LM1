@@ -36,7 +36,7 @@ import weakref
 from pathlib import Path
 from typing import TextIO
 
-from .traps import LM1Trap, TRAP_QUEUE_FULL
+from .traps import LM1Trap
 from .word import WORD_MASK
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1090,17 +1090,6 @@ class Cluster:
             tile = Emulator(trace=trace, _model=model, _tile=i)
             tile.cluster = self
             self.tiles.append(tile)
-
-    def route_message(self, target_tile: int, queue_idx: int, value: int) -> None:
-        """Deliver a message to a tile's queue, trapping on a full one or a
-        tile the cluster lacks."""
-        if not 0 <= target_tile < len(self.tiles):
-            raise LM1Trap(TRAP_QUEUE_FULL, f"SEND: invalid tile {target_tile}")
-        q = self.tiles[target_tile].queues[queue_idx]
-        if len(q) >= Emulator.QUEUE_DEPTH:
-            raise LM1Trap(TRAP_QUEUE_FULL,
-                          f"SEND: tile {target_tile} queue {queue_idx} full")
-        q.append(value)
 
     def run(self, max_instructions: int = 0, quanta: int = 1) -> None:
         self._model.raise_for(self._model.run_cluster(max_instructions, quanta))

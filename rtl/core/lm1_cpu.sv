@@ -92,6 +92,7 @@ module lm1_cpu
     output logic [XLEN-1:0]   rmq_wdata,
     input  logic               rmq_ack,
     input  logic               rmq_ok,
+    input  logic               rmq_noroute,      // with rmq_ack: no route reaches the tile
     input  logic [XLEN-1:0]   rmq_rdata,
 
     // --- Cluster crossbar port (for addresses beyond local SRAM) ---
@@ -503,6 +504,7 @@ module lm1_cpu
         .rmq_wdata    (rmq_wdata),
         .rmq_ack      (rmq_ack),
         .rmq_ok       (rmq_ok),
+        .rmq_noroute  (rmq_noroute),
         .rmq_rdata    (rmq_rdata),
         // GC engine command
         .gc_cmd_valid (gc_cmd_valid),

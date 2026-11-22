@@ -13,6 +13,8 @@ met on one of its queues.
 Tests:
   01: SEND, RECV and TRY.RECV between the tiles through the cluster's
       message router
+  02: RECV on an empty queue waits for a word, from the tile's own queue
+      and from the other tile's
 """
 
 import os
@@ -81,15 +83,13 @@ def gen_test_01():
     ; a count and a sum, into tile 1's queue 1, waits for tile 1's answer
     ; on its own queue 1, takes the word tile 1 left on tile 1's queue 3,
     ; and finds that queue empty after it.  A tile outside the cluster is
-    ; one no route reaches: a SEND there traps TRAP_QUEUE_FULL and a
-    ; TRY.RECV finds no word.
+    ; one no route reaches: SEND, TRY.RECV and RECV naming it each trap
+    ; TRAP_NO_ROUTE and write no register.
 
     LI  r1, {TRAP_TABLE}
     TRAP 0x90
     LI  r14, skip_handler
-    LI  r15, {TRAP_TABLE + 0x30 * 8}   ; TRAP_QUEUE_FULL
-    STR r15, r14, 0
-    LI  r15, {TRAP_TABLE + 0x31 * 8}   ; TRAP_QUEUE_EMPTY
+    LI  r15, {TRAP_TABLE + 0x32 * 8}   ; TRAP_NO_ROUTE
     STR r15, r14, 0
     LI  r20, 0
 
@@ -136,15 +136,15 @@ wait:
     ; --- tile 1's word on its queue 3, then that queue empty ---
     TRY.RECV r3, r4, r18
     TRY.RECV r5, r6, r18
-    LI  r7, 0x77
-    RECV r7, r18          ; traps TRAP_QUEUE_EMPTY
-    MOV r8, r22
 
     ; --- a tile outside the cluster ---
     LI  r10, {tag_fixnum(7)}
-    SEND r19, r10         ; traps TRAP_QUEUE_FULL
-    MOV r9, r22
-    TRY.RECV r10, r11, r19
+    LI  r7, 0x77
+    LI  r9, 0x99
+    SEND r19, r10         ; traps TRAP_NO_ROUTE
+    MOV r8, r22
+    TRY.RECV r7, r9, r19  ; traps TRAP_NO_ROUTE
+    RECV r7, r19          ; traps TRAP_NO_ROUTE
     MOV r12, r20
     HALT
 
@@ -216,12 +216,10 @@ w4:
         't0.r4': T,
         't0.r5': NIL,                       # that queue empty after it
         't0.r6': NIL,
-        't0.r7': 0x77,                      # the RECV on it trapped
-        't0.r8': 0x31,                      # TRAP_QUEUE_EMPTY
-        't0.r9': 0x30,                      # TRAP_QUEUE_FULL: tile 5
-        't0.r10': NIL,                      # TRY.RECV on tile 5
-        't0.r11': NIL,
-        't0.r12': 2,                        # two traps
+        't0.r7': 0x77,                      # tile 5: no register written
+        't0.r8': 0x32,                      # TRAP_NO_ROUTE
+        't0.r9': 0x99,
+        't0.r12': 3,                        # SEND, TRY.RECV and RECV trapped
         't1.r1': tag_fixnum(1234),          # tile 0's words, in order
         't1.r3': tag_fixnum(5678),
         't1.r5': tag_fixnum(2 * WORDS),     # every word taken once
@@ -234,7 +232,77 @@ w4:
     })
 
 
+# ===========================================================================
+# Test 02: RECV waits for a word
+# ===========================================================================
+DELAY = 64          # turns of a countdown loop between tile 1's words
+
+
+def gen_test_02():
+    countdown = lambda label: f"""\
+    LI  r10, {tag_fixnum(DELAY)}
+{label}:
+    ADD.FIX.IMM r10, r10, {tag_fixnum(-1) & 0xFFFF}
+    BR.FIX.GT r10, {label}"""
+
+    tile0 = f"""\
+    ; Tile 0.  Each RECV finds its queue empty and waits until tile 1's
+    ; word arrives (spec/02-isa.md section 8.2): first on its own queue 2,
+    ; then on tile 1's queue 3, then on its own queue 2 again.  Between the
+    ; first two it tells tile 1 the first word came.  An empty RECV raised
+    ; TRAP_QUEUE_EMPTY, 0x31, before; a handler there counts any in r20.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, skip_handler
+    LI  r15, {TRAP_TABLE + 0x31 * 8}
+    STR r15, r14, 0
+    LI  r20, 0
+
+    LI  r15, {desc(0, 2)}
+    LI  r16, {desc(1, 3)}
+    LI  r17, {desc(1, 1)}
+    RECV r1, r15          ; waits on its own queue 2
+    SEND r17, r1          ; tile 1's queue 1: the word came
+    RECV r2, r16          ; waits on tile 1's queue 3
+    RECV r3, r15          ; waits on its own queue 2 again
+    MOV r4, r20
+    HALT
+
+{SKIP_HANDLER}"""
+
+    tile1 = f"""\
+    ; Tile 1.  It lets tile 0 wait, sends a word to tile 0's queue 2, and
+    ; waits in RECV on its own queue 1 for tile 0's answer.  Then it lets
+    ; tile 0 wait again, sends a word to its own queue 3, on which tile 0
+    ; waits, and after a third wait a word to tile 0's queue 2.
+
+    LI  r15, {desc(0, 2)}
+    LI  r16, {desc(1, 3)}
+    LI  r17, {desc(1, 1)}
+{countdown('d1')}
+    LI  r1, {tag_fixnum(111)}
+    SEND r15, r1
+    RECV r5, r17          ; waits for tile 0's answer
+{countdown('d2')}
+    LI  r2, {tag_fixnum(222)}
+    SEND r16, r2
+{countdown('d3')}
+    LI  r3, {tag_fixnum(333)}
+    SEND r15, r3
+    HALT
+"""
+    emit_test('02_recv_waits', [tile0, tile1], {
+        't0.r1': tag_fixnum(111),           # the words, each after its wait
+        't0.r2': tag_fixnum(222),
+        't0.r3': tag_fixnum(333),
+        't0.r4': 0,                         # and no trap
+        't1.r5': tag_fixnum(111),           # tile 1 waited for tile 0's answer
+    })
+
+
 if __name__ == '__main__':
     print('Generating cluster tests...')
     gen_test_01()
+    gen_test_02()
     print('Done.')

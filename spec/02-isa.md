@@ -531,35 +531,45 @@ Prefetch a batch of objects from an index vector. For each index `i` in `Rs_inde
 Enqueue a tagged word onto a hardware message queue.
 
 ```
+if Rs_queue is not a fixnum:
+    trap TRAP_NOT_FIXNUM
+if no route reaches the tile Rs_queue names:
+    trap TRAP_NO_ROUTE
 if queue_full(Rs_queue):
     trap TRAP_QUEUE_FULL
 enqueue(Rs_queue, Rt_value)
 ```
 
-Queues are identified by a queue descriptor in a register: a fixnum whose value is *tile* × 4 + *queue*, where *queue* picks one of the tile's four queues and *tile* names the tile. A descriptor naming the core's own tile reaches its own queues, and one naming another tile reaches that tile's, so a message can go to any tile. `RECV` and `TRY.RECV` read the same descriptors. See [04-soc.md](04-soc.md) § 4.4 for queue topology.
+Queues are identified by a queue descriptor in a register: a fixnum whose value is *tile* × 4 + *queue*, where *queue* picks one of the tile's four queues and *tile* names the tile. A descriptor naming the core's own tile reaches its own queues, and one naming another tile reaches that tile's, so a message can go to any tile a route reaches. No route reaches a negative value, a tile beyond the machine, or, while the network between clusters is a stub, a tile outside the sender's cluster; an emulator of one tile, or of a cluster of tiles, reaches only those it models. Such a descriptor is the program's error rather than a busy queue, so it traps `TRAP_NO_ROUTE` where a full queue traps `TRAP_QUEUE_FULL`. `RECV` and `TRY.RECV` read the same descriptors and trap on them the same way. See [04-soc.md](04-soc.md) § 4.4 for queue topology.
 
 **Cycles:** 1 (fast path, if queue not full)  
-**Traps:** `TRAP_QUEUE_FULL`
+**Traps:** `TRAP_NOT_FIXNUM`, `TRAP_NO_ROUTE`, `TRAP_QUEUE_FULL`
 
 ### 8.2 `RECV Rd, Rs_queue`
 
-Dequeue a tagged word from a hardware message queue.
+Dequeue a tagged word from a hardware message queue, waiting for one when the queue is empty.
 
 ```
-if queue_empty(Rs_queue):
-    trap TRAP_QUEUE_EMPTY   // or: block/yield hardware thread
+if Rs_queue is not a fixnum:
+    trap TRAP_NOT_FIXNUM
+if no route reaches the tile Rs_queue names:
+    trap TRAP_NO_ROUTE
+while queue_empty(Rs_queue):
+    stall      // the core runs its other hardware threads meanwhile
 Rd = dequeue(Rs_queue)
 ```
 
-**Cycles:** 1 (fast path, if message available)  
-**Traps:** `TRAP_QUEUE_EMPTY`
+A `RECV` on an empty queue stalls its thread until the queue holds a word, and the core's scheduler gives the thread's turns to the tile's other threads meanwhile ([03-core.md](03-core.md) § 4.1). The thread then runs the `RECV` again, and it takes the word. An empty queue raises no trap; a thread that must not wait polls with `TRY.RECV`.
+
+**Cycles:** 1 (fast path, if message available); a stalled thread waits until a word arrives  
+**Traps:** `TRAP_NOT_FIXNUM`, `TRAP_NO_ROUTE`
 
 ### 8.3 `TRY.RECV Rd, Rd2, Rs_queue`
 
-Non-blocking receive. `Rd` gets the value (or `nil`), `Rd2` gets `t` (success) or `nil` (empty).
+Non-blocking receive. `Rd` gets the value (or `nil`), `Rd2` gets `t` (success) or `nil` (empty). Its descriptor traps as `RECV`'s does, and an empty queue raises no trap.
 
 **Cycles:** 1  
-**Traps:** None
+**Traps:** `TRAP_NOT_FIXNUM`, `TRAP_NO_ROUTE`
 
 ### 8.4 `CAS.TAGGED Rd, Rs_addr, Rs_expected, Rt_new`
 
@@ -808,7 +818,7 @@ A trap's code picks its entry in the trap table, whose base `TRAP 0x90` sets: en
 | 0x10 | `TRAP_NURSERY_OVERFLOW` | Nursery allocation failure |
 | 0x20 | `TRAP_IC_MISS` | Inline cache miss |
 | 0x30 | `TRAP_QUEUE_FULL` | Send to full queue |
-| 0x31 | `TRAP_QUEUE_EMPTY` | Blocking receive from empty queue |
+| 0x32 | `TRAP_NO_ROUTE` | A queue descriptor naming a tile no route reaches (§ 8.1) |
 | 0x40 | `TRAP_ENGINE_BUSY` | Movement engine queue full |
 | 0x50 | `TRAP_BARRIER_OVERFLOW` | Write barrier metadata overflow |
 | 0x51 | `TRAP_SHARED_STORE` | A store into a shared object of a reference outside the shared heap ([05-memory-gc.md](05-memory-gc.md) § 4.5) |

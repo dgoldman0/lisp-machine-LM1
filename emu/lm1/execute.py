@@ -42,7 +42,7 @@ from .traps import (
     TRAP_TYPE_MISMATCH,
     TRAP_NURSERY_OVERFLOW, TRAP_NOT_REF,
     TRAP_IC_MISS, TRAP_NOT_CLOSURE,
-    TRAP_QUEUE_FULL, TRAP_QUEUE_EMPTY,
+    TRAP_QUEUE_FULL, TRAP_NO_ROUTE,
     TRAP_UNIMPLEMENTED,
 )
 from .core import ThreadContext, HEADER_TEMPLATES
@@ -831,41 +831,20 @@ class Emulator:
         elif op == Op.SEND:
             # Format S: rd (25:21) = queue descriptor register,
             #           rs1 (20:16) = value register
-            queue_desc = t.regs[inst.rd]
+            desc = self._descriptor(t.regs[inst.rd])
             value = t.regs[inst.rs1]
-            # Queue descriptor: fixnum encoding (tile_id << 2) | queue_idx
-            # For local queues, tile_id matches self.tile_id.
-            q_raw = untag_fixnum(queue_desc) if is_fixnum(queue_desc) else int(queue_desc)
-            target_tile = q_raw >> 2
-            queue_idx = q_raw & 3
-            if target_tile == self.tile_id:
-                # Local queue
-                q = self.queues[queue_idx]
-                if len(q) >= self.QUEUE_DEPTH:
-                    raise LM1Trap(TRAP_QUEUE_FULL,
-                                  f"SEND: queue {queue_idx} full")
-                q.append(value)
-            elif self.cluster is not None:
-                # Cross-tile: route through cluster
-                self.cluster.route_message(target_tile, queue_idx, value)
-            else:
+            q = self._queue_of(desc)
+            if len(q) >= self.QUEUE_DEPTH:
                 raise LM1Trap(TRAP_QUEUE_FULL,
-                              f"SEND: no cluster for tile {target_tile}")
+                              f"SEND: tile {desc >> 2} queue {desc & 3} full")
+            q.append(value)
 
         # ---- RECV / TRY.RECV: dequeue from a hardware queue ----
         elif op == Op.RECV:
             # When func != 0 → TRY.RECV (non-blocking)
-            # When func == 0 → RECV (blocking / traps on empty)
-            queue_desc = t.regs[inst.rs1]
-            q_raw = untag_fixnum(queue_desc) if is_fixnum(queue_desc) else int(queue_desc)
-            target_tile = q_raw >> 2
-            queue_idx = q_raw & 3
-            if target_tile == self.tile_id:
-                q = self.queues[queue_idx]
-            elif self.cluster is not None and 0 <= target_tile < len(self.cluster.tiles):
-                q = self.cluster.tiles[target_tile].queues[queue_idx]
-            else:
-                q = deque()  # no such tile: an empty queue, so nil or a stall
+            # When func == 0 → RECV, which waits for a word
+            desc = self._descriptor(t.regs[inst.rs1])
+            q = self._queue_of(desc)
 
             if inst.func != 0:
                 # TRY.RECV: non-blocking.  Rd = value (or nil), Rd2 = status
@@ -877,14 +856,14 @@ class Emulator:
                     t.regs[inst.rd] = NIL
                     t.regs[rd2] = NIL
             else:
-                # RECV: blocking.  For multi-thread emulator, stall the thread.
+                # RECV: on an empty queue the thread stalls until the queue
+                # holds a word, and then runs the RECV again.
                 if len(q) > 0:
                     t.regs[inst.rd] = q.popleft()
                 else:
-                    # Stall: mark thread as stalled, don't advance PC
                     t.stalled = True
-                    t.stall_queue = queue_idx
-                    next_pc = t.pc  # retry on next schedule
+                    t.stall_queue = desc   # the descriptor's value
+                    next_pc = t.pc
 
         # ---- CAS.TAGGED: atomic compare-and-swap ----
         elif op == Op.CAS_TAGGED:
@@ -935,7 +914,32 @@ class Emulator:
 
         return next_pc
 
-    # -- Allocation helpers (Phase 2) ---
+    # -- Queue descriptors (Phase 5) ---
+
+    @staticmethod
+    def _descriptor(word: int) -> int:
+        """The value of a queue descriptor, tile * 4 + queue (spec/02-isa.md
+        section 8): a descriptor that is not a fixnum traps TRAP_NOT_FIXNUM."""
+        if not is_fixnum(word):
+            raise LM1Trap(TRAP_NOT_FIXNUM, f"queue descriptor {word:#x} is not a fixnum")
+        return untag_fixnum(word)
+
+    def _queue_of(self, desc: int) -> deque:
+        """The queue a descriptor's value names: one of this tile's own, or
+        of another tile of its cluster.  A tile no route reaches, one the
+        cluster lacks, any other tile when there is no cluster, or a negative
+        value, traps TRAP_NO_ROUTE."""
+        tile = desc >> 2
+        if tile == self.tile_id:
+            return self.queues[desc & 3]
+        if self.cluster is not None and 0 <= tile < len(self.cluster.tiles):
+            return self.cluster.tiles[tile].queues[desc & 3]
+        raise LM1Trap(TRAP_NO_ROUTE, f"no route reaches tile {tile}")
+
+    def _stall_queue(self, t: ThreadContext) -> deque:
+        """The queue a stalled thread's RECV waits on, by the descriptor
+        value it recorded, which named a reachable tile."""
+        return self._queue_of(t.stall_queue)
 
     # -- Frame helpers (Phase 4) ---
 
@@ -1409,7 +1413,7 @@ class Emulator:
 
                 # Check if stalled thread can be un-stalled
                 if t.stalled:
-                    q = self.queues[t.stall_queue]
+                    q = self._stall_queue(t)
                     if len(q) > 0:
                         t.stalled = False
                         t.stall_queue = -1
@@ -1485,18 +1489,6 @@ class Cluster:
             emu.cluster = self
             self.tiles.append(emu)
 
-    def route_message(self, target_tile: int, queue_idx: int,
-                      value: int) -> None:
-        """Deliver a message to a remote tile's queue, trapping on full."""
-        if target_tile < 0 or target_tile >= len(self.tiles):
-            raise LM1Trap(TRAP_QUEUE_FULL,
-                          f"SEND: invalid tile {target_tile}")
-        q = self.tiles[target_tile].queues[queue_idx]
-        if len(q) >= Emulator.QUEUE_DEPTH:
-            raise LM1Trap(TRAP_QUEUE_FULL,
-                          f"SEND: tile {target_tile} queue {queue_idx} full")
-        q.append(value)
-
     def run(self, max_instructions: int = 0, quanta: int = 1) -> None:
         """Round-robin across all tiles.
 
@@ -1520,7 +1512,7 @@ class Cluster:
 
                     # Try to un-stall
                     if t.stalled:
-                        q = tile.queues[t.stall_queue]
+                        q = tile._stall_queue(t)
                         if len(q) > 0:
                             t.stalled = False
                             t.stall_queue = -1

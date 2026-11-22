@@ -91,7 +91,7 @@ module lm1_cluster
     logic                             scan_fifo_pop_any;
 
     // Remote queue requests from each tile's core, and their answers
-    logic [TILES_PER_CLUSTER-1:0]     rmq_req, rmq_write, rmq_ack, rmq_ok;
+    logic [TILES_PER_CLUSTER-1:0]     rmq_req, rmq_write, rmq_ack, rmq_ok, rmq_noroute;
     logic [XLEN-1:0]                 rmq_tile  [0:TILES_PER_CLUSTER-1];
     logic [1:0]                       rmq_queue [0:TILES_PER_CLUSTER-1];
     logic [XLEN-1:0]                 rmq_wdata [0:TILES_PER_CLUSTER-1];
@@ -170,6 +170,7 @@ module lm1_cluster
                 .rmq_wdata      (rmq_wdata[t]),
                 .rmq_ack        (rmq_ack[t]),
                 .rmq_ok         (rmq_ok[t]),
+                .rmq_noroute    (rmq_noroute[t]),
                 .rmq_rdata      (rmq_rdata[t])
             );
         end
@@ -185,9 +186,9 @@ module lm1_cluster
     // grants: a SEND is taken unless the queue is full, and a RECV takes a
     // word unless the queue is empty.  Each tile's write port and read
     // port grant one requester a cycle, in turn from the one after the
-    // last granted.  A tile outside the cluster is answered at once as
-    // one no route reaches, a full queue for SEND and an empty one for
-    // RECV, since the NoC is a stub.
+    // last granted.  A tile outside the cluster is answered at once with
+    // rmq_noroute, since the NoC is a stub, and the core traps
+    // TRAP_NO_ROUTE.
     //
     // The requests come from the cores' registers, and the answers depend
     // on them and on the queues' registers, so no path runs from one
@@ -253,11 +254,14 @@ module lm1_cluster
     // Answers to the requesting cores
     always_comb begin
         for (int r = 0; r < TILES_PER_CLUSTER; r++) begin
-            rmq_ack[r]   = 1'b0;
-            rmq_ok[r]    = 1'b0;
-            rmq_rdata[r] = '0;
-            if (rmq_req[r] && !in_cluster(rmq_tile[r]))
-                rmq_ack[r] = 1'b1;               // no route: full, or empty
+            rmq_ack[r]     = 1'b0;
+            rmq_ok[r]      = 1'b0;
+            rmq_noroute[r] = 1'b0;
+            rmq_rdata[r]   = '0;
+            if (rmq_req[r] && !in_cluster(rmq_tile[r])) begin
+                rmq_ack[r]     = 1'b1;           // no route reaches the tile
+                rmq_noroute[r] = 1'b1;
+            end
         end
         for (int g = 0; g < TILES_PER_CLUSTER; g++) begin
             if (wr_granted[g]) begin

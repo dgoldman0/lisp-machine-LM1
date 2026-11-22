@@ -174,7 +174,7 @@ u64 run_threads(Model &m, u64 budget) {
         const size_t ti = size_t(l.cursor / per_tile), tid = size_t(l.cursor % per_tile);
         Tile &tile = m.tiles[ti];
         Thread &t = tile.threads[tid];
-        if (t.halted || !unstall(tile, t)) {
+        if (t.halted || !unstall(m, t)) {
             l.cursor = (l.cursor + 1) % total;
             l.used = 0;
             passed += 1;
@@ -211,7 +211,7 @@ bool work_waits(const Model &m) {
     if (m.tiles[LINK_TILE].queues[QUEUE_OUT].size() > 0) return true;
     for (const Tile &tile : m.tiles) {
         for (const Thread &t : tile.threads) {
-            if (can_run(tile, t)) return true;
+            if (can_run(m, t)) return true;
         }
     }
     return false;

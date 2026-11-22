@@ -22,7 +22,7 @@ TRAP_IC_MISS          = 0x20
 
 # Family 6 — concurrency
 TRAP_QUEUE_FULL       = 0x30
-TRAP_QUEUE_EMPTY      = 0x31
+TRAP_NO_ROUTE         = 0x32   # a queue descriptor names a tile no route reaches
 
 # Family 7 — movement engines
 TRAP_ENGINE_BUSY      = 0x40
@@ -56,7 +56,7 @@ _NAMES: dict[int, str] = {
     0x10: "TRAP_NURSERY_OVERFLOW",
     0x20: "TRAP_IC_MISS",
     0x30: "TRAP_QUEUE_FULL",
-    0x31: "TRAP_QUEUE_EMPTY",
+    0x32: "TRAP_NO_ROUTE",
     0x40: "TRAP_ENGINE_BUSY",
     0x50: "TRAP_BARRIER_OVERFLOW",
     0x60: "TRAP_CAPABILITY_VIOLATION",

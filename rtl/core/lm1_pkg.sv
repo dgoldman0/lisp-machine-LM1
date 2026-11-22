@@ -280,7 +280,7 @@ package lm1_pkg;
     parameter logic [7:0] TRAP_NURSERY_OVERFLOW = 8'h10;
     parameter logic [7:0] TRAP_IC_MISS          = 8'h20;
     parameter logic [7:0] TRAP_QUEUE_FULL       = 8'h30;
-    parameter logic [7:0] TRAP_QUEUE_EMPTY      = 8'h31;
+    parameter logic [7:0] TRAP_NO_ROUTE         = 8'h32;  // a descriptor no route reaches
     parameter logic [7:0] TRAP_ENGINE_BUSY      = 8'h40;
     parameter logic [7:0] TRAP_BARRIER_OVERFLOW = 8'h50;
     parameter logic [7:0] TRAP_CAPABILITY_VIOL  = 8'h60;

@@ -163,7 +163,10 @@ thread when an instruction ends, on the move to `S_FETCH`. An instruction
 that waits holds the core for its whole wait, on the LSU, the crossbar, a
 queue's port, the GC engines or the 64-cycle divider, so one thread's
 memory wait stalls all four, where spec/03-core.md section 4.2 promises
-that the other threads hide it. No bench can show either case yet:
+that the other threads hide it. A `RECV` on an empty queue is the one wait
+that ends its instruction's turn, unretired, so the scheduler moves on and
+the thread runs the `RECV` again at its next turn. No bench can show
+either case yet:
 `thread_active` comes out of reset with thread 0 alone, and nothing starts
 threads 1 to 3 (P3-1).
 

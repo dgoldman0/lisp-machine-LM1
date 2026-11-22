@@ -92,8 +92,9 @@ module lm1_control
     // -- Remote queue port: a queue of another tile --
     // Driven from registers alone while SEND or RECV waits for it.  The
     // answer comes with rmq_ack, in the same cycle or later: rmq_ok means
-    // the word was taken (SEND) or popped into rmq_rdata (RECV); without
-    // it the queue was full or empty, or no route reaches the tile.
+    // the word was taken (SEND) or popped into rmq_rdata (RECV), and
+    // rmq_noroute that no route reaches the tile; with neither, the queue
+    // was full or empty.
     output logic                rmq_req,
     output logic                rmq_write,        // 1 = SEND, 0 = RECV / TRY.RECV
     output logic [XLEN-1:0]    rmq_tile,
@@ -101,6 +102,7 @@ module lm1_control
     output logic [XLEN-1:0]    rmq_wdata,
     input  logic                rmq_ack,
     input  logic                rmq_ok,
+    input  logic                rmq_noroute,
     input  logic [XLEN-1:0]    rmq_rdata,
 
     // -- GC engine command interface --
@@ -316,13 +318,13 @@ module lm1_control
     // ---------------------------------------------------------------
     // Queue descriptors (spec/02-isa.md § 8)
     //
-    // A descriptor's value is a fixnum's integer, or the word itself when
-    // it is not a fixnum.  Its low two bits pick the queue and the rest,
-    // value / 4 rounded down, the tile; a negative value names no tile.
-    // qd_value returns the value as a 65-bit signed number.
+    // A descriptor is a fixnum, and a word that is not one traps
+    // TRAP_NOT_FIXNUM.  Its value's low two bits pick the queue and the
+    // rest, value / 4, the tile; a negative value names no tile and traps
+    // TRAP_NO_ROUTE.  qd_value returns a fixnum descriptor's value.
     // ---------------------------------------------------------------
-    function automatic logic [XLEN:0] qd_value(logic [XLEN-1:0] d);
-        return d[0] ? {1'b0, d} : {d[XLEN-1], d[XLEN-1], d[XLEN-1:1]};
+    function automatic logic [XLEN-1:0] qd_value(logic [XLEN-1:0] d);
+        return $signed(d) >>> 1;
     endfunction
 
     // ---------------------------------------------------------------
@@ -1446,27 +1448,29 @@ module lm1_control
             // ===== SEND/RECV =====
             //
             // SEND Rs_queue, Rt_value — opa (bits 25:21) is the descriptor,
-            //   opb (bits 20:16) the value.  A full queue, or a tile no
-            //   route reaches, traps TRAP_QUEUE_FULL.
+            //   opb (bits 20:16) the value.  A full queue traps
+            //   TRAP_QUEUE_FULL.
             // RECV Rd, Rs_queue / TRY.RECV Rd, Rd2, Rs_queue — opb (bits
             //   20:16) is the descriptor; func != 0 makes it TRY.RECV,
-            //   whose func names Rd2.  An empty queue, or a tile no route
-            //   reaches, traps TRAP_QUEUE_EMPTY for RECV and gives nil,
-            //   nil for TRY.RECV.
+            //   whose func names Rd2.  On an empty queue RECV waits: it
+            //   ends its turn without retiring, so the scheduler moves on
+            //   and the thread runs the RECV again at its next turn; and
+            //   TRY.RECV gives nil, nil.
             //
-            // The tile's own queues answer here; a busy one, or another
-            // tile's, makes the instruction wait in S_SEND_WAIT or
-            // S_RECV_WAIT.
+            // A descriptor that is not a fixnum traps TRAP_NOT_FIXNUM, and
+            // one naming a tile no route reaches TRAP_NO_ROUTE.  The tile's
+            // own queues answer here; a busy one, or another tile's, makes
+            // the instruction wait in S_SEND_WAIT or S_RECV_WAIT.
             OP_SEND: begin
-                logic [XLEN:0] qv;
+                logic [XLEN-1:0] qv;
                 qv         = qd_value(opa);
                 ta_n       = {2'b00, qv[XLEN-1:2]};   // the tile
                 tt_n       = {62'b0, qv[1:0]};        // the queue
                 td_n       = opb;                     // the value
                 mq_wr_id   = qv[1:0];
                 mq_wr_data = opb;
-                if (qv[XLEN]) begin
-                    tc_n    = TRAP_QUEUE_FULL;        // no such tile
+                if (!is_fixnum(opa) || qv[XLEN-1]) begin
+                    tc_n    = is_fixnum(opa) ? TRAP_NO_ROUTE : TRAP_NOT_FIXNUM;
                     cyc_inc = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
@@ -1486,16 +1490,18 @@ module lm1_control
             end
 
             OP_RECV: begin
-                logic [XLEN:0] qv;
+                logic [XLEN-1:0] qv;
                 qv       = qd_value(opb);
                 ta_n     = {2'b00, qv[XLEN-1:2]};
                 tt_n     = {62'b0, qv[1:0]};
                 mq_rd_id = qv[1:0];
                 cyc_inc  = 1'b0;
                 pc_n     = pc;
-                if (qv[XLEN] ||
-                    ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_rd_empty)) begin
-                    // No such tile, or an empty queue of the tile's own
+                if (!is_fixnum(opb) || qv[XLEN-1]) begin
+                    tc_n = is_fixnum(opb) ? TRAP_NO_ROUTE : TRAP_NOT_FIXNUM;
+                    ns   = S_TRAP_LOOKUP;
+                end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_rd_empty) begin
+                    // An empty queue of the tile's own
                     if (dr.func != '0) begin
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, dr.rd);
@@ -1503,8 +1509,7 @@ module lm1_control
                         opa_n     = VAL_NIL;     // TRY.RECV's status
                         ns        = S_TRY_RECV_WB;
                     end else begin
-                        tc_n = TRAP_QUEUE_EMPTY;
-                        ns   = S_TRAP_LOOKUP;
+                        ns = S_FETCH;            // RECV waits for a word
                     end
                 end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_rd_valid) begin
                     mq_rd_en  = 1'b1;
@@ -2356,7 +2361,7 @@ module lm1_control
                     pc_n    = pc + 64'd4;
                     ns      = S_FETCH;
                 end else begin
-                    tc_n = TRAP_QUEUE_FULL;
+                    tc_n = rmq_noroute ? TRAP_NO_ROUTE : TRAP_QUEUE_FULL;
                     ns   = S_TRAP_LOOKUP;
                 end
             end
@@ -2382,6 +2387,9 @@ module lm1_control
                 end else if (mq_rd_empty) begin
                     none = 1'b1;
                 end
+            end else if (rmq_ack && rmq_noroute) begin
+                tc_n = TRAP_NO_ROUTE;
+                ns   = S_TRAP_LOOKUP;
             end else if (rmq_ack) begin
                 got  = rmq_ok;
                 none = !rmq_ok;
@@ -2401,8 +2409,7 @@ module lm1_control
                     pc_n    = pc + 64'd4;
                     ns      = S_FETCH;
                 end else begin
-                    tc_n = TRAP_QUEUE_EMPTY;
-                    ns   = S_TRAP_LOOKUP;
+                    ns = S_FETCH;                     // RECV waits for a word
                 end
             end
         end

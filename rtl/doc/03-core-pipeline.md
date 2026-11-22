@@ -115,7 +115,7 @@ This is the big dispatch state. The opcode determines the next state:
 | Return | RET | `S_POP_FRAME_0` chain (3 loads) |
 | Allocation | ALLOC, ALLOC_CONS, ALLOCV, ALLOC_CLOSURE | Nursery check → `S_ALLOC_HDR` → zero-fill loop |
 | Stack multi | PUSH_MULTI, POP_MULTI | `S_MULTI_ITER` loop |
-| Queue | SEND, RECV, TRY.RECV | Own queue: direct, trap, or `S_SEND/RECV_WAIT`; another tile's: `S_SEND/RECV_WAIT` |
+| Queue | SEND, RECV, TRY.RECV | Own queue: direct, trap, wait (an empty RECV ends its turn unretired), or `S_SEND/RECV_WAIT`; another tile's: `S_SEND/RECV_WAIT` |
 | GC commands | ENQ_SCAN/COPY/FIXUP/COMPACT | Issue cmd → `S_FETCH` or `S_ENQ_WAIT` |
 | System | TRAP, ERET, SYS_INFO, HALT_NOP | Various |
 

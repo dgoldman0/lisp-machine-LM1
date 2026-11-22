@@ -14,7 +14,9 @@ chiplet_interface, tests the model's own C interface:
   each run ended.
 - chiplet_rtl runs the RTL testbench's programs (tb/tests/*.hex) from the
   RTL's reset state on both models, compares the two, and checks the
-  registers each program's .expected file gives.
+  registers each program's .expected file gives; and the two-tile cluster
+  bench's programs (tb/cluster/tests) on both models' clusters, the same
+  way.
 - chiplet_streams runs seeded random instruction streams on both models,
   one thread stepped an instruction at a time, the threads of a tile in
   round-robin, and a cluster of tiles, and compares them after every call.
@@ -317,6 +319,52 @@ for _hex in sorted(TB_TESTS.glob("*.hex")):
     test("rtl.%s" % _hex.stem, batch="chiplet_rtl", timeout=120.0)(_rtl_program(_hex))
 
 
+TB_CLUSTER_TESTS = REPO / "tb" / "cluster" / "tests"
+CLUSTER_MAX_INSTRUCTIONS = 200_000   # over both tiles; the bench gives 200,000 cycles
+
+
+def _cluster_program(expected_path: Path):
+    name = expected_path.name[:-len(".expected")]
+
+    def run():
+        images = [[int(line, 16) for line in
+                   (TB_CLUSTER_TESTS / f"{name}.t{tile}.hex").read_text().split()]
+                  for tile in (0, 1)]
+        expected = {}
+        for line in expected_path.read_text().split():
+            key, value = line.split("=")
+            tile, what = key.split(".")
+            if what[0] == "r" and what[1:].isdigit():   # the bench alone counts collisions
+                expected[(int(tile[1:]), int(what[1:]))] = int(value, 16)
+        states = []
+        for kind in (reference.Cluster, chiplet.Cluster):
+            cluster = kind(n_tiles=2, mem_size=len(images[0]) * 8)
+            for tile, words in zip(cluster.tiles, images):
+                _rtl_reset(tile, words)
+            try:
+                cluster.run(max_instructions=CLUSTER_MAX_INSTRUCTIONS)
+                outcome = None
+            except (LM1Trap, IndexError, RuntimeError) as exc:
+                outcome = _outcome(exc)
+            states.append({"outcome": outcome,
+                           "tiles": [tile_state(tile) for tile in cluster.tiles]})
+        assert_same(states[0], states[1], name)
+        state = states[1]
+        assert state["outcome"] is None, "the program ended with %r" % (state["outcome"],)
+        for (tile, reg), value in sorted(expected.items()):
+            thread = state["tiles"][tile]["threads"][0]
+            assert thread["halted"], "tile %d did not halt" % tile
+            assert thread["regs"][reg] == value, \
+                "tile %d r%d = %#x, the bench expects %#x" % (tile, reg, thread["regs"][reg], value)
+    run.__doc__ = "Cluster bench program %s on both models' clusters." % name
+    return run
+
+
+for _expected in sorted(TB_CLUSTER_TESTS.glob("*.expected")):
+    test("rtl.cluster.%s" % _expected.name[:-len(".expected")], batch="chiplet_rtl",
+         timeout=120.0)(_cluster_program(_expected))
+
+
 @test("rtl.deviations_still_differ", batch="chiplet_rtl")
 def test_rtl_deviations_still_differ():
     """Each program set aside in RTL_DEVIATIONS still misses its bench
@@ -402,7 +450,8 @@ _SKIP_HANDLER = [encode_i(Op.SYS_INFO, 24, 4, 0),             # r24 = trap_pc
 _NEXT_HANDLER = [encode_i(Op.LI, 24, 0, 0x55), encode_r(Op.ERET, 0, 0, 0, 1)]
 _RETRY_HANDLER = [encode_i(Op.LI, 24, 0, 0x77), encode_x(Op.ERET, 0)]
 _HANDLERS = {"skip": _SKIP_HANDLER, "next": _NEXT_HANDLER, "retry": _RETRY_HANDLER}
-_HANDLED = (0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x10, 0x20, 0x30, 0x42, 0x70, 0x7E, 0x7F)
+_HANDLED = (0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x10, 0x20, 0x30, 0x32, 0x42, 0x70, 0x7E,
+            0x7F)
 
 
 class _Stream:
@@ -607,8 +656,17 @@ class _Stream:
                            if rng.random() < 0.85 else self.value(rng, objects))
             for r in R_CODE:
                 regs[r] = 4 * rng.randrange(len(self.code))
-            regs[R_QUEUE] = tag_fixnum((rng.choice(range(self.tiles)) << 2) | rng.randrange(4)) \
-                if rng.random() < 0.9 else self.value(rng, objects)
+            # A queue of a tile the model has, mostly; now and then one of a
+            # tile no route reaches, past the last or below tile 0, or any
+            # word at all, a fixnum or not.
+            kind = rng.random()
+            if kind < 0.8:
+                regs[R_QUEUE] = tag_fixnum((rng.randrange(self.tiles) << 2) | rng.randrange(4))
+            elif kind < 0.9:
+                far = rng.choice((self.tiles, self.tiles + 3, -1, -7))
+                regs[R_QUEUE] = tag_fixnum((far << 2) | rng.randrange(4)) & WORD_MASK
+            else:
+                regs[R_QUEUE] = self.value(rng, objects)
             for r in R_ANY:
                 regs[r] = self.value(rng, objects)
             t.pc = 4 * ((tid * 37) % len(self.code))

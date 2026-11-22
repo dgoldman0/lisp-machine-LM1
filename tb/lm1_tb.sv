@@ -98,8 +98,8 @@ module lm1_tb;
         // Queue status
         .mq_empty      (mq_empty),
         .mq_full       (mq_full),
-        // Remote queue port: a lone core reaches no other tile, so a SEND
-        // there finds no room and a RECV there no word
+        // Remote queue port: a lone core reaches no other tile, so every
+        // request there is answered at once as one no route reaches
         .rmq_req       (),
         .rmq_write     (),
         .rmq_tile      (),
@@ -107,6 +107,7 @@ module lm1_tb;
         .rmq_wdata     (),
         .rmq_ack       (1'b1),
         .rmq_ok        (1'b0),
+        .rmq_noroute   (1'b1),
         .rmq_rdata     ({XLEN{1'b0}}),
         // Crossbar — tied off (no cluster SRAM in standalone test)
         .xbar_req_valid (xbar_req_valid),

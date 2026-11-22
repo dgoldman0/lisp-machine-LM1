@@ -67,6 +67,7 @@ constexpr uint32_t TRAP_NOT_CLOSURE = 0x07;
 constexpr uint32_t TRAP_NURSERY_OVERFLOW = 0x10;
 constexpr uint32_t TRAP_IC_MISS = 0x20;
 constexpr uint32_t TRAP_QUEUE_FULL = 0x30;
+constexpr uint32_t TRAP_NO_ROUTE = 0x32;
 constexpr uint32_t TRAP_UNIMPLEMENTED = 0x7E;
 // Codes below this vector through the trap table; TRAP #code from here up
 // is a system trap the core carries out itself.
@@ -86,7 +87,7 @@ struct Thread {
     u64 cycle_count = 0;
     bool halted = false;
     bool stalled = false;
-    i64 stall_queue = -1;
+    i64 stall_queue = -1;  // the descriptor value, tile * 4 + queue, a RECV waits on
     u64 trap_table_base = 0;
     u64 trap_cause = 0;
     u64 trap_pc = 0;
@@ -246,6 +247,7 @@ struct Model {
     void reset_chiplet();
 
     Tile *tile_by_id(i64 id);
+    const Tile *tile_by_id(i64 id) const;
 
     // One step of a thread: fetch, execute, answer any trap, advance.
     Flow step(Tile &tile, Thread &t);
@@ -279,27 +281,27 @@ inline bool word_index(const Tile &tile, u128 address, size_t &index) {
 
 void card_table_reset(Tile &tile);
 
-// The queue a stalled RECV waits on, counted as the reference's list index
-// counts, a negative index from the end; or null for no such queue.
-inline const Queue *stall_queue_of(const Tile &tile, const Thread &t) {
-    i64 q = t.stall_queue;
-    if (q < 0) q += QUEUES;
-    return q < 0 || q >= i64(QUEUES) ? nullptr : &tile.queues[q];
+// The queue a stalled RECV waits on, which its descriptor's value names, on
+// the thread's own tile or another of the model's; null for none.
+inline const Queue *stall_queue_of(const Model &m, const Thread &t) {
+    if (t.stall_queue < 0) return nullptr;
+    const Tile *tile = m.tile_by_id(t.stall_queue >> 2);
+    return tile == nullptr ? nullptr : &tile->queues[t.stall_queue & 3];
 }
 
 // Whether a thread that is not halted may run: a stalled one may once the
 // queue its RECV waits on holds a value.
-inline bool can_run(const Tile &tile, const Thread &t) {
+inline bool can_run(const Model &m, const Thread &t) {
     if (t.halted) return false;
     if (!t.stalled) return true;
-    const Queue *q = stall_queue_of(tile, t);
+    const Queue *q = stall_queue_of(m, t);
     return q != nullptr && q->size() > 0;
 }
 
 // Whether a stalled thread may run again, which clears its stall.
-inline bool unstall(Tile &tile, Thread &t) {
+inline bool unstall(const Model &m, Thread &t) {
     if (!t.stalled) return true;
-    const Queue *q = stall_queue_of(tile, t);
+    const Queue *q = stall_queue_of(m, t);
     if (q == nullptr || q->size() == 0) return false;
     t.stalled = false;
     t.stall_queue = -1;

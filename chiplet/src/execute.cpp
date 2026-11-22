@@ -88,8 +88,8 @@ inline bool reserved(const Inst &in) {
     }
 }
 
-// The tagged-fixnum value of a queue descriptor, or the raw word when it
-// is not a fixnum, as the reference decodes one.
+// The value of a fixnum, or the raw word when it is not one, as the
+// reference decodes the emulator's byte-access trap's arguments.
 inline i128 descriptor_value(u64 desc) {
     return is_fixnum(desc) ? i128(untag_fixnum(desc)) : i128(desc);
 }
@@ -115,6 +115,7 @@ private:
     Flow push_frame(u64 return_addr);
     Flow pop_frame(u64 &return_addr);
     Flow system_trap(uint32_t code);
+    Flow queue_of(u64 desc, i64 &value, Queue *&queue);
     Flow block_io();
     Flow shape_of(u64 receiver, u64 &shape);
 
@@ -204,6 +205,19 @@ Flow Executor::pop_frame(u64 &return_addr) {
     if (!load_word(m_, tile_, r[REG_SP], v)) return Flow::Stop;
     r[REG_LR] = v;
     r[REG_SP] += 8;
+    return Flow::Next;
+}
+
+// The queue a descriptor names (spec/02-isa.md section 8, the reference's
+// _descriptor and _queue_of): a descriptor that is not a fixnum traps
+// TRAP_NOT_FIXNUM, and one naming a tile the model lacks, or a negative
+// value, TRAP_NO_ROUTE.
+Flow Executor::queue_of(u64 desc, i64 &value, Queue *&queue) {
+    if (!is_fixnum(desc)) return raise(TRAP_NOT_FIXNUM);
+    value = untag_fixnum(desc);
+    Tile *tile = value >> 2 == i64(tile_.id) ? &tile_ : m_.tile_by_id(value >> 2);
+    if (tile == nullptr) return raise(TRAP_NO_ROUTE);
+    queue = &tile->queues[value & 3];
     return Flow::Next;
 }
 
@@ -731,34 +745,31 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
     // ---- Messaging and atomics ----
     case OP_SEND: {
         // Format S: Rs (bits 25:21) holds the queue descriptor, a fixnum
-        // (tile << 2) | queue, and Rt (bits 20:16) the value.
-        i128 q = descriptor_value(r[in.rd]);
-        u64 value = r[in.rs1];
-        i128 target = q >> 2;
-        unsigned queue = unsigned(u64(q) & 3);
-        Tile *dest = target == i128(tile_.id) ? &tile_ : m_.tile_by_id(target > INT64_MAX ? -1 : i64(target));
-        if (dest == nullptr || dest->queues[queue].full()) return raise(TRAP_QUEUE_FULL);
-        dest->queues[queue].push(value);
+        // tile * 4 + queue, and Rt (bits 20:16) the value.
+        i64 desc;
+        Queue *q;
+        if (queue_of(r[in.rd], desc, q) != Flow::Next) return Flow::Trap;
+        if (q->full()) return raise(TRAP_QUEUE_FULL);
+        q->push(r[in.rs1]);
         return Flow::Next;
     }
     case OP_RECV: {
-        i128 q = descriptor_value(r[in.rs1]);
-        i128 target = q >> 2;
-        unsigned queue = unsigned(u64(q) & 3);
-        Tile *src = target == i128(tile_.id) ? &tile_ : m_.tile_by_id(target > INT64_MAX ? -1 : i64(target));
-        Queue *qu = src == nullptr ? nullptr : &src->queues[queue];  // no tile: an empty queue
-        bool any = qu != nullptr && qu->size() > 0;
+        i64 desc;
+        Queue *q;
+        if (queue_of(r[in.rs1], desc, q) != Flow::Next) return Flow::Trap;
+        bool any = q->size() > 0;
         if (in.func != 0) {
             // TRY.RECV: Rd gets the value or nil, the register named by func
             // gets t or nil.
-            if (any) { r[in.rd] = qu->pop(); r[in.func] = T; }
+            if (any) { r[in.rd] = q->pop(); r[in.func] = T; }
             else { r[in.rd] = NIL; r[in.func] = NIL; }
         } else if (any) {
-            r[in.rd] = qu->pop();
+            r[in.rd] = q->pop();
         } else {
-            // RECV on an empty queue stalls the thread, to retry the RECV.
+            // RECV on an empty queue stalls the thread until the queue holds
+            // a word, to run the RECV again.
             t_.stalled = true;
-            t_.stall_queue = queue;
+            t_.stall_queue = desc;
             next_pc = t_.pc;
         }
         return Flow::Next;
@@ -874,6 +885,10 @@ Tile *Model::tile_by_id(i64 id) {
     if (id < 0 || u64(id) < first_tile_id) return nullptr;
     u64 index = u64(id) - first_tile_id;
     return index < tiles.size() ? &tiles[size_t(index)] : nullptr;
+}
+
+const Tile *Model::tile_by_id(i64 id) const {
+    return const_cast<Model *>(this)->tile_by_id(id);
 }
 
 Flow Model::memory_fault(u128 address) {
