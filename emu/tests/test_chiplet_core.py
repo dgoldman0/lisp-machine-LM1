@@ -2,7 +2,8 @@
 
 Stage 1 of design/chiplet-module.md: the C++ model in chiplet/ runs LM-1
 code as the reference emulator (lm1.execute) runs it.  Three batches test
-that, through the model's ctypes binding (lm1.chiplet):
+that, through the model's ctypes binding (lm1.chiplet), and a fourth,
+chiplet_interface, tests the model's own C interface:
 
 - chiplet_reference runs every program of the reference's own tests on
   both models.  Each test runs once with the reference's Emulator and
@@ -674,3 +675,108 @@ def test_library_matches_sources():
     lib = chiplet.library()
     assert lib.lm1c_source_digest().decode() == chiplet.source_digest()
     assert chiplet.built_digest() == chiplet.source_digest()
+
+
+# ---------------------------------------------------------------------------
+# Batch chiplet_interface: the model's own C interface
+# ---------------------------------------------------------------------------
+
+@test("interface.defaults_are_the_references", batch="chiplet_interface")
+def test_defaults_are_the_references():
+    """A model made from an empty configuration has the reference
+    emulator's sizes and layout (decision E of design/chiplet-module.md)."""
+    model = chiplet.Model("")
+    ref = reference.Emulator()
+    assert model.tiles == 1
+    assert model.tile_get(0, chiplet.TILE_THREADS) == len(ref.threads)
+    assert model.tile_get(0, chiplet.TILE_MEM_SIZE) == ref.mem.size
+    for field, value in ((chiplet.TILE_NURSERY_BASE, ref.nursery_base),
+                         (chiplet.TILE_NURSERY_SIZE, ref.nursery_size),
+                         (chiplet.TILE_OLDGEN_BASE, ref.oldgen_base),
+                         (chiplet.TILE_OLDGEN_SIZE, ref.oldgen_size),
+                         (chiplet.TILE_OLDGEN_PTR, ref.oldgen_ptr),
+                         (chiplet.TILE_CARD_SHIFT, ref.card_shift),
+                         (chiplet.TILE_GEN_BOUNDARY, ref.gen_boundary),
+                         (chiplet.TILE_CARD_TABLE_SIZE, ref.card_table_size)):
+        assert model.tile_get(0, field) == value, (field, model.tile_get(0, field), value)
+    assert [model.template(0, i) for i in range(256)] == list(ref.thread.header_templates)
+    assert model.regs(0, 0) == list(ref.thread.regs)
+
+
+@test("interface.sizes_come_from_the_configuration", batch="chiplet_interface")
+def test_sizes_come_from_the_configuration():
+    """Tiles, threads, memory, the layout and the queues' depth come from
+    the configuration string, with K, M and G for binary units."""
+    model = chiplet.Model("tiles=3, threads=4, mem=1M, tile_id=0x10, nursery_base=64K,"
+                          "nursery_size=0x800, oldgen_base=0x20000, oldgen_size=128K,"
+                          "card_shift=7, queue_depth=2")
+    assert model.tiles == 3
+    for tile in range(3):
+        assert model.tile_get(tile, chiplet.TILE_ID) == 0x10 + tile
+        assert model.tile_get(tile, chiplet.TILE_THREADS) == 4
+        assert model.tile_get(tile, chiplet.TILE_MEM_SIZE) == 1 << 20
+        assert model.tile_get(tile, chiplet.TILE_CARD_TABLE_SIZE) == (1 << 20) >> 7
+        assert model.tile_get(tile, chiplet.TILE_GEN_BOUNDARY) == 0x10800
+        # Each thread's slice of the nursery, the last to its end.
+        slices = [model.thread_get(tile, t, chiplet.THREAD_SLICE_BASE) for t in range(4)]
+        assert slices == [0x10000, 0x10200, 0x10400, 0x10600]
+        assert model.reg(tile, 3, 25) == 0x10800
+    for value in (1, 2, 3):   # a queue of depth 2 drops its oldest on a third push
+        model.queue_push(0, 1, value)
+    assert model.queue(0, 1) == [2, 3]
+
+
+@test("interface.configurations_it_refuses", batch="chiplet_interface")
+def test_configurations_it_refuses():
+    """A configuration the model cannot hold is refused with its reason."""
+    for config, reason in (("speed=3", "unknown configuration key"),
+                           ("tiles", "not key=value"),
+                           ("mem=12x", "takes a number"),
+                           ("mem=-8", "takes a number"),
+                           ("mem=12", "8-byte words"),
+                           ("tiles=0", "at least one tile"),
+                           ("threads=0", "at least one thread"),
+                           ("card_shift=64", "at most 63"),
+                           ("queue_depth=0", "at least one message"),
+                           ("nursery_base=0x80000,oldgen_base=0x30000", "old-gen lies below")):
+        try:
+            chiplet.Model(config)
+        except ValueError as exc:
+            assert reason in str(exc), (config, str(exc))
+        else:
+            raise AssertionError("%r was accepted" % config)
+
+
+@test("interface.host_callbacks_are_optional", batch="chiplet_interface")
+def test_host_callbacks_are_optional():
+    """Without a console the console traps stop the run as a host failure,
+    and without a block device TRAP 0x82 answers fixnum -1 in r0."""
+    model = chiplet.Model("mem=64K")
+    code = b"".join(w.to_bytes(4, "little") for w in (
+        encode_x(Op.TRAP, 0x82), encode_x(Op.TRAP, 0x80), encode_x(Op.HALT_NOP, 0)))
+    model.write(0, 0, code)
+    result = model.run(0)
+    assert result.stop == chiplet.STOP_HOST and result.executed == 1
+    assert model.reg(0, 0, 0) == tag_fixnum(-1) & WORD_MASK
+    assert model.thread_get(0, 0, chiplet.THREAD_PC) == 4
+
+
+@test("interface.bad_indices_are_refused", batch="chiplet_interface")
+def test_bad_indices_are_refused():
+    """A tile, thread, register, template or memory range the model lacks
+    is refused rather than read or written."""
+    model = chiplet.Model("tiles=2,threads=2,mem=64K")
+    for call in (lambda: model.tile_get(2, chiplet.TILE_ID),
+                 lambda: model.thread_get(0, 2, chiplet.THREAD_PC),
+                 lambda: model.reg(0, 0, 32),
+                 lambda: model.template(0, 256),
+                 lambda: model.read(0, 64 * 1024 - 4, 8),
+                 lambda: model.tile_set(0, chiplet.TILE_MEM_SIZE, 8),
+                 lambda: model.tile_set(0, chiplet.TILE_CARD_SHIFT, 64),
+                 lambda: model.run_round_robin(0, 10, 0)):
+        try:
+            call()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an index the model lacks was taken")
