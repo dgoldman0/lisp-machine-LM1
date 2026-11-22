@@ -1,0 +1,212 @@
+# Link conformance cases: LM-1's end of the link (MegaPad's
+# docs/chiplet-link.md, this repository's rtl/doc/08-host-link.md).
+#
+# One list for every implementation of LM-1's end of the link, read by each
+# harness when it runs:
+#   - emu/tests/test_chiplet_link.py runs it on the chiplet module, the C++
+#     model in chiplet/, against a behavioural MegaPad written in Python
+#     (LM-1 batch chiplet_link), one test per case;
+#   - tb/link/lm1_link_tb.sv runs it on the RTL's lm1_link and
+#     lm1_link_boot against a behavioural MegaPad;
+#   - tb/link/lm1_megapad_link_tb.sv runs it on the same RTL joined to
+#     MegaPad's RTL: its port bridge, mailbox, external memory and the tile
+#     engines' image stage.
+# The benches read it through tb/link/link_cases.svh, and each keeps beside
+# it the cases only it can run, such as cycle counts, cancels and failing
+# memories.
+#
+# A case begins with "case NAME" and a line of text saying what it shows.
+# Every other line is one operation and its arguments, numbers in hex
+# without a prefix.  "#" begins a comment.  Each harness gives MegaPad an
+# image address in memory it lends LM-1 for reading, and another it does
+# not lend, and LM-1 a load base; the LM-1 addresses below lie inside the
+# memory of every harness and clear of its image.
+#
+#   reset                 MegaPad holds LM-1 in reset.  LM-1's runtime goes
+#                         with it, and MegaPad's stop request is cleared.
+#   identity I V          the identity word I reads V
+#   image N V             MegaPad's memory holds N words at the image
+#                         address, word k holding V + k
+#   release LEN ARG       MegaPad names the image, LEN bytes, with boot
+#                         argument ARG, and releases LM-1
+#   release_unlent LEN ARG  the same, naming an address MegaPad does not lend
+#   boot done|failed      the fetch ends, and ends so
+#   boot_arg V            LM-1's runtime is given the boot argument V
+#   loaded N V            LM-1's memory from the load base holds N words,
+#                         word k holding V + k, and the word after them
+#                         holds what it held before the release
+#   requests N            the fetch made N memory requests since the release
+#   wait                  time passes: a bench waits 64 cycles, the module
+#                         takes four steps
+#   runtime_ready         LM-1's runtime raises READY.  The benches drive
+#                         the runtime's signal; the module's stand-in for
+#                         the runtime raised it when the fetch ended.
+#   runtime_stop B        LM-1's runtime has stopped (1) or runs (0).  The
+#                         module's stand-in stops when asked.
+#   ready B, stopped B    MegaPad reads READY, or STOPPED, as B
+#   stop B                MegaPad sets (1) or clears (0) STOP_REQ
+#   lend I BASE LIMIT W   LM-1's runtime installs entry I of its lend table
+#                         at the lend port, the range BASE to LIMIT with the
+#                         write right W, or withdraws it with W = 0.  An
+#                         index past the table is ignored.
+#   store F ADDR SEED C   MegaPad's tile engine stores an image of format F
+#                         at LM-1's address ADDR, and LM-1 answers C (ok,
+#                         refused).  F is u8 (four units), fp32 (two units
+#                         and two of zeros) or fp64 (one and three).  Word w
+#                         of the image is SEED in bits 63:56, w in 55:48,
+#                         7ACC in 47:32 and 7w + 1 below, and a format sends
+#                         the units it fills.  After OK LM-1's memory holds
+#                         the units and the zeros; after any answer the
+#                         words just before and after the 256 bytes hold
+#                         what they held, and after REFUSED the 256 bytes
+#                         do too.
+#   ring_in SRC           participant SRC rings LM-1 (the MegaPad bench's
+#                         cores are 0 to 3)
+#   rung_in SRC           LM-1 takes a doorbell from SRC: the RTL's local
+#                         doorbell port, the module's queue 0
+#   ring_out DST          LM-1's runtime rings DST: the RTL's local port,
+#                         the module's queue 1, as LM-1 code sends to it
+#   rung_out DST          MegaPad takes the doorbell for DST
+#   no_ring_out           no doorbell has left LM-1 since the last taken
+
+case identity_in_reset the identity record answers while LM-1 is held in reset
+reset
+identity 0 4348495000000001
+identity 1 314D4C
+identity 7 0
+ready 0
+stopped 0
+
+case boot_fetch the image lands in order from the load base, its length rounded up to whole words
+reset
+image 3 1111111100000001
+release 14 2040
+boot done
+boot_arg 2040
+loaded 3 1111111100000001
+requests 1
+runtime_ready
+ready 1
+
+case boot_bursts a longer image comes eight words to a request
+reset
+image 14 F00D0000
+release A0 0
+boot done
+loaded 14 F00D0000
+requests 3
+
+case boot_no_image a length of zero loads nothing and the fetch ends at once
+reset
+release 0 0
+boot done
+requests 0
+loaded 0 0
+
+case boot_refused an image MegaPad does not lend fails the fetch, which loads nothing
+reset
+image 2 BAD00000
+release_unlent 10 0
+boot failed
+requests 1
+loaded 0 0
+ready 0
+
+case boot_waits_for_stop LM-1 released while asked to stop fetches nothing until the stop is withdrawn
+reset
+stop 1
+image 4 C0DE0000
+release 20 0
+wait
+requests 0
+stop 0
+boot done
+loaded 4 C0DE0000
+requests 1
+
+case lent_writes MegaPad's images land in the range LM-1 lends, zero units included
+reset
+release 0 0
+boot done
+runtime_ready
+store u8 400 A0 refused
+lend 0 400 800 1
+store u8 400 A1 ok
+store fp64 540 A2 ok
+store fp32 680 A3 ok
+store u8 700 A4 ok
+
+case lent_refusals a write LM-1 does not admit leaves its memory untouched
+reset
+release 0 0
+boot done
+runtime_ready
+lend 0 400 800 1
+store u8 420 B0 refused
+store u8 740 B1 refused
+store fp64 780 B2 refused
+lend 1 800 900 1
+store u8 7C0 B3 refused
+lend 5 C00 D00 1
+store u8 C00 B4 refused
+store u8 800 B5 ok
+
+case lent_withdraw a withdrawn range takes no write, and lent again it does
+reset
+release 0 0
+boot done
+runtime_ready
+lend 0 400 800 1
+store u8 400 C0 ok
+lend 0 400 800 0
+store u8 400 C1 refused
+lend 0 400 800 1
+store fp32 400 C2 ok
+
+case reset_clears_ranges LM-1's reset clears the ranges it lent
+reset
+release 0 0
+boot done
+runtime_ready
+lend 0 400 800 1
+lend 1 800 900 1
+store u8 800 D0 ok
+reset
+release 0 0
+boot done
+runtime_ready
+store u8 800 D1 refused
+store u8 400 D2 refused
+
+case doorbells a doorbell crosses each way with its participant's ID
+reset
+release 0 0
+boot done
+runtime_ready
+ring_in 0
+rung_in 0
+ring_out 2
+rung_out 2
+ring_in 3
+rung_in 3
+ring_out 1
+rung_out 1
+
+case stop_handshake stopped, LM-1 rings nobody and MegaPad's writes still land
+reset
+release 0 0
+boot done
+runtime_ready
+lend 0 400 800 1
+stop 1
+runtime_stop 1
+stopped 1
+ring_out 2
+wait
+no_ring_out
+store u8 400 E0 ok
+stopped 1
+stop 0
+runtime_stop 0
+stopped 0
+rung_out 2

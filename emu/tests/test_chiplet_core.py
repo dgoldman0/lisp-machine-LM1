@@ -38,11 +38,13 @@ from lm1.word import NIL, T, WORD_MASK, make_header, make_ref, tag_fixnum
 TESTS_DIR = Path(__file__).resolve().parent
 REPO = TESTS_DIR.parents[1]
 
-# The reference's own tests, which register as their modules load.
+# The reference's own tests, which register as their modules load; the
+# chiplet's own test files are no part of them.
 for _path in sorted(TESTS_DIR.glob("test_*.py")):
-    if _path.stem != Path(__file__).stem:
+    if not _path.stem.startswith("test_chiplet"):
         importlib.import_module("tests." + _path.stem)
-_REFERENCE_ENTRIES = [e for e in get_registry() if e.func.__module__ != __name__]
+_REFERENCE_ENTRIES = [e for e in get_registry()
+                      if not e.func.__module__.startswith("tests.test_chiplet")]
 
 # The comparisons patch the names Emulator and Cluster in a test's module,
 # so they run one at a time.

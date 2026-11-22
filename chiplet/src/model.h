@@ -159,6 +159,14 @@ struct PendingTrap {
     u64 resume_pc = 0;
 };
 
+// A range of LM-1's memory lent to MegaPad, which MegaPad's tile engines
+// store into (rtl/doc/08-host-link.md).  The limit is exclusive.
+struct LentRange {
+    u64 base = 0;
+    u64 limit = 0;
+    bool write = false;
+};
+
 struct Config {
     u64 tiles = 1;
     u64 threads = 1;
@@ -170,20 +178,68 @@ struct Config {
     u64 oldgen_size = 0x40000;
     u64 card_shift = 6;
     u64 queue_depth = 512;
+    // LM-1's end of the link (link.cpp), with the RTL's parameters as
+    // defaults: lm1_link_boot's LOAD_BASE and BURST_WORDS, and lm1_link's
+    // RANGES.  lend holds the ranges the runtime's stand-in lends once the
+    // image is loaded, as (base, length), until LEND entries exist.
+    u64 load_base = 0;
+    u64 burst_words = 8;
+    u64 lend_ranges = 2;
+    u64 quanta = 1;
+    std::vector<std::pair<u64, u64>> lend;
 };
 
 // Parses a configuration string; on failure returns false with a reason.
 bool parse_config(const char *text, Config &config, std::string &error);
+// The configuration as one canonical string, every key in a fixed order,
+// which a saved state carries so that it restores only where it fits.
+std::string config_text(const Config &config);
+
+// Where LM-1's end of the link stands (link.cpp).
+enum class Boot : uint8_t {
+    Reset = 0,    // held in reset
+    Fetch = 1,    // released; the image is still being fetched
+    Running = 2,  // the image is loaded and the runtime is up
+    Failed = 3    // a request or a word of the fetch failed
+};
+
+struct Link {
+    Boot boot = Boot::Reset;
+    u64 boot_addr = 0, boot_len = 0, boot_arg = 0;
+    u64 fetched = 0;          // words of the image loaded so far
+    bool stop_req = false;
+    // What MegaPad was last told on the sideband.
+    bool told_ready = false, told_stopped = false;
+    std::vector<LentRange> ranges;  // the lend table, lend_ranges entries
+    // The scheduler's place: the next thread, by its index over every
+    // tile's threads, and the part of its quantum it has used.
+    u64 cursor = 0, used = 0;
+    // Threads that stopped on a trap no handler answers or a fault, and
+    // the first of them.
+    u64 faults = 0;
+    lm1c_result first_fault = {};
+    u64 doorbells_in = 0, doorbells_out = 0, doorbells_dropped = 0;
+};
 
 struct Model {
+    Config config;
     std::vector<Tile> tiles;
     u64 first_tile_id = 0;
     size_t queue_depth = 0;
     lm1c_host host = {};
     PendingTrap trap;
     lm1c_result stop = {};  // why the run is ending, once a step says Stop
+    Link link;
+    // MegaPad's services, when the model is a chiplet module; not state.
+    const struct mp64_chiplet_host *link_host = nullptr;
 
     explicit Model(const Config &config);
+
+    // Every tile back to the state the configuration gives it.
+    void init_tiles();
+    // The chiplet held in reset: the configured state, every thread halted,
+    // nothing lent and no work in hand.
+    void reset_chiplet();
 
     Tile *tile_by_id(i64 id);
 
@@ -203,6 +259,11 @@ struct Model {
     Flow host_failure();
 };
 
+// The whole state of a model, for the chiplet module's save and restore
+// (state.cpp).  restore_state leaves MODEL unchanged when it fails.
+std::vector<uint8_t> save_state(const Model &model);
+bool restore_state(Model &model, const uint8_t *data, size_t size);
+
 // Memory access as the reference's Memory does it: a word access uses the
 // word holding the address, and an address outside memory is a fault.
 inline bool word_index(const Tile &tile, u128 address, size_t &index) {
@@ -213,6 +274,33 @@ inline bool word_index(const Tile &tile, u128 address, size_t &index) {
 }
 
 void card_table_reset(Tile &tile);
+
+// The queue a stalled RECV waits on, counted as the reference's list index
+// counts, a negative index from the end; or null for no such queue.
+inline const Queue *stall_queue_of(const Tile &tile, const Thread &t) {
+    i64 q = t.stall_queue;
+    if (q < 0) q += QUEUES;
+    return q < 0 || q >= i64(QUEUES) ? nullptr : &tile.queues[q];
+}
+
+// Whether a thread that is not halted may run: a stalled one may once the
+// queue its RECV waits on holds a value.
+inline bool can_run(const Tile &tile, const Thread &t) {
+    if (t.halted) return false;
+    if (!t.stalled) return true;
+    const Queue *q = stall_queue_of(tile, t);
+    return q != nullptr && q->size() > 0;
+}
+
+// Whether a stalled thread may run again, which clears its stall.
+inline bool unstall(Tile &tile, Thread &t) {
+    if (!t.stalled) return true;
+    const Queue *q = stall_queue_of(tile, t);
+    if (q == nullptr || q->size() == 0) return false;
+    t.stalled = false;
+    t.stall_queue = -1;
+    return true;
+}
 
 }  // namespace lm1
 

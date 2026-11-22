@@ -3,18 +3,24 @@
 The chiplet module (chiplet/ at the repository's root, planned in
 design/chiplet-module.md) is one shared library.  This module finds it,
 builds it again whenever its sources differ from the ones it was built
-from, and offers two ways in:
+from, and offers three ways in:
 
 - ``Model``, a thin handle on the library's C interface
   (chiplet/include/lm1_chiplet.h);
 - ``Emulator`` and ``Cluster``, which offer the part of the reference
   emulator's interface (``lm1.execute``) that LM-1's tests use, backed by
-  the model, so that the same test programs run on both.
+  the model, so that the same test programs run on both;
+- ``Module``, the library as MegaPad's port bridge drives it: a chiplet
+  module made by ``mp64_chiplet_create``, whose host services are Python
+  callables, for LM-1's own tests of its end of the link.
 
-No test runs against a library older than its sources.  The library
-carries the digest of the files it was built from, and before loading it
-this module computes the same digest from the files in the checkout; when
-the two differ it runs make, under a lock, and checks again.
+The library builds against MegaPad's ``shared/accel/chiplet_module.h``
+(decision C of the plan), in the MegaPad checkout that ``MEGAPAD_ROOT``
+names, or in the one beside this repository's.  No test runs against a
+library older than its sources or that header.  The library carries the
+digest of the files it was built from, and before loading it this module
+computes the same digest from the files in the checkouts; when the two
+differ it runs make, under a lock, and checks again.
 """
 
 from __future__ import annotations
@@ -33,9 +39,12 @@ from typing import TextIO
 from .traps import LM1Trap, TRAP_QUEUE_FULL
 from .word import WORD_MASK
 
-CHIPLET_DIR = Path(__file__).resolve().parents[2] / "chiplet"
+REPO = Path(__file__).resolve().parents[2]
+CHIPLET_DIR = REPO / "chiplet"
 LIBRARY = CHIPLET_DIR / "build" / "lm1_chiplet.so"
 _DIGEST_MARKER = b"LM1-CHIPLET-SOURCE-DIGEST="
+# MegaPad's module interface, by its path inside a MegaPad checkout.
+MP64_HEADER = "shared/accel/chiplet_module.h"
 
 # Results of a run (enum lm1c_stop).
 STOP_BUDGET, STOP_IDLE, STOP_TRAP, STOP_MEMORY, STOP_OLDGEN, STOP_HOST = range(6)
@@ -62,10 +71,20 @@ class ChipletBuildError(RuntimeError):
 # Finding, building and loading the library
 # ---------------------------------------------------------------------------
 
+def megapad_root(root: str | os.PathLike | None = None) -> Path:
+    """The MegaPad checkout whose chiplet_module.h the library builds
+    against: ROOT when given, else MEGAPAD_ROOT, as the link test bench
+    names it, else the checkout beside this repository's."""
+    if root is not None:
+        return Path(root)
+    named = os.environ.get("MEGAPAD_ROOT")
+    return Path(named) if named else REPO.parent / "megapad"
+
+
 def source_files() -> list[str]:
-    """The files the library's digest covers, as the Makefile's DIGESTED
-    lists them: the Makefile, the export list, then the headers and sources
-    sorted together."""
+    """The files of this repository the library's digest covers, as the
+    Makefile's DIGESTED lists them: the Makefile, the export list, then the
+    headers and sources sorted together."""
     names: set[str] = set()
     for pattern in ("include/*.h", "src/*.h", "src/*.cpp"):
         for path in CHIPLET_DIR.glob(pattern):
@@ -74,11 +93,20 @@ def source_files() -> list[str]:
     return ["Makefile", "exports.map"] + sorted(names)
 
 
-def source_digest() -> str:
-    """The SHA-256 of what `sha256sum` prints for the source files."""
+def source_digest(megapad: str | os.PathLike | None = None) -> str:
+    """The SHA-256 of what `sha256sum` prints for the source files and then
+    for MegaPad's header, named by its path inside MegaPad."""
+    header = megapad_root(megapad) / MP64_HEADER
+    try:
+        header_bytes = header.read_bytes()
+    except OSError:
+        raise ChipletBuildError(
+            "the chiplet module builds against MegaPad's %s, which %s lacks; set "
+            "MEGAPAD_ROOT to a MegaPad checkout" % (MP64_HEADER, header.parents[2])) from None
     listing = "".join(
         "%s  %s\n" % (hashlib.sha256((CHIPLET_DIR / name).read_bytes()).hexdigest(), name)
         for name in source_files())
+    listing += "%s  %s\n" % (hashlib.sha256(header_bytes).hexdigest(), MP64_HEADER)
     return hashlib.sha256(listing.encode()).hexdigest()
 
 
@@ -95,9 +123,13 @@ def built_digest(path: Path = LIBRARY) -> str | None:
     return data[at:at + 64].decode("ascii", "replace")
 
 
-def ensure_library() -> Path:
-    """The library, built from the checkout's sources as they are now."""
-    wanted = source_digest()
+def ensure_library(megapad: str | os.PathLike | None = None) -> Path:
+    """The library, built from the checkout's sources and from the header
+    of the MegaPad checkout that megapad_root(MEGAPAD) names, as they are
+    now.  A test that attaches the library elsewhere calls this first, so
+    that the files the library comes from are among the files it reads."""
+    root = megapad_root(megapad)
+    wanted = source_digest(root)
     if built_digest() == wanted:
         return LIBRARY
     build = LIBRARY.parent
@@ -109,7 +141,8 @@ def ensure_library() -> Path:
                 break
             # make goes by times; -B rebuilds when the times mislead it.
             subprocess.run(["make", "--no-print-directory", "-C", str(CHIPLET_DIR), *force],
-                           check=True, stdout=subprocess.DEVNULL)
+                           check=True, stdout=subprocess.DEVNULL,
+                           env={**os.environ, "MEGAPAD_ROOT": str(root)})
     found = built_digest()
     if found != wanted:
         raise ChipletBuildError(
@@ -135,6 +168,58 @@ class _Host(ctypes.Structure):
                 ("get_char", _GET_CHAR), ("block_io", _BLOCK_IO)]
 
 
+# MegaPad's chiplet module interface as ctypes declares it, the two
+# structures of chiplet_module.h for the version CHIPLET_ABI names.  The
+# library reports the version it was built against, and library() refuses
+# one built for another, so the two cannot drift apart unnoticed.
+CHIPLET_ABI = 2
+UNIT_BYTES = 64
+LINK_OK, LINK_REFUSED, LINK_MEM_ERROR, LINK_CANCELLED = range(4)
+
+_MEM = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint,
+                        ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_uint64),
+                        ctypes.POINTER(ctypes.c_uint))
+_DOORBELL = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint8)
+_STATUS = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_int)
+
+
+class _ChipletHost(ctypes.Structure):
+    _fields_ = [("ctx", ctypes.c_void_p), ("mem", _MEM), ("doorbell", _DOORBELL),
+                ("status", _STATUS)]
+
+
+class _ChipletModule(ctypes.Structure):
+    _fields_ = [
+        ("abi", ctypes.c_uint32),
+        ("self", ctypes.c_void_p),
+        ("bind", ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.POINTER(_ChipletHost))),
+        ("identity", ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint8)),
+        ("reset", ctypes.CFUNCTYPE(None, ctypes.c_void_p)),
+        ("release", ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64,
+                                     ctypes.c_uint64)),
+        ("stop", ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int)),
+        ("doorbell", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint8)),
+        ("step", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)),
+        ("lent_write", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint64,
+                                        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint,
+                                        ctypes.c_uint)),
+        ("save", ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p,
+                                  ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t)),
+        ("restore", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                     ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t)),
+        ("destroy", ctypes.CFUNCTYPE(None, ctypes.c_void_p)),
+    ]
+
+
+# LM-1's end of the link (lm1_chiplet.h): its tile and doorbell queues,
+# enum lm1c_boot and enum lm1c_link_field.
+LINK_TILE, DOORBELL_IN_QUEUE, DOORBELL_OUT_QUEUE = 0, 0, 1
+BOOT_RESET, BOOT_FETCH, BOOT_RUNNING, BOOT_FAILED = range(4)
+(LINK_BOOT, LINK_BOOT_ADDR, LINK_BOOT_LEN, LINK_BOOT_ARG, LINK_FETCHED, LINK_STOP_REQ,
+ LINK_READY, LINK_STOPPED, LINK_RANGES, LINK_FAULTS, LINK_DOORBELLS_IN, LINK_DOORBELLS_OUT,
+ LINK_DOORBELLS_DROPPED) = range(13)
+
+
 _lib = None
 _lib_lock = threading.Lock()
 
@@ -150,6 +235,10 @@ def library() -> ctypes.CDLL:
             if loaded != source_digest():
                 raise ChipletBuildError("the loaded library's digest %s is not its "
                                         "sources' %s" % (loaded, source_digest()))
+            if lib.lm1c_chiplet_abi() != CHIPLET_ABI:
+                raise ChipletBuildError(
+                    "the library implements version %d of MegaPad's chiplet_module.h, and "
+                    "this binding mirrors version %d" % (lib.lm1c_chiplet_abi(), CHIPLET_ABI))
             _lib = lib
         return _lib
 
@@ -188,6 +277,12 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_run_round_robin": (i32, [p, u32, u64, u64, c.POINTER(_Result)]),
         "lm1c_run_cluster": (i32, [p, u64, u64, c.POINTER(_Result)]),
         "lm1c_collect": (i32, [p, u32, c.POINTER(_Result)]),
+        "lm1c_chiplet_abi": (u32, []),
+        "lm1c_link_get": (i32, [p, i32, pu64]),
+        "lm1c_link_range": (i32, [p, u32, pu64, pu64, c.POINTER(c.c_int)]),
+        "lm1c_link_lend": (i32, [p, u32, u64, u64, i32]),
+        "lm1c_link_fault": (i32, [p, c.POINTER(_Result)]),
+        "mp64_chiplet_create": (i32, [c.c_char_p, c.POINTER(_ChipletModule)]),
     }
     for name, (restype, argtypes) in sig.items():
         fn = getattr(lib, name)
@@ -205,14 +300,19 @@ def _check(code: int, what: str) -> None:
 # ---------------------------------------------------------------------------
 
 class Model:
-    """One model made from a configuration string (lm1c_create)."""
+    """One model made from a configuration string (lm1c_create), or a view
+    of the model inside a chiplet module, which the module owns."""
 
-    def __init__(self, config: str = ""):
+    def __init__(self, config: str = "", *, _view_of: int | None = None):
         self._lib = lib = library()
-        error = ctypes.create_string_buffer(256)
-        handle = lib.lm1c_create(config.encode(), error, len(error))
-        if not handle:
-            raise ValueError(error.value.decode())
+        self._owned = _view_of is None
+        if self._owned:
+            error = ctypes.create_string_buffer(256)
+            handle = lib.lm1c_create(config.encode(), error, len(error))
+            if not handle:
+                raise ValueError(error.value.decode())
+        else:
+            handle = _view_of
         self._handle = handle
         self._host = None        # the callbacks, kept alive while installed
         self.host_error: BaseException | None = None
@@ -220,8 +320,32 @@ class Model:
 
     def __del__(self):
         handle, self._handle = getattr(self, "_handle", None), None
-        if handle:
+        if handle and getattr(self, "_owned", False):
             self._lib.lm1c_destroy(handle)
+
+    # -- LM-1's end of the link --
+
+    def link(self, field: int) -> int:
+        out = ctypes.c_uint64()
+        _check(self._lib.lm1c_link_get(self._handle, field, ctypes.byref(out)), "link_get")
+        return out.value
+
+    def lend_range(self, index: int) -> tuple[int, int, bool]:
+        base, limit, write = ctypes.c_uint64(), ctypes.c_uint64(), ctypes.c_int()
+        _check(self._lib.lm1c_link_range(self._handle, index, ctypes.byref(base),
+                                         ctypes.byref(limit), ctypes.byref(write)),
+               "link_range")
+        return base.value, limit.value, bool(write.value)
+
+    def lend(self, index: int, base: int, limit: int, write: bool) -> int:
+        """The lend port; returns the C interface's code, 0 when taken."""
+        return self._lib.lm1c_link_lend(self._handle, index, base & WORD_MASK,
+                                        limit & WORD_MASK, int(write))
+
+    def first_fault(self) -> _Result:
+        result = _Result()
+        _check(self._lib.lm1c_link_fault(self._handle, ctypes.byref(result)), "link_fault")
+        return result
 
     @property
     def tiles(self) -> int:
@@ -388,6 +512,122 @@ class Model:
         if error is not None:
             raise error
         raise RuntimeError("a host callback failed")
+
+
+# ---------------------------------------------------------------------------
+# The chiplet module, as MegaPad's port bridge drives it
+# ---------------------------------------------------------------------------
+
+class Module:
+    """A chiplet module made by mp64_chiplet_create from a configuration
+    string, bound to a host whose services are Python callables:
+
+    - ``mem(addr, size, len, wen, words)`` answers one memory request with a
+      response code and the count of words completed; WORDS holds len + 1
+      words, which a read fills in place;
+    - ``doorbell(dst)`` takes a doorbell the chiplet rings;
+    - ``status(ready, stopped)`` takes the sideband's signals.
+
+    The calls follow chiplet_module.h, and ``model`` views the model inside
+    through the library's own interface.  A host callable that raises fails
+    its request with MEM_ERROR, or is dropped, and the exception waits in
+    ``host_error``.
+    """
+
+    def __init__(self, config: str = "", *, mem=None, doorbell=None, status=None):
+        self._lib = lib = library()
+        module = _ChipletModule()
+        if lib.mp64_chiplet_create(config.encode(), ctypes.byref(module)) != 0:
+            # lm1c_create reads the same configuration and says what is wrong.
+            Model(config)
+            raise ValueError("mp64_chiplet_create refused %r" % config)
+        if module.abi != CHIPLET_ABI:
+            module.destroy(module.self)
+            raise ChipletBuildError("the module reports interface version %d" % module.abi)
+        self._module = module
+        self.model = Model(_view_of=module.self)
+        self.host_error: BaseException | None = None
+        owner = weakref.ref(self)
+
+        def guarded(fn, failed):
+            def call(*args):
+                try:
+                    return fn(*args)
+                except BaseException as exc:   # never unwind through C
+                    me = owner()
+                    if me is not None:
+                        me.host_error = exc
+                    return failed
+            return call
+
+        def host_mem(_ctx, addr, size, length, wen, data, done):
+            words = (ctypes.c_uint64 * (length + 1)).from_address(ctypes.addressof(data.contents))
+            code, completed = mem(addr, size, length, bool(wen), words)
+            if done:
+                done[0] = completed
+            return code
+
+        host = _ChipletHost()
+        host.ctx = None
+        host.mem = _MEM(guarded(host_mem, LINK_MEM_ERROR) if mem else
+                        (lambda *_: LINK_REFUSED))
+        host.doorbell = _DOORBELL(guarded(lambda _c, dst: doorbell(dst), None) if doorbell else
+                                  (lambda *_: None))
+        host.status = _STATUS(guarded(lambda _c, r, s: status(bool(r), bool(s)), None)
+                              if status else (lambda *_: None))
+        self._host = host    # kept alive while the module may call it
+        module.bind(module.self, ctypes.byref(host))
+
+    def close(self) -> None:
+        module, self._module = getattr(self, "_module", None), None
+        if module is not None:
+            self.model = None
+            module.destroy(module.self)
+
+    def __del__(self):
+        self.close()
+
+    def identity(self, index: int) -> int:
+        return self._module.identity(self._module.self, index)
+
+    def reset(self) -> None:
+        self._module.reset(self._module.self)
+
+    def release(self, boot_addr: int, boot_len: int, boot_arg: int) -> None:
+        self._module.release(self._module.self, boot_addr & WORD_MASK, boot_len & WORD_MASK,
+                             boot_arg & WORD_MASK)
+
+    def stop(self, stop_req: bool) -> None:
+        self._module.stop(self._module.self, int(stop_req))
+
+    def doorbell(self, src: int) -> bool:
+        """Whether the module takes the doorbell."""
+        return bool(self._module.doorbell(self._module.self, src))
+
+    def step(self, budget: int) -> bool:
+        """Whether more work waits."""
+        return bool(self._module.step(self._module.self, budget))
+
+    def lent_write(self, addr: int, data: bytes, zeros: int = 0) -> int:
+        """One of MegaPad's writes into lent memory: DATA, whole units of
+        64 bytes, then ZEROS units of zeros; returns the answer's code."""
+        units, rest = divmod(len(data), UNIT_BYTES)
+        if rest:
+            raise ValueError("a write carries whole units of %d bytes" % UNIT_BYTES)
+        buffer = (ctypes.c_uint8 * max(len(data), 1)).from_buffer_copy(data or b"\0")
+        return self._module.lent_write(self._module.self, addr & WORD_MASK, buffer, units, zeros)
+
+    def save(self) -> bytes:
+        size = self._module.save(self._module.self, None, 0)
+        buffer = (ctypes.c_uint8 * max(size, 1))()
+        written = self._module.save(self._module.self, buffer, size)
+        if written != size:
+            raise RuntimeError("the state changed size between two saves")
+        return bytes(buffer)[:size]
+
+    def restore(self, state: bytes) -> bool:
+        buffer = (ctypes.c_uint8 * max(len(state), 1)).from_buffer_copy(state or b"\0")
+        return self._module.restore(self._module.self, buffer, len(state)) == 0
 
 
 # ---------------------------------------------------------------------------

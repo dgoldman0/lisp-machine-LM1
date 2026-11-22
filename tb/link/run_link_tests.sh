@@ -3,6 +3,11 @@
 #
 # Usage: tb/link/run_link_tests.sh
 #
+# Both benches first run the shared link conformance cases of
+# tb/link/link_cases.txt, read at run time through tb/link/link_cases.svh,
+# the list that LM-1's chiplet module runs too (emu/tests/test_chiplet_link.py),
+# and then the cases each alone can run.
+#
 # lm1_link_tb runs always: LM-1's link against a behavioural MegaPad.
 #
 # lm1_megapad_link_tb runs when MEGAPAD_ROOT names a MegaPad checkout: LM-1's
@@ -12,6 +17,7 @@
 # link share.
 #
 # Build products go to tb/build/link, or to LM1_LINK_BUILD when it is set.
+# Verilator builds with LM1_LINK_JOBS jobs, every core when it is unset.
 #
 # Exit code 0 if every bench that ran passed, 1 otherwise.
 
@@ -20,6 +26,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${LM1_LINK_BUILD:-$ROOT/tb/build/link}"
+JOBS="${LM1_LINK_JOBS:-0}"
+CASES="$SCRIPT_DIR/link_cases.txt"
 
 WARN="-Wno-UNUSEDSIGNAL -Wno-UNDRIVEN -Wno-UNUSEDPARAM -Wno-UNOPTFLAT \
       -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-CASEINCOMPLETE \
@@ -51,8 +59,8 @@ run_bench() {
     local dir="$BUILD_DIR/$top"
     mkdir -p "$dir"
     echo "=== Building $top ==="
-    ( cd "$dir" && verilator --binary --timing -j 0 --timescale 1ns/1ps $WARN \
-          --top-module "$top" "$@" > build.log 2>&1 ) || {
+    ( cd "$dir" && verilator --binary --timing -j "$JOBS" --timescale 1ns/1ps $WARN \
+          -I"$SCRIPT_DIR" --top-module "$top" "$@" > build.log 2>&1 ) || {
         echo "BUILD FAILED: $top (see $dir/build.log)"
         tail -20 "$dir/build.log"
         STATUS=1
@@ -60,7 +68,7 @@ run_bench() {
     }
     echo "=== Running $top ==="
     local out
-    out="$("$dir/obj_dir/V$top" 2>&1)" || true
+    out="$("$dir/obj_dir/V$top" "+cases=$CASES" 2>&1)" || true
     echo "$out"
     if ! echo "$out" | grep -q "ALL TESTS PASSED"; then
         STATUS=1

@@ -319,4 +319,52 @@ LM1C_API int lm1c_collect(lm1c_model *model, uint32_t tile, lm1c_result *result)
     return LM1C_OK;
 }
 
+LM1C_API int lm1c_link_get(const lm1c_model *model, int field, uint64_t *value) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    const Link &l = model->link;
+    switch (field) {
+    case LM1C_LINK_BOOT: *value = uint64_t(l.boot); break;
+    case LM1C_LINK_BOOT_ADDR: *value = l.boot_addr; break;
+    case LM1C_LINK_BOOT_LEN: *value = l.boot_len; break;
+    case LM1C_LINK_BOOT_ARG: *value = l.boot_arg; break;
+    case LM1C_LINK_FETCHED: *value = l.fetched; break;
+    case LM1C_LINK_STOP_REQ: *value = l.stop_req; break;
+    case LM1C_LINK_READY: *value = l.told_ready; break;
+    case LM1C_LINK_STOPPED: *value = l.told_stopped; break;
+    case LM1C_LINK_RANGES: *value = l.ranges.size(); break;
+    case LM1C_LINK_FAULTS: *value = l.faults; break;
+    case LM1C_LINK_DOORBELLS_IN: *value = l.doorbells_in; break;
+    case LM1C_LINK_DOORBELLS_OUT: *value = l.doorbells_out; break;
+    case LM1C_LINK_DOORBELLS_DROPPED: *value = l.doorbells_dropped; break;
+    default: return LM1C_BAD_FIELD;
+    }
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_link_range(const lm1c_model *model, uint32_t index, uint64_t *base,
+                             uint64_t *limit, int *write) {
+    if (model == nullptr || index >= model->link.ranges.size()) return LM1C_BAD_INDEX;
+    const LentRange &r = model->link.ranges[index];
+    *base = r.base;
+    *limit = r.limit;
+    *write = r.write ? 1 : 0;
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_link_lend(lm1c_model *model, uint32_t index, uint64_t base, uint64_t limit,
+                            int write) {
+    if (model == nullptr || index >= model->link.ranges.size()) return LM1C_BAD_INDEX;
+    // The lend port takes nothing while LM-1 is held in reset, whose end
+    // clears the table.
+    if (model->link.boot == Boot::Reset) return LM1C_BAD_VALUE;
+    model->link.ranges[index] = LentRange{base, limit, write != 0};
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_link_fault(const lm1c_model *model, lm1c_result *first) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    *first = model->link.first_fault;
+    return LM1C_OK;
+}
+
 }  // extern "C"
