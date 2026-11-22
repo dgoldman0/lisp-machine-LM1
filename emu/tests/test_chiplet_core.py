@@ -902,6 +902,12 @@ def test_configurations_it_refuses():
                            ("threads=0", "at least one thread"),
                            ("card_shift=64", "at most 63"),
                            ("queue_depth=0", "at least one message"),
+                           ("nursery_chunk=12", "nursery_chunk is a multiple of 8"),
+                           ("runtime=2", "runtime is 0 or 1"),
+                           ("queue_entries=0", "queue_entries lies from 1"),
+                           ("heap_block=32", "heap_block and region_bytes"),
+                           ("region_bytes=100", "heap_block and region_bytes"),
+                           ("hold_gap=0", "nanoseconds above zero"),
                            ("nursery_base=0x80000,oldgen_base=0x30000", "old-gen lies below")):
         try:
             chiplet.Model(config)

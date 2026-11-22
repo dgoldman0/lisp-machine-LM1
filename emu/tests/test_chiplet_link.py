@@ -726,3 +726,50 @@ def test_digest_covers_megapads_header():
     listing += b"%s  %s\n" % (hashlib.sha256(header.read_bytes()).hexdigest().encode(),
                               chiplet.MP64_HEADER.encode())
     assert hashlib.sha256(listing).hexdigest() == chiplet.source_digest()
+
+
+@test("module.runtime_stand_in_needs_a_control_block", batch="chiplet_module")
+def test_runtime_stand_in_needs_a_control_block():
+    """The stand-in for LM-1's runtime is off by default, so the module reads
+    nothing past the image.  With runtime=1 it reads the control block that
+    the boot argument names, once, and a block that is no CHIPCTRL block, or
+    none at all, leaves it serving nothing: LM-1 code still takes the
+    doorbells on queue 0."""
+    words = _echo_program()
+    for config, boot_arg, reads in (("", 0x2040, []), ("runtime=1", 0, []),
+                                    ("runtime=1", LENT, [LENT])):
+        mp = _booted(config, words, boot_arg=boot_arg)
+        mp.settle()
+        beyond = [r[0] for r in mp.requests if not IMAGE <= r[0] < IMAGE + 8 * len(words)]
+        assert beyond == reads, (config, mp.requests)
+        if reads:
+            assert mp.model.md(chiplet.MD_PHASE) == 5      # broken: no CHIPCTRL there
+        mp.ring(9)
+        mp.settle()
+        assert mp.rung[-1:] == [9], "LM-1 code answered the doorbell"
+
+
+@test("module.hooks_find_the_module_and_check_their_arguments", batch="chiplet_module")
+def test_hooks_find_the_module_and_check_their_arguments():
+    """A test finds the model inside a chiplet module by its hook_id, the
+    most recent one made with it, until the module goes; the hooks refuse
+    a mode or an address they cannot take."""
+    first = chiplet.Module("hook_id=77")
+    second = chiplet.Module("hook_id=77")
+    found = chiplet.attached_model(77)
+    assert found is not None and found._handle == second.model._handle
+    second.close()
+    assert chiplet.attached_model(77)._handle == first.model._handle
+    first.close()
+    assert chiplet.attached_model(77) is None
+    model = chiplet.Module("runtime=1").model
+    for call in (lambda: model.md_hold(4), lambda: model.md_write(0x1004, 0),
+                 lambda: model.md_churn(0x1001, 0, 0, 1)):
+        try:
+            call()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a hook took an argument it cannot")
+    model.md_hold(3, 1000)
+    assert model.md(chiplet.MD_PHASE) == 0 and model.md(chiplet.MD_EPOCH) == 0
