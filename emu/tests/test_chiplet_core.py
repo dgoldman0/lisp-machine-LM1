@@ -384,6 +384,12 @@ _OPS = [  # (opcode, weight)
 ]
 _OP_CHOICES = [op for op, _ in _OPS]
 _OP_WEIGHTS = [w for _, w in _OPS]
+# The collector's mix: allocation, barriered stores into old and young
+# objects, and the loads that follow the refs, so that collections come
+# often and find old-to-young refs in dirty cards.
+_COLLECTOR_WEIGHTS = [w * {Op.ALLOC_CONS: 4, Op.ALLOC: 2, Op.ALLOCV: 2, Op.ST_WB: 4,
+                           Op.ST_CAR_CDR: 4, Op.CAS_TAGGED: 2, Op.LD: 2,
+                           Op.LD_CAR_CDR: 2}.get(op, 1) for op, w in _OPS]
 
 # Trap handlers: one skips the instruction that trapped and goes on, one
 # retries it after changing a register.
@@ -397,16 +403,19 @@ _HANDLED = (0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x10, 0x20, 0x30, 0x42)
 class _Stream:
     """One seeded program and the state both models start from."""
 
-    def __init__(self, seed: int, *, threads: int = 1, tiles: int = 1):
+    def __init__(self, seed: int, *, threads: int = 1, tiles: int = 1,
+                 collector: bool = False):
         rng = self.rng = random.Random(seed)
         self.threads, self.tiles = threads, tiles
+        self.collector = collector
+        self.weights = _COLLECTOR_WEIGHTS if collector else _OP_WEIGHTS
         # Small nurseries, so that allocation overflows them and collects.
         self.nursery_size = rng.choice((0x180, 0x300, 0x600)) * threads
         self.code = [self.instruction() for _ in range(rng.randrange(16, S_CODE_WORDS))]
-        self.handler = rng.choices(("skip", "retry", None), (8, 1, 1))[0]
+        self.handler = "skip" if collector else rng.choices(("skip", "retry", None), (8, 1, 1))[0]
         # A small old-gen now and then, which promotions fill.
         self.oldgen_size = rng.choice((S_OLDGEN_SIZE, S_OLDGEN_SIZE, S_OLDGEN_SIZE, 0x400))
-        self.card_table = rng.random() < 0.5
+        self.card_table = collector or rng.random() < 0.5
         self.stdin = "".join(chr(rng.randrange(32, 127)) for _ in range(8))
         self.build_seed = rng.getrandbits(32)
 
@@ -447,8 +456,9 @@ class _Stream:
 
     def instruction(self) -> int:
         rng, pick = self.rng, self.pick
-        op = rng.choices(_OP_CHOICES, _OP_WEIGHTS)[0]
-        value = pick(R_OBJ + R_FIX + R_ANY)
+        op = rng.choices(_OP_CHOICES, self.weights)[0]
+        # The collector's streams store objects more often than anything else.
+        value = pick(R_OBJ) if self.collector and rng.random() < 0.7 else pick(R_OBJ + R_FIX + R_ANY)
         if op == Op.ARITH_FIX:
             func = rng.randrange(4) if rng.random() < 0.95 else rng.randrange(32)
             return encode_r(op, pick(R_FIX), pick(R_FIX), pick(R_FIX), func)
@@ -603,8 +613,75 @@ class _Stream:
             # one takes the trap from the collection that stands in for an
             # absent runtime.
             for code in _HANDLED:
-                if rng.random() < (0.15 if code == 0x10 else 0.8):
+                if rng.random() < (0.15 if code == 0x10 else 1.0 if self.collector else 0.8):
                     tile.mem.store_word(S_TRAP_TABLE + code * 8, S_HANDLER)
+
+
+class _GraphStream(_Stream):
+    """A straight-line program that builds a graph of objects of known sizes,
+    links them through every field, the last ones above all, and allocates
+    garbage between the links, so that collections copy objects with young
+    refs in all their fields and find old ones in dirty cards."""
+
+    def __init__(self, seed: int):
+        rng = self.rng = random.Random(seed)
+        self.threads, self.tiles, self.collector = 1, 1, True
+        self.nursery_size = rng.choice((0x200, 0x400))
+        self.oldgen_size = S_OLDGEN_SIZE
+        self.handler = None
+        self.card_table = rng.random() < 0.7
+        self.stdin = ""
+        self.build_seed = rng.getrandbits(32)
+        code: list[int] = []
+        sizes: dict[int, int] = {}   # register -> payload words of its object
+        objects = list(R_OBJ)
+
+        def alloc(r: int) -> None:
+            kind = rng.randrange(4)
+            if kind == 0:
+                code.append(encode_r(Op.ALLOC_CONS, r, 0, 0))
+                sizes[r] = 2
+            elif kind == 1:
+                n = rng.randrange(1, 7)
+                code.append(encode_x(Op.ALLOC, (r << 21) | (n << 16) | rng.randrange(4)))
+                sizes[r] = n
+            elif kind == 2:
+                n = rng.randrange(0, 6)
+                code.append(encode_i(Op.LI, 20, 0, tag_fixnum(n) & 0xFFFF))
+                code.append(encode_x(Op.ALLOCV, (r << 21) | (20 << 16) | 2))
+                sizes[r] = n + 1
+            else:
+                env = rng.randrange(4)
+                code.append(encode_x(Op.ALLOC_CLOSURE, (r << 21) | (21 << 16) | (env << 11)))
+                sizes[r] = 1 + env
+
+        def link() -> None:
+            a, b = rng.choice(objects), rng.choice(objects)
+            n = sizes[a]
+            field = n - 1 if rng.random() < 0.5 else rng.randrange(n)
+            op = rng.choice((Op.ST_WB, Op.ST_WB, Op.ST_WB, Op.ST))
+            code.append(encode_s(op, a, b, field))
+
+        for r in objects:
+            alloc(r)
+        for _ in range(12):
+            link()
+        for _ in range(rng.randrange(150, 250)):
+            x = rng.random()
+            if x < 0.4:   # garbage
+                if rng.random() < 0.5:
+                    code.append(encode_r(Op.ALLOC_CONS, 24, 0, 0))
+                else:
+                    code.append(encode_x(Op.ALLOC, (24 << 21) | (rng.randrange(1, 6) << 16)))
+            elif x < 0.55:
+                alloc(rng.choice(objects))
+            elif x < 0.85:
+                link()
+            else:
+                a = rng.choice(objects)
+                code.append(encode_i(Op.LD, 23, a, rng.randrange(sizes[a])))
+        code.append(encode_x(Op.HALT_NOP, 0))
+        self.code = code
 
 
 def _call(fn, *args, **kwargs):
@@ -620,10 +697,12 @@ def _state(made, out, *, full: bool):
     return {"tiles": [tile_state(t, full=full) for t in tiles], "output": out.getvalue()}
 
 
-def _stream_seeds(first: int, count: int, *, threads: int, tiles: int, steps: int):
+def _stream_seeds(first: int, count: int, *, threads: int, tiles: int, steps: int,
+                  collector: bool = False, graph: bool = False):
     def run():
         for seed in range(first, first + count):
-            stream = _Stream(seed, threads=threads, tiles=tiles)
+            stream = (_GraphStream(seed) if graph else
+                      _Stream(seed, threads=threads, tiles=tiles, collector=collector))
             ref, ref_out = stream.build((reference.Emulator, reference.Cluster))
             chip, chip_out = stream.build((chiplet.Emulator, chiplet.Cluster))
             calls = random.Random(seed * 7919)
@@ -667,6 +746,17 @@ for _first in range(1000, 1120, 20):
 for _first in range(2000, 2080, 20):
     test("streams.cluster.%04d-%04d" % (_first, _first + 19), batch="chiplet_streams",
          timeout=300.0)(_stream_seeds(_first, 20, threads=2, tiles=2, steps=60))
+for _first in range(3000, 3200, 25):
+    test("streams.collector.%04d-%04d" % (_first, _first + 24), batch="chiplet_streams",
+         timeout=300.0)(_stream_seeds(_first, 25, threads=1, tiles=1, steps=600,
+                                      collector=True))
+for _first in range(5000, 5100, 25):
+    test("streams.graph.%04d-%04d" % (_first, _first + 24), batch="chiplet_streams",
+         timeout=300.0)(_stream_seeds(_first, 25, threads=1, tiles=1, steps=2000, graph=True))
+for _first in range(4000, 4060, 20):
+    test("streams.collector_threads.%04d-%04d" % (_first, _first + 19), batch="chiplet_streams",
+         timeout=300.0)(_stream_seeds(_first, 20, threads=3, tiles=1, steps=80,
+                                      collector=True))
 
 
 @test("streams.library_matches_sources", batch="chiplet_streams")
