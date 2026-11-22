@@ -132,6 +132,10 @@ private:
         used_ += 1;
         unsigned done = 0;
         const int code = m_.link_host->mem(m_.link_host->ctx, addr, 3, len, wen, data, &done);
+        if (wen && s_.tracing) {
+            const unsigned landed = code == MP64_CHIPLET_OK ? len + 1 : std::min(done, len + 1);
+            for (unsigned i = 0; i < landed; ++i) s_.trace.emplace_back(addr + 8 * i, data[i]);
+        }
         if (code == MP64_CHIPLET_OK) return true;
         link_failed_ = true;
         failed_addr_ = addr;

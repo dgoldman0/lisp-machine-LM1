@@ -335,6 +335,13 @@ LM1C_API int lm1c_md_write(lm1c_model *model, uint64_t addr, uint64_t value);
 LM1C_API int lm1c_md_churn(lm1c_model *model, uint64_t addr, uint64_t a, uint64_t b,
                            uint64_t times);
 
+/* While ON, record every word the stand-in writes across the link.
+   lm1c_md_trace_take copies at most CAPACITY (address, value) pairs, oldest
+   first, sets *COUNT to the pairs recorded, and forgets what it copied. */
+LM1C_API int lm1c_md_trace(lm1c_model *model, int on);
+LM1C_API int lm1c_md_trace_take(lm1c_model *model, uint64_t *pairs, uint64_t capacity,
+                                uint64_t *count);
+
 enum lm1c_md_field {
     LM1C_MD_PHASE = 0,        /* 0 off, 1 offered, 2 granted, 3 serving, 4 failed, 5 broken */
     LM1C_MD_EPOCH,            /* holds ended */

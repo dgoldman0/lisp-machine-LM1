@@ -437,6 +437,27 @@ LM1C_API int lm1c_md_churn(lm1c_model *model, uint64_t addr, uint64_t a, uint64_
     return LM1C_OK;
 }
 
+LM1C_API int lm1c_md_trace(lm1c_model *model, int on) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    model->standin.tracing = on != 0;
+    if (!on) model->standin.trace.clear();
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_md_trace_take(lm1c_model *model, uint64_t *pairs, uint64_t capacity,
+                                uint64_t *count) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    auto &trace = model->standin.trace;
+    *count = trace.size();
+    const size_t n = size_t(std::min<uint64_t>(capacity, trace.size()));
+    for (size_t i = 0; i < n; ++i) {
+        pairs[2 * i] = trace[i].first;
+        pairs[2 * i + 1] = trace[i].second;
+    }
+    trace.erase(trace.begin(), trace.begin() + std::ptrdiff_t(n));
+    return LM1C_OK;
+}
+
 LM1C_API int lm1c_md_get(const lm1c_model *model, int field, uint64_t *value) {
     if (model == nullptr) return LM1C_BAD_INDEX;
     const Standin &s = model->standin;

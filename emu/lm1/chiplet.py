@@ -297,6 +297,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_md_write": (i32, [p, u64, u64]),
         "lm1c_md_churn": (i32, [p, u64, u64, u64, u64]),
         "lm1c_md_get": (i32, [p, i32, pu64]),
+        "lm1c_md_trace": (i32, [p, i32]),
+        "lm1c_md_trace_take": (i32, [p, pu64, u64, pu64]),
     }
     for name, (restype, argtypes) in sig.items():
         fn = getattr(lib, name)
@@ -370,6 +372,20 @@ class Model:
     def md_write(self, addr: int, value: int) -> None:
         """A word written as LM-1's store would, at the next step."""
         _check(self._lib.lm1c_md_write(self._handle, addr, value & WORD_MASK), "md_write")
+
+    def md_trace(self, on: bool) -> None:
+        """Record every word the stand-in writes across the link."""
+        _check(self._lib.lm1c_md_trace(self._handle, int(on)), "md_trace")
+
+    def md_trace_take(self) -> list[tuple[int, int]]:
+        """The (address, value) pairs recorded since the last take."""
+        count = ctypes.c_uint64()
+        _check(self._lib.lm1c_md_trace_take(self._handle, None, 0, ctypes.byref(count)),
+               "md_trace_take")
+        pairs = (ctypes.c_uint64 * (2 * count.value + 2))()
+        _check(self._lib.lm1c_md_trace_take(self._handle, pairs, count.value, ctypes.byref(count)),
+               "md_trace_take")
+        return [(pairs[2 * i], pairs[2 * i + 1]) for i in range(count.value)]
 
     def md_churn(self, addr: int, a: int, b: int, times: int) -> None:
         """A and B written in turn into ADDR, one write a step."""

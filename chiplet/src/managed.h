@@ -172,6 +172,11 @@ struct Standin {
     };
     std::vector<Churn> churns;
 
+    // The test hook's record of every word the stand-in writes across the
+    // link, in order, as (address, value), while tracing is on.  Not saved.
+    bool tracing = false;
+    std::vector<std::pair<u64, u64>> trace;
+
     // What happened, for tests.
     u64 holds_done = 0, notices = 0, last_notice_kind = 0, last_notice_arg = 0;
     u64 last_notice_addr = 0, objects_moved = 0, grows = 0, returns = 0;
