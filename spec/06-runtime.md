@@ -518,7 +518,7 @@ Full-heap GC across chips uses the same algorithmic framework but with higher co
 
 ## 12. The Managed-Data Service
 
-**Status:** decided on 2026-11-20; not built.
+**Status:** decided on 2026-11-20. The runtime is not built; until it is, the chiplet module's stand-in for it serves the function natively (design/chiplet-module.md, decision A), recovery's stage 0 included.
 
 The runtime serves managed data for MegaPad ([05-memory-gc.md](05-memory-gc.md) § 12) as the function of class `MANAGED`, whose records and requests are specified in MegaPad's `docs/managed-data.md` § 9 and § 10.
 

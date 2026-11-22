@@ -1,7 +1,8 @@
 # LM-1 Chiplet Module: Plan for Part 8d
 
 **Status:** Accepted, 2026-11-22. Items marked Decided cite the decision;
-section 5 records the decisions this plan rests on.
+section 5 records the decisions this plan rests on. All three stages are
+built (2026-11-22); section 3 says what each left for later.
 
 ---
 
@@ -145,11 +146,30 @@ built beside it (decision B):
 The stand-in's minor collection of LM-1's own nursery takes the division
 that `spec/04-soc.md` § 4.3 gives the runtime in this stage as well: a
 thread whose chunk of the nursery runs out gets another from the nursery's
-free space, and the stand-in collects only when none is left. Until then it
-collects when a thread's equal slice runs out, as the reference does.
+free space, and the stand-in collects only when none is left. The Python
+reference divides its nursery the same way, so the two models still agree
+step for step.
 
 Tests are the 27 conformance tests of `docs/managed-data.md` § 15, run
 through the real code at both ends in the emulator and the simulator.
+
+*Built.* With `runtime=1` in its configuration the module's stand-in
+(`chiplet/src/managed.cpp`) reads the control block, offers managed data
+and serves it as this stage lists, and MegaPad's `chiplet.f` is its other
+end. MegaPad's `tests/test_managed_data.py` runs the 27 tests through both:
+21 in the emulator and the simulator alike, and the six that need a second
+MegaPad core in the emulator, until the simulator has several cores. The
+same file checks a moving hold's writes against recovery's stage 0 order,
+through a hook that records every word the stand-in writes, and saves and
+restores the port while the function serves. The runtime stays off by
+default, since the link's shared cases also run on the RTL, where nothing
+reads the control block. A step of the module stands for `unit_ns` times
+its budget of LM-1's time, set so that LM-1's clock keeps within a small
+factor of MegaPad's in both of MegaPad's models. Left for later: recovery's
+stage 1 and beyond, with MegaPad's never-free engine; `KIND`, which the
+stand-in never needs, since it puts no kinds of its own in the shared heap;
+the field kinds of LM-1 code's stores, which no LM-1 code makes yet; and
+the stand-in's tasks, which wait for the link's layer for jobs.
 
 *Estimate: 20 to 35 agent hours for both ends.*
 
