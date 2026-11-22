@@ -33,6 +33,10 @@
 //   it.  MegaPad's own writes still land while LM-1 is stopped.
 // - Reset returns the model to the state its configuration gives it, every
 //   thread halted and nothing lent.
+// - With runtime=1 in the configuration, the stand-in for LM-1's runtime
+//   (managed.cpp) comes up once the image is in: it reads the control block
+//   the boot argument names, takes the doorbells from queue 0, and serves
+//   managed data on the queues MegaPad grants.
 //
 // A step's budget counts LM-1's own units: one instruction of any thread,
 // or one memory request of the boot fetch.  Threads run in round-robin,
@@ -209,6 +213,7 @@ bool work_waits(const Model &m) {
     if (l.boot == Boot::Fetch) return true;
     if (l.boot != Boot::Running) return false;
     if (m.tiles[LINK_TILE].queues[QUEUE_OUT].size() > 0) return true;
+    if (standin_waits(m)) return true;
     for (const Tile &tile : m.tiles) {
         for (const Thread &t : tile.threads) {
             if (can_run(m, t)) return true;
@@ -268,8 +273,13 @@ int step(void *self, uint32_t budget) {
     }
     tell(m);
     if (l.boot == Boot::Running) {
+        // The runtime's stand-in, when configured, serves the link's queues
+        // first; LM-1's threads take what the step has left.
+        m.in_step = true;
+        left = standin_step(m, left);
         left = run_threads(m, left);
         ring_out(m);
+        m.in_step = false;
     }
     return work_waits(m) ? 1 : 0;
 }
@@ -323,7 +333,10 @@ int restore(void *self, const uint8_t *buffer, size_t length) {
     return 1;
 }
 
-void destroy(void *self) { delete static_cast<lm1c_model *>(self); }
+void destroy(void *self) {
+    unregister_module_model(static_cast<lm1c_model *>(self));
+    delete static_cast<lm1c_model *>(self);
+}
 
 }  // namespace
 
@@ -349,6 +362,7 @@ LM1C_API int mp64_chiplet_create(const char *config, mp64_chiplet_module *out) {
         delete model;
         return 1;
     }
+    register_module_model(model);
     *out = mp64_chiplet_module{};
     out->abi = MP64_CHIPLET_ABI;
     out->self = model;

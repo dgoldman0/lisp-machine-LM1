@@ -17,7 +17,7 @@ namespace lm1 {
 namespace {
 
 constexpr char MAGIC[8] = {'L', 'M', '1', 'C', 'H', 'I', 'P', 'S'};
-constexpr uint32_t VERSION = 2;  // 2: a tile's queue base
+constexpr uint32_t VERSION = 3;  // 2: a tile's queue base; 3: the runtime's stand-in
 
 class Writer {
 public:
@@ -136,6 +136,7 @@ public:
         return true;
     }
     bool done() const { return at_ == end_; }
+    size_t left() const { return size_t(end_ - at_); }
 
 private:
     const uint8_t *at_;
@@ -250,6 +251,271 @@ bool restore_tile(Reader &r, Tile &tile, size_t queue_depth) {
     return true;
 }
 
+// ---- The stand-in for LM-1's runtime (managed.h) ----
+
+void save_queue(Writer &w, const LinkQueue &q) {
+    w.word64(q.ring);
+    w.word64(q.head_word);
+    w.word64(q.capacity);
+    w.word64(q.count);
+    w.word64(q.other);
+}
+
+bool restore_queue(Reader &r, LinkQueue &q) {
+    return r.word64(q.ring) && r.word64(q.head_word) && r.word64(q.capacity) && r.word64(q.count) &&
+           r.word64(q.other);
+}
+
+void save_pair(Writer &w, const LinkPair &p) {
+    w.flag(p.valid);
+    save_queue(w, p.in);
+    save_queue(w, p.out);
+    w.word64(p.notify);
+}
+
+bool restore_pair(Reader &r, LinkPair &p) {
+    return r.flag(p.valid) && restore_queue(r, p.in) && restore_queue(r, p.out) && r.word64(p.notify);
+}
+
+void save_entry(Writer &w, const QEntry &e) {
+    for (u64 v : e.w) w.word64(v);
+}
+
+bool restore_entry(Reader &r, QEntry &e) {
+    for (u64 &v : e.w) {
+        if (!r.word64(v)) return false;
+    }
+    return true;
+}
+
+void save_map(Writer &w, const std::map<u64, u64> &m) {
+    w.word64(m.size());
+    for (const auto &kv : m) {
+        w.word64(kv.first);
+        w.word64(kv.second);
+    }
+}
+
+// A count read from a state is never trusted to size an allocation beyond
+// what the rest of the state could hold.
+bool count_fits(Reader &r, uint64_t count, size_t each) { return count <= r.left() / each; }
+
+bool restore_map(Reader &r, std::map<u64, u64> &m) {
+    uint64_t n;
+    if (!r.word64(n) || !count_fits(r, n, 16)) return false;
+    m.clear();
+    for (uint64_t i = 0; i < n; ++i) {
+        u64 k, v;
+        if (!r.word64(k) || !r.word64(v)) return false;
+        m[k] = v;
+    }
+    return true;
+}
+
+void save_extents(Writer &w, const std::vector<Extent> &v) {
+    w.word64(v.size());
+    for (const Extent &x : v) {
+        w.word64(x.base);
+        w.word64(x.limit);
+    }
+}
+
+bool restore_extents(Reader &r, std::vector<Extent> &v) {
+    uint64_t n;
+    if (!r.word64(n) || !count_fits(r, n, 16)) return false;
+    v.assign(size_t(n), Extent{});
+    for (Extent &x : v) {
+        if (!r.word64(x.base) || !r.word64(x.limit)) return false;
+    }
+    return true;
+}
+
+void save_hold_ask(Writer &w, const HoldAsk &a) {
+    w.word64(a.mode);
+    w.word64(a.keep_ns);
+    w.flag(a.from_core);
+    w.word64(a.core);
+    w.word64(a.tag);
+}
+
+bool restore_hold_ask(Reader &r, HoldAsk &a) {
+    return r.word64(a.mode) && r.word64(a.keep_ns) && r.flag(a.from_core) && r.word64(a.core) &&
+           r.word64(a.tag);
+}
+
+void save_standin(Writer &w, const Standin &s) {
+    w.byte(uint8_t(s.phase));
+    w.word64(s.clock_ns);
+    w.word64(s.control_block);
+    save_pair(w, s.control);
+    save_pair(w, s.grant);
+    w.word64(s.outbox.size());
+    for (const Outgoing &o : s.outbox) {
+        w.word64(o.pair);
+        save_entry(w, o.entry);
+    }
+    w.word64(s.next_tag);
+    w.word64(s.offer_tag);
+    save_map(w, s.asked);
+    w.flag(s.grow_asked);
+    w.word64(s.records);
+    w.word64(s.cores);
+    w.word64(s.core_table);
+    w.word64(s.lm1_block);
+    w.word64(s.handle_dir);
+    w.word64(s.core.size());
+    for (const MdCore &c : s.core) {
+        w.flag(c.pair_known);
+        save_pair(w, c.pair);
+        w.word64(c.grants.size());
+        for (const Grant &g : c.grants) {
+            w.word64(g.base);
+            w.word64(g.limit);
+            w.flag(g.left);
+            w.word64(g.fill);
+        }
+        w.word64(c.next_serial);
+        w.word64(c.log_head);
+        w.word64(c.tail_seen);
+        w.word64(c.region_size);
+        w.word64(c.recorded_region);
+        w.word64(c.asked_epoch);
+        w.flag(c.makes_objects);
+        w.flag(c.waited);
+        w.flag(c.noticed);
+        w.flag(c.region_parked);
+        w.word64(c.parked_tag);
+        w.word64(c.parked_bytes);
+    }
+    save_extents(w, s.blocks);
+    save_map(w, s.free);
+    save_map(w, s.old);
+    save_map(w, s.young);
+    save_extents(w, s.runs);
+    w.word64(s.remembered.size());
+    for (u64 a : s.remembered) w.word64(a);
+    w.word64(s.young_since);
+    w.word64(s.live_bytes);
+    w.word64(s.shapes.size());
+    for (const MdShape &sh : s.shapes) {
+        w.word64(sh.id);
+        w.word64(sh.tagged);
+        w.word64(sh.raw);
+        w.word64(sh.kinds.size());
+        for (u64 k : sh.kinds) w.word64(k);
+        w.text(sh.name);
+    }
+    w.word64(s.next_shape);
+    w.word64(s.hold_word);
+    w.byte(uint8_t(s.hold));
+    save_hold_ask(w, s.current);
+    w.word64(s.holds.size());
+    for (const HoldAsk &a : s.holds) save_hold_ask(w, a);
+    w.word64(s.held_at_ns);
+    w.word64(s.keep_until_ns);
+    w.word64(s.gap_until_ns);
+    w.word64(s.move_word);
+    w.word64(s.pokes.size());
+    for (const auto &p : s.pokes) {
+        w.word64(p.first);
+        w.word64(p.second);
+    }
+    w.word64(s.churns.size());
+    for (const Standin::Churn &c : s.churns) {
+        w.word64(c.addr);
+        w.word64(c.a);
+        w.word64(c.b);
+        w.word64(c.left);
+        w.word64(c.turn);
+    }
+    for (u64 v : {s.holds_done, s.notices, s.last_notice_kind, s.last_notice_arg, s.last_notice_addr,
+                  s.objects_moved, s.grows, s.returns, s.why, s.why_addr, s.wakes})
+        w.word64(v);
+}
+
+bool restore_standin(Reader &r, Standin &s) {
+    uint8_t phase, hold;
+    uint64_t n;
+    if (!r.byte(phase) || phase > uint8_t(MdPhase::Broken) || !r.word64(s.clock_ns) ||
+        !r.word64(s.control_block) || !restore_pair(r, s.control) || !restore_pair(r, s.grant) ||
+        !r.word64(n) || !count_fits(r, n, 72))
+        return false;
+    s.phase = MdPhase(phase);
+    s.outbox.assign(size_t(n), Outgoing{});
+    for (Outgoing &o : s.outbox) {
+        if (!r.word64(o.pair) || !restore_entry(r, o.entry)) return false;
+    }
+    if (!r.word64(s.next_tag) || !r.word64(s.offer_tag) || !restore_map(r, s.asked) || !r.flag(s.grow_asked) ||
+        !r.word64(s.records) || !r.word64(s.cores) || !r.word64(s.core_table) || !r.word64(s.lm1_block) ||
+        !r.word64(s.handle_dir) || !r.word64(n) || !count_fits(r, n, 64))
+        return false;
+    s.core.assign(size_t(n), MdCore{});
+    for (MdCore &c : s.core) {
+        uint64_t g;
+        if (!r.flag(c.pair_known) || !restore_pair(r, c.pair) || !r.word64(g) || !count_fits(r, g, 25))
+            return false;
+        c.grants.assign(size_t(g), Grant{});
+        for (Grant &x : c.grants) {
+            if (!r.word64(x.base) || !r.word64(x.limit) || !r.flag(x.left) || !r.word64(x.fill)) return false;
+        }
+        if (!r.word64(c.next_serial) || !r.word64(c.log_head) || !r.word64(c.tail_seen) ||
+            !r.word64(c.region_size) || !r.word64(c.recorded_region) || !r.word64(c.asked_epoch) ||
+            !r.flag(c.makes_objects) ||
+            !r.flag(c.waited) || !r.flag(c.noticed) || !r.flag(c.region_parked) || !r.word64(c.parked_tag) ||
+            !r.word64(c.parked_bytes))
+            return false;
+    }
+    if (!restore_extents(r, s.blocks) || !restore_map(r, s.free) || !restore_map(r, s.old) ||
+        !restore_map(r, s.young) || !restore_extents(r, s.runs) || !r.word64(n) || !count_fits(r, n, 8))
+        return false;
+    s.remembered.clear();
+    for (uint64_t i = 0; i < n; ++i) {
+        u64 a;
+        if (!r.word64(a)) return false;
+        s.remembered.insert(a);
+    }
+    if (!r.word64(s.young_since) || !r.word64(s.live_bytes) || !r.word64(n) || !count_fits(r, n, 40))
+        return false;
+    s.shapes.assign(size_t(n), MdShape{});
+    for (MdShape &sh : s.shapes) {
+        uint64_t k;
+        if (!r.word64(sh.id) || !r.word64(sh.tagged) || !r.word64(sh.raw) || !r.word64(k) ||
+            !count_fits(r, k, 8))
+            return false;
+        sh.kinds.assign(size_t(k), 0);
+        for (u64 &v : sh.kinds) {
+            if (!r.word64(v)) return false;
+        }
+        if (!r.text(sh.name)) return false;
+    }
+    if (!r.word64(s.next_shape) || !r.word64(s.hold_word) || !r.byte(hold) || hold > uint8_t(HoldPhase::Active) ||
+        !restore_hold_ask(r, s.current) || !r.word64(n) || !count_fits(r, n, 33))
+        return false;
+    s.hold = HoldPhase(hold);
+    s.holds.assign(size_t(n), HoldAsk{});
+    for (HoldAsk &a : s.holds) {
+        if (!restore_hold_ask(r, a)) return false;
+    }
+    if (!r.word64(s.held_at_ns) || !r.word64(s.keep_until_ns) || !r.word64(s.gap_until_ns) ||
+        !r.word64(s.move_word) || !r.word64(n) || !count_fits(r, n, 16))
+        return false;
+    s.pokes.assign(size_t(n), {0, 0});
+    for (auto &p : s.pokes) {
+        if (!r.word64(p.first) || !r.word64(p.second)) return false;
+    }
+    if (!r.word64(n) || !count_fits(r, n, 40)) return false;
+    s.churns.assign(size_t(n), Standin::Churn{});
+    for (Standin::Churn &c : s.churns) {
+        if (!r.word64(c.addr) || !r.word64(c.a) || !r.word64(c.b) || !r.word64(c.left) || !r.word64(c.turn))
+            return false;
+    }
+    for (u64 *v : {&s.holds_done, &s.notices, &s.last_notice_kind, &s.last_notice_arg, &s.last_notice_addr,
+                   &s.objects_moved, &s.grows, &s.returns, &s.why, &s.why_addr, &s.wakes}) {
+        if (!r.word64(*v)) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 std::vector<uint8_t> save_state(const Model &m) {
@@ -280,6 +546,7 @@ std::vector<uint8_t> save_state(const Model &m) {
     w.word64(l.doorbells_out);
     w.word64(l.doorbells_dropped);
     for (const Tile &tile : m.tiles) save_tile(w, tile);
+    save_standin(w, m.standin);
     return w.take();
 }
 
@@ -316,9 +583,10 @@ bool restore_state(Model &m, const uint8_t *data, size_t size) {
     for (Tile &tile : fresh.tiles) {
         if (!restore_tile(r, tile, fresh.queue_depth)) return false;
     }
-    if (!r.done()) return false;
+    if (!restore_standin(r, fresh.standin) || !r.done()) return false;
     m.tiles = std::move(fresh.tiles);
     m.link = std::move(fresh.link);
+    m.standin = std::move(fresh.standin);
     m.trap = {};
     m.stop = {};
     return true;

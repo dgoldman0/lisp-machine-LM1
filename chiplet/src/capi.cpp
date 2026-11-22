@@ -1,8 +1,10 @@
 // LM-1 chiplet module: the core model's C interface (include/lm1_chiplet.h).
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "model.h"
 
@@ -364,6 +366,105 @@ LM1C_API int lm1c_link_lend(lm1c_model *model, uint32_t index, uint64_t base, ui
 LM1C_API int lm1c_link_fault(const lm1c_model *model, lm1c_result *first) {
     if (model == nullptr) return LM1C_BAD_INDEX;
     *first = model->link.first_fault;
+    return LM1C_OK;
+}
+
+}  // extern "C"
+
+// ---- The stand-in's test hooks ----
+
+namespace lm1 {
+
+namespace {
+
+std::mutex registry_lock;
+std::vector<lm1c_model *> registry;
+
+}  // namespace
+
+void register_module_model(lm1c_model *model) {
+    std::lock_guard<std::mutex> guard(registry_lock);
+    registry.push_back(model);
+}
+
+void unregister_module_model(lm1c_model *model) {
+    std::lock_guard<std::mutex> guard(registry_lock);
+    registry.erase(std::remove(registry.begin(), registry.end(), model), registry.end());
+}
+
+}  // namespace lm1
+
+extern "C" {
+
+LM1C_API lm1c_model *lm1c_chiplet_find(uint64_t id) {
+    std::lock_guard<std::mutex> guard(lm1::registry_lock);
+    for (auto it = lm1::registry.rbegin(); it != lm1::registry.rend(); ++it) {
+        if ((*it)->config.hook_id == id) return *it;
+    }
+    return nullptr;
+}
+
+LM1C_API int lm1c_md_hold(lm1c_model *model, uint32_t mode, uint64_t keep_ns) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    if (mode > 3) return LM1C_BAD_VALUE;
+    HoldAsk a;
+    a.mode = mode;
+    a.keep_ns = keep_ns;
+    model->standin.holds.push_back(a);
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_md_write(lm1c_model *model, uint64_t addr, uint64_t value) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    if (addr % 8 != 0) return LM1C_BAD_VALUE;
+    model->standin.pokes.emplace_back(addr, value);
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_md_churn(lm1c_model *model, uint64_t addr, uint64_t a, uint64_t b,
+                           uint64_t times) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    if (addr % 8 != 0) return LM1C_BAD_VALUE;
+    Standin::Churn c;
+    c.addr = addr;
+    c.a = a;
+    c.b = b;
+    c.left = times;
+    model->standin.churns.push_back(c);
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_md_get(const lm1c_model *model, int field, uint64_t *value) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    const Standin &s = model->standin;
+    u64 heap = 0, free = 0;
+    for (const Extent &b : s.blocks) heap += b.limit - b.base;
+    for (const auto &f : s.free) free += f.second - f.first;
+    switch (field) {
+    case LM1C_MD_PHASE: *value = u64(s.phase); break;
+    case LM1C_MD_EPOCH: *value = s.hold_word >> 3; break;
+    case LM1C_MD_HOLD: *value = s.hold_word; break;
+    case LM1C_MD_MOVE: *value = s.move_word; break;
+    case LM1C_MD_LIVE_BYTES: *value = s.live_bytes; break;
+    case LM1C_MD_OLD_OBJECTS: *value = s.old.size(); break;
+    case LM1C_MD_YOUNG_OBJECTS: *value = s.young.size(); break;
+    case LM1C_MD_BLOCKS: *value = s.blocks.size(); break;
+    case LM1C_MD_HEAP_BYTES: *value = heap; break;
+    case LM1C_MD_FREE_BYTES: *value = free; break;
+    case LM1C_MD_NOTICES: *value = s.notices; break;
+    case LM1C_MD_NOTICE_KIND: *value = s.last_notice_kind; break;
+    case LM1C_MD_NOTICE_ARG: *value = s.last_notice_arg; break;
+    case LM1C_MD_NOTICE_ADDR: *value = s.last_notice_addr; break;
+    case LM1C_MD_MOVED: *value = s.objects_moved; break;
+    case LM1C_MD_GROWS: *value = s.grows; break;
+    case LM1C_MD_RETURNS: *value = s.returns; break;
+    case LM1C_MD_WHY: *value = s.why; break;
+    case LM1C_MD_WHY_ADDR: *value = s.why_addr; break;
+    case LM1C_MD_SHAPES: *value = s.shapes.size(); break;
+    case LM1C_MD_CLOCK_NS: *value = s.clock_ns; break;
+    case LM1C_MD_WAKES: *value = s.wakes; break;
+    default: return LM1C_BAD_FIELD;
+    }
     return LM1C_OK;
 }
 

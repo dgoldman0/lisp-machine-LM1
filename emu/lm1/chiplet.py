@@ -62,6 +62,15 @@ HOST_OK, HOST_IO_ERROR, HOST_FAIL = 0, 1, 2
 
 BLOCK_SIZE = 4096
 
+# Managed data's stand-in (enum lm1c_md_field), and the hook's mode that
+# holds without collecting, and keeps a hold for ever.
+(MD_PHASE, MD_EPOCH, MD_HOLD, MD_MOVE, MD_LIVE_BYTES, MD_OLD_OBJECTS, MD_YOUNG_OBJECTS,
+ MD_BLOCKS, MD_HEAP_BYTES, MD_FREE_BYTES, MD_NOTICES, MD_NOTICE_KIND, MD_NOTICE_ARG,
+ MD_NOTICE_ADDR, MD_MOVED, MD_GROWS, MD_RETURNS, MD_WHY, MD_WHY_ADDR, MD_SHAPES,
+ MD_CLOCK_NS, MD_WAKES) = range(22)
+MD_HOLD_ONLY = 3
+MD_FOR_EVER = (1 << 64) - 1
+
 
 class ChipletBuildError(RuntimeError):
     """The library could not be built from the checkout's sources."""
@@ -283,6 +292,11 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_link_lend": (i32, [p, u32, u64, u64, i32]),
         "lm1c_link_fault": (i32, [p, c.POINTER(_Result)]),
         "mp64_chiplet_create": (i32, [c.c_char_p, c.POINTER(_ChipletModule)]),
+        "lm1c_chiplet_find": (p, [u64]),
+        "lm1c_md_hold": (i32, [p, u32, u64]),
+        "lm1c_md_write": (i32, [p, u64, u64]),
+        "lm1c_md_churn": (i32, [p, u64, u64, u64, u64]),
+        "lm1c_md_get": (i32, [p, i32, pu64]),
     }
     for name, (restype, argtypes) in sig.items():
         fn = getattr(lib, name)
@@ -341,6 +355,26 @@ class Model:
         """The lend port; returns the C interface's code, 0 when taken."""
         return self._lib.lm1c_link_lend(self._handle, index, base & WORD_MASK,
                                         limit & WORD_MASK, int(write))
+
+    # -- Managed data's stand-in and its test hooks --
+
+    def md(self, field: int) -> int:
+        out = ctypes.c_uint64()
+        _check(self._lib.lm1c_md_get(self._handle, field, ctypes.byref(out)), "md_get")
+        return out.value
+
+    def md_hold(self, mode: int, keep_ns: int = 0) -> None:
+        """A hold as soon as HOLD_GAP allows, kept ACTIVE KEEP_NS more."""
+        _check(self._lib.lm1c_md_hold(self._handle, mode, keep_ns & WORD_MASK), "md_hold")
+
+    def md_write(self, addr: int, value: int) -> None:
+        """A word written as LM-1's store would, at the next step."""
+        _check(self._lib.lm1c_md_write(self._handle, addr, value & WORD_MASK), "md_write")
+
+    def md_churn(self, addr: int, a: int, b: int, times: int) -> None:
+        """A and B written in turn into ADDR, one write a step."""
+        _check(self._lib.lm1c_md_churn(self._handle, addr, a & WORD_MASK, b & WORD_MASK, times),
+               "md_churn")
 
     def first_fault(self) -> _Result:
         result = _Result()
@@ -517,6 +551,14 @@ class Model:
 # ---------------------------------------------------------------------------
 # The chiplet module, as MegaPad's port bridge drives it
 # ---------------------------------------------------------------------------
+
+def attached_model(hook_id: int) -> "Model | None":
+    """A view of the model inside the chiplet module MegaPad's emulator or
+    simulator made with hook_id=HOOK_ID in its configuration, the most
+    recent of them, or None.  The view lasts while the module does."""
+    handle = library().lm1c_chiplet_find(hook_id)
+    return Model(_view_of=handle) if handle else None
+
 
 class Module:
     """A chiplet module made by mp64_chiplet_create from a configuration

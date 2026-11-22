@@ -51,6 +51,16 @@ const Key KEYS[] = {
     {"burst_words", &Config::burst_words},
     {"lend_ranges", &Config::lend_ranges},
     {"quanta", &Config::quanta},
+    {"runtime", &Config::runtime},
+    {"heap_block", &Config::heap_block},
+    {"queue_entries", &Config::queue_entries},
+    {"region_bytes", &Config::region_bytes},
+    {"window_limit", &Config::window_limit},
+    {"hold_limit", &Config::hold_limit},
+    {"hold_gap", &Config::hold_gap},
+    {"young_trigger", &Config::young_trigger},
+    {"unit_ns", &Config::unit_ns},
+    {"hook_id", &Config::hook_id},
 };
 
 // "BASE:LENGTH", two numbers.
@@ -166,6 +176,22 @@ bool parse_config(const char *text, Config &config, std::string &error) {
             error = "a lent range is empty or lies outside the first tile's memory";
             return false;
         }
+    }
+    // The stand-in: a queue holds at least one entry, and a block, a region
+    // and the three bounds are not empty.
+    if (config.runtime > 1) { error = "runtime is 0 or 1"; return false; }
+    if (config.queue_entries < 1 || config.queue_entries > 0xFFFFFFFFull) {
+        error = "queue_entries lies from 1 to 2^32 - 1";
+        return false;
+    }
+    if (config.heap_block < 64 || config.heap_block % 8 != 0 || config.region_bytes < 64 ||
+        config.region_bytes % 8 != 0) {
+        error = "heap_block and region_bytes are multiples of 8 from 64 up";
+        return false;
+    }
+    if (config.window_limit == 0 || config.hold_limit == 0 || config.hold_gap == 0) {
+        error = "window_limit, hold_limit and hold_gap are nanoseconds above zero";
+        return false;
     }
     return true;
 }

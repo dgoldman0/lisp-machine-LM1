@@ -16,10 +16,13 @@
 #include <vector>
 
 #include "lm1_chiplet.h"
+#include "managed.h"
 
 #if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "the model keeps memory as host words and reads bytes from them in place"
 #endif
+
+struct lm1c_model;
 
 namespace lm1 {
 
@@ -43,6 +46,7 @@ inline bool is_any_ref(u64 w) { u64 t = w & 7; return t == 1 || t == 3; }
 inline u64 ref_address(u64 w) { return w & REF_ADDR_MASK; }
 inline u64 make_ref(u64 addr, bool cons) { return (addr & REF_ADDR_MASK) | (cons ? TAG_CONS : TAG_REF); }
 inline bool is_header(u64 w) { return (w & 7) == 7; }
+constexpr u64 REF_METADATA = ~0ull << 51;  // bits 63:51 of a reference
 inline u64 header_size(u64 h) { return (h >> 8) & 0xFFFF; }
 inline u64 header_shape_id(u64 h) { return (h >> 24) & 0xFFFFFFFFull; }
 inline u64 header_subtype(u64 h) { return (h >> 3) & 0x1F; }
@@ -69,6 +73,8 @@ constexpr uint32_t TRAP_BAD_LENGTH = 0x11;
 constexpr uint32_t TRAP_IC_MISS = 0x20;
 constexpr uint32_t TRAP_QUEUE_FULL = 0x30;
 constexpr uint32_t TRAP_NO_ROUTE = 0x32;
+constexpr uint32_t TRAP_SHARED_STORE = 0x51;
+constexpr uint32_t TRAP_SHARED_REF = 0x61;
 constexpr uint32_t TRAP_UNIMPLEMENTED = 0x7E;
 // Codes below this vector through the trap table; TRAP #code from here up
 // is a system trap the core carries out itself.
@@ -193,6 +199,25 @@ struct Config {
     u64 lend_ranges = 2;
     u64 quanta = 1;
     std::vector<std::pair<u64, u64>> lend;
+    // The stand-in for LM-1's runtime (managed.cpp): whether it serves the
+    // control queues MegaPad names at release, and its sizes and bounds.
+    // Times are nanoseconds of LM-1's time, of which each step of the
+    // chiplet module stands for its budget times unit_ns.
+    u64 runtime = 0;
+    u64 heap_block = 0x40000;     // the shared heap's first block, asked in the OFFER
+    u64 queue_entries = 4;        // entries asked for in each work queue
+    u64 region_bytes = 0x1000;    // a core's region by default
+    u64 window_limit = 1000000;   // WINDOW_LIMIT, HOLD_LIMIT and HOLD_GAP
+    u64 hold_limit = 1000000;
+    u64 hold_gap = 100000;
+    u64 young_trigger = 0;        // MegaPad's bytes between young collections; 0: half the heap
+    // The nanoseconds of LM-1's time a unit of a step's budget stands for.
+    // MegaPad's emulator steps a chiplet about every 13 microseconds of its
+    // own time with a budget of 64 units, and the hosted simulator about
+    // every 20 microseconds of a test's clock (measured 2026-11-22), so 200
+    // keeps LM-1's clock and MegaPad's within a small factor of each other.
+    u64 unit_ns = 200;
+    u64 hook_id = 0;              // names the model to the test hooks
 };
 
 // Parses a configuration string; on failure returns false with a reason.
@@ -236,8 +261,13 @@ struct Model {
     PendingTrap trap;
     lm1c_result stop = {};  // why the run is ending, once a step says Stop
     Link link;
+    // The stand-in for LM-1's runtime at the link (managed.h).
+    Standin standin;
     // MegaPad's services, when the model is a chiplet module; not state.
     const struct mp64_chiplet_host *link_host = nullptr;
+    // Whether a step of the chiplet module runs, the one time LM-1 may
+    // reach MegaPad's memory; not state.
+    bool in_step = false;
 
     explicit Model(const Config &config);
 
@@ -265,6 +295,10 @@ struct Model {
     Flow memory_fault(u128 address);
     Flow host_failure();
 };
+
+// The models mp64_chiplet_create made, which lm1c_chiplet_find searches.
+void register_module_model(lm1c_model *model);
+void unregister_module_model(lm1c_model *model);
 
 // The whole state of a model, for the chiplet module's save and restore
 // (state.cpp).  restore_state leaves MODEL unchanged when it fails.

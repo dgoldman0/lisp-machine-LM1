@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /* Raised when a function of this interface changes or is added. */
-#define LM1C_INTERFACE_VERSION 2
+#define LM1C_INTERFACE_VERSION 3
 
 #define LM1C_OK          0
 #define LM1C_BAD_INDEX  (-1)  /* no such tile, thread, register or entry */
@@ -290,6 +290,71 @@ LM1C_API int lm1c_link_lend(lm1c_model *model, uint32_t index, uint64_t base,
 /* How the first thread to end on a trap no handler answers, or on a
    fault, ended: a result as lm1c_run gives one, with its tile and thread. */
 LM1C_API int lm1c_link_fault(const lm1c_model *model, lm1c_result *first);
+
+/*
+ * The stand-in for LM-1's runtime (src/managed.cpp), in a model made by
+ * mp64_chiplet_create with runtime=1 in its configuration, which these keys
+ * also size, each time in nanoseconds of LM-1's time, of which each step of
+ * the module stands for its budget times unit_ns:
+ *   runtime=0          1: the stand-in serves the queues the control block
+ *                      that the boot argument names, and offers managed data
+ *   heap_block=0x40000 bytes of the shared heap's first block, asked for
+ *   queue_entries=4    entries asked for in each work queue
+ *   region_bytes=4K    a core's allocation region by default
+ *   window_limit=1000000 hold_limit=1000000 hold_gap=100000
+ *   young_trigger=0    bytes of regions between LM-1's own young
+ *                      collections; 0 for half the heap
+ *   unit_ns=200        nanoseconds a unit of a step's budget stands for,
+ *                      about what MegaPad's emulator and simulator give a
+ *                      unit of the default budget of 64
+ *   hook_id=0          the number by which lm1c_chiplet_find finds the model
+ *
+ * Managed data's test hooks (MegaPad's docs/managed-data.md section 15) work
+ * between steps and take effect in the next one.
+ */
+/* The live model that mp64_chiplet_create made with hook_id ID, the most
+   recent of them, or NULL.  The model stays the module's: it goes when
+   MegaPad destroys the module. */
+LM1C_API lm1c_model *lm1c_chiplet_find(uint64_t id);
+/* A hold LM-1 takes as soon as HOLD_GAP allows: MODE 0 collects the young
+   objects, 1 the whole shared heap, 2 the whole heap moving every object it
+   can, and 3 collects nothing.  Once ACTIVE and its work done, it stays
+   ACTIVE KEEP_NS more, or for ever with UINT64_MAX. */
+LM1C_API int lm1c_md_hold(lm1c_model *model, uint32_t mode, uint64_t keep_ns);
+/* LM-1 writes VALUE into the word at ADDR in MegaPad's memory, as its own
+   store would, through the link and its barrier. */
+LM1C_API int lm1c_md_write(lm1c_model *model, uint64_t addr, uint64_t value);
+/* LM-1 writes A, then B, then A again, one write a step, TIMES writes in
+   all, into the word at ADDR. */
+LM1C_API int lm1c_md_churn(lm1c_model *model, uint64_t addr, uint64_t a, uint64_t b,
+                           uint64_t times);
+
+enum lm1c_md_field {
+    LM1C_MD_PHASE = 0,        /* 0 off, 1 offered, 2 granted, 3 serving, 4 failed, 5 broken */
+    LM1C_MD_EPOCH,            /* holds ended */
+    LM1C_MD_HOLD,             /* the hold word as LM-1 last wrote it */
+    LM1C_MD_MOVE,             /* the move word as LM-1 last wrote it */
+    LM1C_MD_LIVE_BYTES,       /* as the last collection found them */
+    LM1C_MD_OLD_OBJECTS,      /* old objects in LM-1's index */
+    LM1C_MD_YOUNG_OBJECTS,    /* young objects walked and not yet collected */
+    LM1C_MD_BLOCKS,           /* blocks of the shared heap */
+    LM1C_MD_HEAP_BYTES,
+    LM1C_MD_FREE_BYTES,
+    LM1C_MD_NOTICES,          /* NOTICE requests LM-1 sent */
+    LM1C_MD_NOTICE_KIND,      /* the last one's ARG0, ARG1 and address */
+    LM1C_MD_NOTICE_ARG,
+    LM1C_MD_NOTICE_ADDR,
+    LM1C_MD_MOVED,            /* objects moved so far */
+    LM1C_MD_GROWS,            /* GROW requests MegaPad met */
+    LM1C_MD_RETURNS,          /* blocks returned */
+    LM1C_MD_WHY,              /* why the stand-in stopped serving, 0 while it serves */
+    LM1C_MD_WHY_ADDR,
+    LM1C_MD_SHAPES,           /* record kinds interned */
+    LM1C_MD_CLOCK_NS,         /* LM-1's time */
+    LM1C_MD_WAKES,            /* cores rung at a hold's end because they read WAITING */
+    LM1C_MD_FIELDS
+};
+LM1C_API int lm1c_md_get(const lm1c_model *model, int field, uint64_t *value);
 
 #ifdef __cplusplus
 }

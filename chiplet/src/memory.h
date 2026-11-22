@@ -12,8 +12,26 @@
 
 namespace lm1 {
 
+// An access to the shared heap of managed data, which lies in MegaPad's
+// memory across the link (spec/05-memory-gc.md section 12.1): the hardware's
+// shared-heap ranges classify an address before the tile's own memory does,
+// and the access goes through the host-memory port.  It reaches MegaPad
+// only inside a step of the chiplet module; elsewhere, and outside the
+// ranges, it returns false.  A word access uses the aligned word; a
+// sub-word store writes its WIDTH bits at the address.
+bool link_access(Model &m, u128 addr, unsigned width, bool write, u64 &value);
+
+inline bool shared_route(const Model &m, u128 addr) {
+    return m.in_step && !m.standin.blocks.empty() && addr <= ~0ull && in_shared_heap(m, u64(addr));
+}
+
 inline bool load_word(Model &m, Tile &tile, u128 addr, u64 &out) {
     size_t i;
+    if (shared_route(m, addr)) {
+        if (link_access(m, addr, 64, false, out)) return true;
+        m.memory_fault(addr);
+        return false;
+    }
     if (!word_index(tile, addr, i)) { m.memory_fault(addr); return false; }
     out = tile.mem[i];
     return true;
@@ -21,6 +39,11 @@ inline bool load_word(Model &m, Tile &tile, u128 addr, u64 &out) {
 
 inline bool store_word(Model &m, Tile &tile, u128 addr, u64 value) {
     size_t i;
+    if (shared_route(m, addr)) {
+        if (link_access(m, addr, 64, true, value)) return true;
+        m.memory_fault(addr);
+        return false;
+    }
     if (!word_index(tile, addr, i)) { m.memory_fault(addr); return false; }
     tile.mem[i] = value;
     return true;
@@ -40,15 +63,27 @@ inline bool load_u32(Model &m, Tile &tile, u128 addr, u64 &out) {
 // bits inside the word.
 inline bool load_bits(Model &m, Tile &tile, u128 addr, unsigned width, u64 &out) {
     size_t i;
-    if (!word_index(tile, addr, i)) { m.memory_fault(addr); return false; }
     unsigned shift = unsigned(u64(addr) & 7) * 8;
     u64 field = width == 64 ? ~0ull : (1ull << width) - 1;
+    if (shared_route(m, addr)) {
+        u64 w;
+        if (!link_access(m, addr, 64, false, w)) { m.memory_fault(addr); return false; }
+        out = (w >> shift) & field;
+        return true;
+    }
+    if (!word_index(tile, addr, i)) { m.memory_fault(addr); return false; }
     out = (tile.mem[i] >> shift) & field;
     return true;
 }
 
 inline bool store_bits(Model &m, Tile &tile, u128 addr, unsigned width, u64 value) {
     size_t i;
+    if (shared_route(m, addr)) {
+        u64 v = value;
+        if (link_access(m, addr, width, true, v)) return true;
+        m.memory_fault(addr);
+        return false;
+    }
     if (!word_index(tile, addr, i)) { m.memory_fault(addr); return false; }
     unsigned shift = unsigned(u64(addr) & 7) * 8;
     u64 field = (1ull << width) - 1;

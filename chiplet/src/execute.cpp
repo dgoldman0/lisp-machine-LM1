@@ -118,6 +118,15 @@ private:
     Flow queue_of(u64 desc, i64 &value, Queue *&queue);
     Flow block_io();
     Flow shape_of(u64 receiver, u64 &shape);
+    // A value a tagged store may write into the shared heap: one that is no
+    // reference, or a reference into the shared heap, whose metadata bits
+    // the store clears (spec/05-memory-gc.md section 4.5).
+    bool shared_value(u64 &v) const {
+        if (!is_any_ref(v)) return true;
+        if (!in_shared_heap(m_, ref_address(v))) return false;
+        v &= ~REF_METADATA;
+        return true;
+    }
 
     u64 &reg(unsigned i) { return t_.regs[i & 31]; }
     uint32_t tile_index() const { return uint32_t(&tile_ - m_.tiles.data()); }
@@ -641,21 +650,17 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
     }
 
     // ---- Tagged field access ----
-    case OP_LD: {
+    case OP_LD: case OP_LD_CAR_CDR: {
         u64 obj = r[in.rs1];
         if (!is_any_ref(obj)) return raise(TRAP_NOT_REF);
+        const u64 field = in.op == OP_LD ? (u64(in.imm16) & 0x1F) : (u64(in.imm16) & 1);
+        const u64 field_addr = ref_address(obj) + (field + 1) * 8;
         u64 v;
-        if (!load_word(m_, tile_, ref_address(obj) + ((u64(in.imm16) & 0x1F) + 1) * 8, v))
-            return Flow::Stop;
-        r[in.rd] = v;
-        return Flow::Next;
-    }
-    case OP_LD_CAR_CDR: {
-        u64 obj = r[in.rs1];
-        if (!is_any_ref(obj)) return raise(TRAP_NOT_REF);
-        u64 v;
-        if (!load_word(m_, tile_, ref_address(obj) + ((u64(in.imm16) & 1) + 1) * 8, v))
-            return Flow::Stop;
+        if (!load_word(m_, tile_, field_addr, v)) return Flow::Stop;
+        // A reference loaded from the shared heap names the shared heap, or
+        // the load traps and leaves its destination as it was.
+        if (shared_route(m_, field_addr) && is_any_ref(v) && !in_shared_heap(m_, ref_address(v)))
+            return raise(TRAP_SHARED_REF);
         r[in.rd] = v;
         return Flow::Next;
     }
@@ -666,8 +671,14 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         u64 obj = r[in.rd], val = r[in.rs1];
         if (!is_any_ref(obj)) return raise(TRAP_NOT_REF);
         u64 field_addr = ref_address(obj) + (u64(in.rs2) + 1) * 8;
+        const bool shared = shared_route(m_, field_addr);
+        if (shared && !shared_value(val)) return raise(TRAP_SHARED_STORE);
         if (!store_word(m_, tile_, field_addr, val)) return Flow::Stop;
         if (in.op == OP_ST) return Flow::Next;
+        if (shared) {
+            standin_barrier(m_, field_addr, val);
+            return Flow::Next;
+        }
         return write_barrier(field_addr, val);
     }
     case OP_TST_SHAPE: {
@@ -783,12 +794,17 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         // Rt_new (10:6).
         u64 a = r[in.rs1];
         u64 addr = is_any_ref(a) ? ref_address(a) : a;
+        const bool shared = shared_route(m_, addr);
         u64 old;
         if (!load_word(m_, tile_, addr, old)) return Flow::Stop;
+        if (shared && is_any_ref(old) && !in_shared_heap(m_, ref_address(old)))
+            return raise(TRAP_SHARED_REF);
         if (old == r[in.rs2]) {
             u64 nv = r[in.func];
+            if (shared && !shared_value(nv)) return raise(TRAP_SHARED_STORE);
             if (!store_word(m_, tile_, addr, nv)) return Flow::Stop;
-            if (is_any_ref(nv) && write_barrier(addr, nv) != Flow::Next) return Flow::Stop;
+            if (shared) standin_barrier(m_, addr, nv);
+            else if (is_any_ref(nv) && write_barrier(addr, nv) != Flow::Next) return Flow::Stop;
             r[in.rd] = T;
         } else {
             r[in.rd] = NIL;
@@ -873,6 +889,8 @@ void Model::init_tiles() {
 
 void Model::reset_chiplet() {
     init_tiles();
+    // LM-1's runtime loses everything it keeps in LM-1's memory.
+    standin = Standin{};
     for (Tile &tile : tiles) {
         for (Thread &t : tile.threads) t.halted = true;
     }
