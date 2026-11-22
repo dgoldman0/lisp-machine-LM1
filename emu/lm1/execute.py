@@ -135,10 +135,20 @@ class Emulator:
         self.oldgen_size = oldgen_size if oldgen_size is not None else self.DEFAULT_OLDGEN_SIZE
         self.oldgen_ptr = self.oldgen_base  # bump pointer into old-gen
 
-        # Write barrier configuration (matches RTL registers)
+        # Write barrier configuration (matches RTL registers).  The barrier
+        # counts addresses at or above gen_boundary as old and those below
+        # it as young, so the nursery lies below the boundary and old-gen
+        # above it: the boundary starts at the nursery's end.
+        nursery_end = self.nursery_base + self.nursery_size
+        if self.oldgen_base < nursery_end:
+            raise ValueError(
+                f"old-gen at {self.oldgen_base:#x} lies below the nursery's end "
+                f"{nursery_end:#x}; the barrier's generation boundary needs "
+                f"old-gen above the nursery"
+            )
         self.card_shift = self.DEFAULT_CARD_SHIFT     # bits; card_size = 1 << card_shift
         self.card_table_base = 0                       # physical address of card table in memory
-        self.gen_boundary = self.nursery_base           # addresses >= gen_boundary are old-gen
+        self.gen_boundary = nursery_end                 # addresses >= gen_boundary are old-gen
 
         # Card table: one byte per card.  Covers the entire memory space.
         # A card is "dirty" (0xFF) when a store-with-barrier writes a
@@ -230,7 +240,7 @@ class Emulator:
 
                 # Special case: nursery overflow → run GC at emulator level
                 if trap.code == TRAP_NURSERY_OVERFLOW:
-                    self._gc_collect()
+                    self._collect_for_overflow(trap)
                     # Retry the faulting instruction (don't advance PC)
                     next_pc = t.pc
                 # Dispatch through trap table if installed
@@ -688,23 +698,23 @@ class Emulator:
             field_idx = inst.rs2
             if not is_any_ref(obj_ref):
                 raise LM1Trap(TRAP_NOT_REF, "ST.WB: target is not a ref")
-            addr = ref_address(obj_ref)
-            self.mem.store_word(addr + (field_idx + 1) * 8, val)
-            # Write barrier: if storing a nursery ref into an old-gen object,
-            # mark the card table entry for the object's address.
-            self._write_barrier(addr, val)
+            field_addr = ref_address(obj_ref) + (field_idx + 1) * 8
+            self.mem.store_word(field_addr, val)
+            # Write barrier: storing a nursery ref into an old-gen object
+            # marks the card holding the field.
+            self._write_barrier(field_addr, val)
 
-        # ---- ST.CAR / ST.CDR (NO write barrier — matches RTL) ----
+        # ---- ST.CAR / ST.CDR (barriered, spec/02-isa.md § 5.5) ----
         elif op == Op.ST_CAR_CDR:
             obj_ref = t.regs[inst.rd]
             val = t.regs[inst.rs1]
             selector = inst.rs2  # field: 0 = car, 1 = cdr
             if not is_any_ref(obj_ref):
                 raise LM1Trap(TRAP_NOT_REF, "ST.CAR/CDR: target is not a ref")
-            addr = ref_address(obj_ref)
-            self.mem.store_word(addr + (selector + 1) * 8, val)
-            # Note: RTL does NOT fire the write barrier for ST.CAR/CDR.
-            # Use ST.WB if barrier is needed.
+            field_addr = ref_address(obj_ref) + (selector + 1) * 8
+            self.mem.store_word(field_addr, val)
+            # The same barrier as ST.WB on field 0 or 1
+            self._write_barrier(field_addr, val)
 
         # ---- TST.SHAPE Rd, Rs, #shape_id ----
         elif op == Op.TST_SHAPE:
@@ -958,28 +968,31 @@ class Emulator:
 
     # -- Allocation helpers (Phase 2) ---
 
-    def _write_barrier(self, obj_addr: int, stored_val: int) -> None:
-        """Card-table write barrier (matches RTL S_BARRIER_CHECK / S_BARRIER_MARK).
+    def _write_barrier(self, store_addr: int, stored_val: int) -> None:
+        """Card-table write barrier of ST.WB, ST.CAR, ST.CDR and CAS.TAGGED.
 
         Fires when:
           1. stored_val is a ref (any tag with bit0=1 except specials & headers)
-          2. obj_addr >= gen_boundary  (container is in old-gen)
+          2. store_addr >= gen_boundary  (the word, and so its container,
+             is in old-gen)
           3. ref_address(stored_val) < gen_boundary  (value is in young-gen)
 
-        Action: writes 0xFF to the card-table byte at
-                card_table_base + (obj_addr >> card_shift)
-                using a byte-store (matching RTL's LSU_STORE_BYTE).
+        Action: writes 0xFF to the card-table byte of the word stored,
+                card_table_base + (store_addr >> card_shift), using a
+                byte-store (spec/02-isa.md § 5.4, spec/05-memory-gc.md
+                § 4.2).  A field past its header's card is then found by
+                the collector's scan of that card.
         """
         if not is_any_ref(stored_val):
             return
         val_addr = ref_address(stored_val)
-        # RTL filter: container in old-gen, value in young-gen
-        if obj_addr < self.gen_boundary:
+        # Filter: container in old-gen, value in young-gen
+        if store_addr < self.gen_boundary:
             return   # container is in young-gen — no barrier
         if val_addr >= self.gen_boundary:
             return   # value is also in old-gen — no cross-gen store
-        # Mark the card as dirty (0xFF, matching RTL)
-        card_idx = obj_addr >> self.card_shift
+        # Mark the card as dirty (0xFF)
+        card_idx = store_addr >> self.card_shift
         if self.card_table_base != 0:
             # Write 0xFF to physical card-table address in memory
             card_addr = self.card_table_base + card_idx
@@ -1096,6 +1109,19 @@ class Emulator:
 
         return new_addr | tag
 
+    def _collect_for_overflow(self, trap: LM1Trap) -> None:
+        """Answer TRAP_NURSERY_OVERFLOW as the runtime does: run a minor
+        collection, after which the caller retries the faulting allocation
+        (spec/02-isa.md § 4.1).
+
+        A collection empties the nursery and can do no more.  When the
+        nursery is already empty, the allocation is larger than the whole
+        nursery and no collection makes room, so the trap stands.
+        """
+        if self.thread.np == self.nursery_base:
+            raise trap
+        self._gc_collect()
+
     def _gc_collect(self) -> None:
         """Cheney copy collector: evacuate live nursery objects to old-gen.
 
@@ -1104,8 +1130,9 @@ class Emulator:
           1. Scan roots, forward any nursery refs → copies to old-gen
           2. Scan the copied objects in old-gen (Cheney scan pointer),
              forwarding any nursery refs found in their fields
-          3. Scan dirty card table entries for old-gen objects that
-             point back into the nursery  (remembered set)
+          3. Scan the words of every dirty card, which hold the old-gen
+             refs back into the nursery that the barrier recorded, and
+             clear the card
           4. Reset the nursery
         """
         t = self.thread
@@ -1130,24 +1157,26 @@ class Emulator:
             mem.store_word(sp, self._forward_ref(w))
             sp += 8
 
-        # 3. Dirty cards: scan old-gen objects that have dirty card entries
-        #    (these contain cross-generational pointers)
-        og_card_start = self.oldgen_base // self.CARD_SIZE
-        og_card_end = min(
-            (self.oldgen_base + self.oldgen_size) // self.CARD_SIZE,
-            self.card_table_size
-        )
-        for card_idx in range(og_card_start, og_card_end):
-            if self.card_table[card_idx]:
-                # Scan all words in this card
-                card_addr = card_idx * self.CARD_SIZE
-                card_end = card_addr + self.CARD_SIZE
-                a = card_addr
-                while a < card_end:
-                    w = mem.load_word(a)
-                    mem.store_word(a, self._forward_ref(w))
-                    a += 8
-                self.card_table[card_idx] = 0  # clear dirty bit
+        # 3. Dirty cards.  A barriered store marks the card holding the word
+        #    it stored (spec/05-memory-gc.md § 4.2), so the words of the
+        #    dirty cards hold every old-to-young ref the barrier saw.  Each
+        #    dirty card is scanned and then cleared, in the emulator's card
+        #    table and in the one the runtime configured in memory.
+        card_shift = self.card_shift
+        card_size = 1 << card_shift
+        cards = self.card_table
+        card_idx = cards.find(0xFF)
+        while card_idx != -1:
+            a = card_idx << card_shift
+            card_end = a + card_size
+            while a < card_end:
+                w = mem.load_word(a)
+                mem.store_word(a, self._forward_ref(w))
+                a += 8
+            cards[card_idx] = 0
+            if self.card_table_base != 0:
+                mem.store_byte(self.card_table_base + card_idx, 0)
+            card_idx = cards.find(0xFF, card_idx + 1)
 
         # --- Phase B: Cheney scan — process copied objects ---
         scan_ptr = scan_start
@@ -1373,7 +1402,7 @@ class Emulator:
                         next_pc = self._execute(inst, next_pc)
                     except LM1Trap as trap:
                         if trap.code == TRAP_NURSERY_OVERFLOW:
-                            self._gc_collect()
+                            self._collect_for_overflow(trap)
                             next_pc = t.pc
                         elif t.trap_table_base != 0 and trap.code < 0x80:
                             t.trap_pc = t.pc
@@ -1498,7 +1527,7 @@ class Cluster:
                             next_pc = tile._execute(inst, next_pc)
                         except LM1Trap as trap:
                             if trap.code == TRAP_NURSERY_OVERFLOW:
-                                tile._gc_collect()
+                                tile._collect_for_overflow(trap)
                                 next_pc = t.pc
                             elif t.trap_table_base != 0 and trap.code < 0x80:
                                 t.trap_pc = t.pc

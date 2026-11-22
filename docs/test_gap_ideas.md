@@ -78,6 +78,41 @@ uninitialized template slots.
 **Action:** Add a reset-sequencer that clears all 64 entries, or add a
 "template valid" bit and trap on access to invalid entries.
 
+### P0-6  ST.WB marks the container's card, not the stored field's
+
+`S_BARRIER_CHECK` computes the card from `tt`, the container's address
+(`ta_n = card_table_base + (tt >> card_shift)`).  The spec marks the card
+holding the stored word (`spec/02-isa.md` § 5.4, `spec/05-memory-gc.md`
+§ 4.2), and so do the RTL's own descriptions in `rtl/doc/03-core-pipeline.md`
+§ 7 and `rtl/doc/05-gc-engines.md`.  A field in a later card than its
+header, field 7 onward when the header starts a 64-byte card, then sits in
+a card nothing marked, and a collection that scans dirty cards misses the
+young object the field refers to.
+
+**Where:** `lm1_control.sv`, `S_BARRIER_CHECK`.
+**Risk:** A minor collection frees a young object that an old object's
+later field still refers to, and the field dangles.
+**Action:** Compute the card from the field's address, which `ta` holds
+from `S_EXECUTE`, and add a bench case that stores a young ref into field
+12 of a 16-field old object.  The Python emulator marks the stored word's
+card (`_write_barrier` in `emu/lm1/execute.py`).
+
+### P0-7  ST.CAR and ST.CDR fire no write barrier
+
+`OP_ST_CAR_CDR` stores through `S_FIELD_MEM`, and `S_FIELD_WAIT` sends only
+`OP_ST_WB` on to `S_BARRIER_CHECK`.  The spec makes ST.CAR and ST.CDR
+barriered stores, the same as ST.WB on field 0 or 1 (`spec/02-isa.md`
+§ 5.5), and `rtl/doc/01-architecture.md` lists them among the tagged
+stores with barriers.
+
+**Where:** `lm1_control.sv`, `OP_ST_CAR_CDR` and `S_FIELD_WAIT`.
+**Risk:** Setting the car or cdr of an old cons to a young object, as
+`rplaca`, `rplacd` and `setf` of a car or cdr do, records nothing, and a
+minor collection frees the young object.
+**Action:** Send `OP_ST_CAR_CDR` through `S_BARRIER_CHECK` with the cell's
+address, as P0-6 has it for ST.WB, and add a bench case for each.  The
+Python emulator applies the barrier to both.
+
 ---
 
 ## P1 — Entirely Untested Instructions

@@ -36,12 +36,15 @@ from lm1.traps import TRAP_NURSERY_OVERFLOW, TRAP_DIVIDE_BY_ZERO
 #   0x10000 - 0x1FFFF  : nursery (64 KiB)
 #   0x20000 - 0x3FFFF  : old-gen (128 KiB)
 #   0x40000 - 0x40FFF  : trap table (4 KiB, enough for 256 entries × 8)
+#   0x50000 - 0x51FFF  : card table, where a test configures one in memory
+#                        (one byte per 64-byte card of the 512 KiB)
 NURSERY_BASE = 0x1_0000
 NURSERY_SIZE = 0x1_0000
 OLDGEN_BASE  = 0x2_0000
 OLDGEN_SIZE  = 0x2_0000
 STACK_TOP    = 0x1_0000   # stack grows down from here
 TRAP_TABLE   = 0x4_0000
+CARD_TABLE   = 0x5_0000
 CODE_BASE    = 0x0
 
 
@@ -82,6 +85,42 @@ def _allocv_x(rd, rs_len, tmpl_idx):
     """Encode ALLOCV instruction."""
     payload = ((rd & 0x1F) << 21) | ((rs_len & 0x1F) << 16) | (tmpl_idx & 0xFFFF)
     return encode_x(Op.ALLOCV, payload)
+
+
+def _run_at(emu, program, *, base=0x200, max_instructions=100):
+    """Load a further program at `base`, clear of the first, and run it with
+    the registers the first one left."""
+    for i, insn in enumerate(program):
+        emu.mem.store_u32(base + i * 4, insn)
+    emu.thread.pc = base
+    emu.thread.halted = False
+    emu.run(max_instructions=max_instructions)
+
+
+def _old_vector(emu, n_fields):
+    """Place an n-field vector of nils in old-gen and return its ref.
+
+    The allocator puts new objects in the nursery, and only a collection
+    moves them to old-gen.  Writing one at old-gen's bump pointer stands in
+    for an object an earlier collection promoted, and moving the pointer
+    past it keeps a later collection from copying over it.
+    """
+    addr = emu.oldgen_ptr
+    emu.mem.store_word(addr, make_header(HDR_VECTOR, n_fields, 0))
+    for i in range(n_fields):
+        emu.mem.store_word(addr + (i + 1) * 8, NIL)
+    emu.oldgen_ptr = addr + (n_fields + 1) * 8
+    return make_ref(addr)
+
+
+def _old_cons(emu):
+    """Place a cons of two nils in old-gen, as `_old_vector` places a vector."""
+    addr = emu.oldgen_ptr
+    emu.mem.store_word(addr, emu.thread.header_templates[0])
+    emu.mem.store_word(addr + 8, NIL)
+    emu.mem.store_word(addr + 16, NIL)
+    emu.oldgen_ptr = addr + 24
+    return make_ref(addr, cons=True)
 
 
 # ===================================================================
@@ -346,44 +385,91 @@ def test_write_barrier_marks_card():
     emu = _emu()
     t = emu.thread
 
-    # Create an object in old-gen (simulate by writing directly)
-    og_addr = OLDGEN_BASE
-    emu.mem.store_word(og_addr, make_header(HDR_VECTOR, 2, 0))
-    emu.mem.store_word(og_addr + 8, NIL)   # field 0
-    emu.mem.store_word(og_addr + 16, NIL)  # field 1
-    og_ref = make_ref(og_addr)
-
-    # Create a cons in nursery
-    program = [
+    _load_and_run(emu, [
         _alloc_cons_x(2),         # r2 = nursery cons
         encode_x(Op.HALT_NOP, 0),
-    ]
-    _load_and_run(emu, program)
+    ])
+    assert is_cons_ref(t.regs[2])
+    vec = _old_vector(emu, 2)
 
-    nursery_ref = t.regs[2]
-    assert is_cons_ref(nursery_ref)
-
-    # Now do a ST.WB: store nursery_ref into old-gen object field 0
-    t.regs[3] = og_ref
-    t.regs[4] = nursery_ref
-
-    # ST.WB: Rs(rd)=r3, Rt(rs1)=r4, field(rs2)=0
-    program2 = [
-        encode_s(Op.ST_WB, 3, 4, 0),
+    # ST.WB: Rs(rd)=r3, Rt(rs1)=r2, field(rs2)=0
+    t.regs[3] = vec
+    _run_at(emu, [
+        encode_s(Op.ST_WB, 3, 2, 0),
         encode_x(Op.HALT_NOP, 0),
-    ]
-    # Load at a different address to avoid overwriting
-    code_addr = 0x200
-    for i, insn in enumerate(program2):
-        emu.mem.store_u32(code_addr + i * 4, insn)
-    t.pc = code_addr
-    t.halted = False
-    emu.run(max_instructions=10)
+    ])
 
-    # Check the card table for og_addr
-    card_idx = og_addr // emu.CARD_SIZE
-    assert emu.card_table[card_idx] == 1, \
+    # The card holding field 0 is marked dirty with 0xFF
+    card_idx = (ref_address(vec) + 8) >> emu.card_shift
+    assert emu.card_table[card_idx] == 0xFF, \
         f"Card at index {card_idx} should be dirty, got {emu.card_table[card_idx]}"
+
+
+@test("write_barrier_marks_stored_word_card", batch="phase3_barrier")
+def test_write_barrier_marks_stored_word_card():
+    """ST.WB marks the card holding the field it stored, not the header's.
+
+    Field 12 of a 16-field vector lies 104 bytes past the header, in the
+    next 64-byte card, so only that card records the old-to-young ref
+    (spec/02-isa.md § 5.4, spec/05-memory-gc.md § 4.2).
+    """
+    emu = _emu()
+    t = emu.thread
+
+    _load_and_run(emu, [_alloc_cons_x(2), encode_x(Op.HALT_NOP, 0)])
+    vec = _old_vector(emu, 16)
+    t.regs[3] = vec
+    _run_at(emu, [encode_s(Op.ST_WB, 3, 2, 12), encode_x(Op.HALT_NOP, 0)])
+
+    header_card = ref_address(vec) >> emu.card_shift
+    field_card = (ref_address(vec) + 13 * 8) >> emu.card_shift
+    assert field_card != header_card
+    assert emu.card_table[field_card] == 0xFF, \
+        f"Field 12's card {field_card} should be dirty, got {emu.card_table[field_card]}"
+    assert emu.card_table[header_card] == 0, \
+        f"The header's card {header_card} holds no new ref, got {emu.card_table[header_card]}"
+
+
+@test("st_cdr_marks_stored_word_card", batch="phase3_barrier")
+def test_st_cdr_marks_stored_word_card():
+    """ST.CAR and ST.CDR are barriered stores (spec/02-isa.md § 5.5).
+
+    A five-field vector puts an old cons 48 bytes into old-gen, so its car
+    ends the first card and its cdr starts the next.  Storing a nursery
+    cons into that cdr marks the cdr's card.
+    """
+    emu = _emu()
+    t = emu.thread
+
+    _load_and_run(emu, [_alloc_cons_x(2), encode_x(Op.HALT_NOP, 0)])
+    _old_vector(emu, 5)
+    old = _old_cons(emu)
+    t.regs[3] = old
+    _run_at(emu, [encode_s(Op.ST_CAR_CDR, 3, 2, 1), encode_x(Op.HALT_NOP, 0)])
+
+    car_card = (ref_address(old) + 8) >> emu.card_shift
+    cdr_card = (ref_address(old) + 16) >> emu.card_shift
+    assert cdr_card == car_card + 1
+    assert emu.card_table[cdr_card] == 0xFF, \
+        f"The cdr's card {cdr_card} should be dirty, got {emu.card_table[cdr_card]}"
+    assert emu.card_table[car_card] == 0, \
+        f"The car's card {car_card} holds no new ref, got {emu.card_table[car_card]}"
+
+
+@test("barrier_boundary_needs_old_gen_above_nursery", batch="phase3_barrier")
+def test_barrier_boundary_needs_old_gen_above_nursery():
+    """The barrier's one boundary starts at the nursery's end, and a layout
+    with old-gen below the nursery, which no single boundary separates, is
+    refused when the emulator is made."""
+    emu = _emu()
+    assert emu.gen_boundary == NURSERY_BASE + NURSERY_SIZE
+    try:
+        Emulator(mem_size=512 * 1024, nursery_base=OLDGEN_BASE, nursery_size=NURSERY_SIZE,
+                 oldgen_base=NURSERY_BASE, oldgen_size=NURSERY_SIZE)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("A layout with old-gen below the nursery was accepted")
 
 
 @test("write_barrier_intra_nursery_no_mark", batch="phase3_barrier")
@@ -539,6 +625,76 @@ def test_gc_nursery_reset():
     assert t.np > NURSERY_BASE
     emu._gc_collect()
     assert t.np == NURSERY_BASE, f"NP should reset to {NURSERY_BASE:#x}, got {t.np:#x}"
+
+
+@test("gc_keeps_young_object_held_by_old_field", batch="phase3_gc")
+def test_gc_keeps_young_object_held_by_old_field():
+    """A young cons reachable only through field 12 of an old vector survives.
+
+    The field lies past the header's card.  After the collection it holds
+    the cons's old-gen copy with its car intact, and the field's card is
+    clean again in both card tables: the emulator's own and the one the
+    runtime configured in memory.
+    """
+    emu = _emu()
+    t = emu.thread
+    emu.card_table_base = CARD_TABLE
+
+    _load_and_run(emu, [
+        _alloc_cons_x(2),                                   # r2 = young cons
+        encode_i(Op.LI, 5, 0, tag_fixnum(7) & 0xFFFF),     # r5 = 7
+        encode_s(Op.ST_CAR_CDR, 2, 5, 0),                   # car(r2) = 7
+        encode_x(Op.HALT_NOP, 0),
+    ])
+    vec = _old_vector(emu, 16)
+    t.regs[3] = vec
+    _run_at(emu, [
+        encode_s(Op.ST_WB, 3, 2, 12),                       # vec[12] = r2
+        encode_i(Op.LI, 2, 0, 0),                           # drop r2 as a root
+        encode_x(Op.HALT_NOP, 0),
+    ])
+    field_addr = ref_address(vec) + 13 * 8
+    card_idx = field_addr >> emu.card_shift
+    assert emu.mem.load_byte(CARD_TABLE + card_idx) == 0xFF
+
+    emu._gc_collect()
+
+    moved = emu.mem.load_word(field_addr)
+    assert is_cons_ref(moved), f"Field 12 should hold a cons ref, got {moved:#x}"
+    assert not emu._is_nursery_addr(ref_address(moved)), \
+        f"Field 12 still points into the nursery: {ref_address(moved):#x}"
+    assert emu.mem.load_word(ref_address(moved) + 8) == tag_fixnum(7)
+    assert emu.card_table[card_idx] == 0
+    assert emu.mem.load_byte(CARD_TABLE + card_idx) == 0
+
+
+@test("gc_keeps_young_car_of_old_cons", batch="phase3_gc")
+def test_gc_keeps_young_car_of_old_cons():
+    """ST.CAR's barrier lets a collection keep the young car of an old cons."""
+    emu = _emu()
+    t = emu.thread
+
+    _load_and_run(emu, [
+        _alloc_cons_x(2),                                   # r2 = young cons
+        encode_i(Op.LI, 5, 0, tag_fixnum(9) & 0xFFFF),     # r5 = 9
+        encode_s(Op.ST_CAR_CDR, 2, 5, 0),                   # car(r2) = 9
+        encode_x(Op.HALT_NOP, 0),
+    ])
+    old = _old_cons(emu)
+    t.regs[3] = old
+    _run_at(emu, [
+        encode_s(Op.ST_CAR_CDR, 3, 2, 0),                   # car(old) = r2
+        encode_i(Op.LI, 2, 0, 0),                           # drop r2 as a root
+        encode_x(Op.HALT_NOP, 0),
+    ])
+
+    emu._gc_collect()
+
+    car = emu.mem.load_word(ref_address(old) + 8)
+    assert is_cons_ref(car), f"The old cons's car should be a cons ref, got {car:#x}"
+    assert not emu._is_nursery_addr(ref_address(car)), \
+        f"The old cons's car still points into the nursery: {ref_address(car):#x}"
+    assert emu.mem.load_word(ref_address(car) + 8) == tag_fixnum(9)
 
 
 @test("gc_overflow_triggers_gc", batch="phase3_gc")

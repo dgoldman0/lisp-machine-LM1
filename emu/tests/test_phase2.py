@@ -20,6 +20,7 @@ from lm1.word import (
     is_header,
 )
 from lm1.execute import EMU_TRAP_PUTCHAR
+from lm1.traps import LM1Trap, TRAP_NURSERY_OVERFLOW
 
 
 # -------------------------------------------------------------------
@@ -158,19 +159,31 @@ def test_alloc_cons_multiple():
 
 @test("alloc_nursery_overflow", batch="phase2_alloc")
 def test_alloc_nursery_overflow():
-    """Allocating past the nursery limit raises TRAP_NURSERY_OVERFLOW."""
+    """An allocation that cannot fit even in an emptied nursery traps.
+
+    The runtime answers TRAP_NURSERY_OVERFLOW with a minor collection and
+    retries the allocation (spec/02-isa.md § 4.1).  A collection empties
+    the nursery and can do no more, so an allocation larger than the whole
+    nursery traps to the caller after exactly one collection, and the live
+    cons that collection promoted keeps its place in r1.
+    """
     emu = Emulator(nursery_base=0x1_0000, nursery_size=48)  # tiny nursery: 48 bytes = 2 cons
+    emu.thread.sp = emu.nursery_base   # an empty stack: the registers are the roots
     program = [
-        _alloc_cons_x(1),
-        _alloc_cons_x(2),
-        _alloc_cons_x(3),        # should overflow
+        _alloc_cons_x(1),        # 24 of the nursery's 48 bytes
+        _alloc_x(2, 16, 2),      # a 16-field vector: 136 bytes, larger than the nursery
         encode_x(Op.HALT_NOP, 0),
     ]
     try:
-        _load_and_run(emu, program)
-        assert False, "Should have raised LM1Trap for nursery overflow"
-    except Exception as e:
-        assert "overflow" in str(e).lower() or "NURSERY" in str(e).upper()
+        _load_and_run(emu, program, max_instructions=100)
+    except LM1Trap as trap:
+        assert trap.code == TRAP_NURSERY_OVERFLOW, f"Wrong trap: {trap.code:#x}"
+    else:
+        raise AssertionError("An allocation larger than the nursery returned without a trap")
+    assert emu.gc_count == 1, f"Expected one collection, saw {emu.gc_count}"
+    assert is_cons_ref(emu.thread.regs[1])
+    assert not emu._is_nursery_addr(ref_address(emu.thread.regs[1])), \
+        "The live cons should have been promoted out of the nursery"
 
 
 # ===================================================================

@@ -75,7 +75,7 @@ Performance target: ~10–100 MIPS on a modern host. Fast enough for interactive
 | **Registers** | Array of 32 uint64 per thread context. |
 | **Instruction decode + execute** | Giant switch on opcode. Each case implements the pseudocode from the ISA spec. |
 | **Nursery allocator** | Per-tile: a base pointer, bump pointer (np), and limit (nl). `ALLOC` bumps; overflow calls the GC slow path. |
-| **Write barriers** | `ST.WB` checks tags and generations, updates a card-table byte array. Exact same logic as the hardware, just in software. |
+| **Write barriers** | `ST.WB`, `ST.CAR`, `ST.CDR` and `CAS.TAGGED` check tags and generations and mark the card holding the stored word in a card-table byte array, the barrier the spec gives the hardware. |
 | **IC table** | A hash map per tile: key = (callsite, shape), value = code_entry. `CALL.IC` probes it; miss triggers the trap handler. |
 | **Traps** | On trap: save PC, switch to handler address from trap table, set trap-code register. `ERET` restores. |
 | **Message queues** | Per-tile array of ring buffers. `SEND` enqueues, `RECV` dequeues. Cross-tile: route through a simulated NoC (just a function call in the emulator). |
