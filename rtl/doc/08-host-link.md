@@ -218,33 +218,48 @@ and LM-1 takes the next message it receives as the start of a new write.
 
 ## Tests
 
-`tb/link/run_link_tests.sh` builds and runs two benches with Verilator:
+`tb/link/link_cases.txt` lists the link's conformance cases once, for
+every implementation of LM-1's end: the identity record, the boot fetch,
+its bursts and its failures, the boot argument, a fetch that waits for a
+withdrawn stop, the ranges LM-1 lends and MegaPad's images written into
+them with their zero units, the refusals, a withdrawal, a reset that clears
+the ranges, doorbells both ways and the stop handshake. Each harness reads
+the list when it runs and performs each operation its own way: both benches
+through `tb/link/link_cases.svh`, and the chiplet module, the C++ model that
+MegaPad's emulator and simulator attach, through LM-1's test batch
+`chiplet_link` (`emu/tests/test_chiplet_link.py`).
+
+`tb/link/run_link_tests.sh` builds and runs two benches with Verilator.
+Each runs the shared cases first, then those only it can run:
 
 - `lm1_link_tb` drives the two modules from a behavioural MegaPad, with a
-  behavioural LM-1 memory behind the memory write port: the identity record
-  in reset, the boot fetch, a refused image and a word the memory fails, the
-  runtime's requests with their latency and codes, cancellation, doorbells,
-  MegaPad's writes into lent memory (admission and its refusals, zero
-  units, back-to-back units, a failing and a slow memory, a slow writer,
-  cancels before, during and between units, and a withdrawal while a write
-  is held), the stop handshake with a write in flight, and a return to
-  reset during one.
+  behavioural LM-1 memory behind the memory write port: the local side's
+  signals in reset, the runtime's requests with their latency and codes,
+  cancellation, the doorbells' handshakes, MegaPad's writes into lent
+  memory (the cycle a refusal comes in, back-to-back units, a failing and a
+  slow memory, a slow writer, cancels before, during and between units, and
+  a withdrawal while a write is held), the stop handshake with a write in
+  flight, a return to reset during one, and a word the memory fails during
+  the fetch.
 - `lm1_megapad_link_tb` joins the two modules, with a cluster of LM-1's as
   their memory, to MegaPad's own RTL: its port bridge, mailbox,
   external-memory arbiter and controller, and the tile engines' image
-  stage. It runs when `MEGAPAD_ROOT` names a MegaPad checkout. It follows
-  the start order of MegaPad's specification from the identity read to the
-  image fetched into the cluster's memory, then stores U8, FP32 and FP64
-  images into memory LM-1 lends: a doorbell rung after a store reaches LM-1
-  only once the image is in its memory, a tile's own loads read the image
-  back, and refusals, a cancel, a withdrawal and a reset that clears the
-  ranges each end as specified.
+  stage. It runs when `MEGAPAD_ROOT` names a MegaPad checkout. Beside the
+  shared cases it shows MegaPad's records of refused requests, the
+  runtime's requests and bursts through the bridge, the units each format
+  sends and the bytes in place at LM-1's answer, a doorbell rung after a
+  store reaching LM-1 only once the image is in its memory, a tile's own
+  loads reading the image back, and the stores MegaPad refuses or cancels
+  itself.
 
 ## What remains
 
 - **Doorbells and the message queues.** `dbi_*` and `dbo_*` are meant for
   the external ports of a tile's hardware message queue, so a doorbell
-  arrives as a message. That wiring is still to do.
+  arrives as a message. That wiring is still to do. The chiplet module
+  wires them so: a doorbell arrives as the fixnum of its source on queue 0
+  of the first tile, and the link rings each participant whose ID LM-1 code
+  sends as a fixnum to queue 1 of that tile.
 - **The runtime's use of the ports.** Nothing in the cluster issues
   host-memory requests or lend operations yet, and the runtime has no
   `LEND` entries to send. LM-1's main memory and its collector's traffic

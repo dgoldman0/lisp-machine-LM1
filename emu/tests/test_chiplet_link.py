@@ -7,7 +7,8 @@ binding's Module as MegaPad's port bridge drives one, against a behavioural
 MegaPad written here:
 
 - chiplet_link runs the link conformance cases of tb/link/link_cases.txt,
-  one test per case;
+  one test per case: the one list that LM-1's RTL link benches
+  (lm1_link_tb, lm1_megapad_link_tb) run too, through tb/link/link_cases.svh;
 - chiplet_module tests what the module does beyond that list: the ranges
   and the start its stand-in for LM-1's runtime provides, LM-1 code at both
   ends of the doorbells, the boot fetch's failures, the step budget and the
@@ -234,6 +235,11 @@ class CaseRun:
             want = chiplet.BOOT_RUNNING if args[0] == "done" else chiplet.BOOT_FAILED
             assert mp.model.link(chiplet.LINK_BOOT) == want, \
                 "the fetch ended in state %d" % mp.model.link(chiplet.LINK_BOOT)
+        elif op == "boot_arg":
+            # What the sideband gave; the stand-in puts it in thread 0's r1
+            # when it starts an image (batch chiplet_module checks that).
+            got = mp.model.link(chiplet.LINK_BOOT_ARG)
+            assert got == n[0], "the boot argument is %#x" % got
         elif op == "loaded":
             for k in range(n[0]):
                 got = mp.lm1_word(LOAD_BASE + 8 * k)

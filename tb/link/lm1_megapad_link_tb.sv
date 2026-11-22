@@ -9,14 +9,19 @@
 // cores and the tile engine whose stores the stage carries, and LM-1's
 // runtime and boot control.
 //
-// It follows the start order of MegaPad's link specification: read the
-// identity record, lend the image and the data, name the image, release the
-// chiplet, and let it fetch the image into its cluster's memory.  Then it
-// runs requests, refusals, doorbells in both directions, TACC.STORE images
-// written into memory LM-1 lends (with a doorbell rung after one, which
-// reaches LM-1 only after the image has landed, and a tile that reads the
-// image back), refusals, a cancel, a withdrawal, the stop handshake and a
-// return to reset.
+// It first runs the shared link conformance cases of tb/link/link_cases.txt
+// (link_cases.svh), the list the chiplet module and lm1_link_tb run too, each
+// in the start order of MegaPad's link specification: read the identity
+// record, lend the image, name it, release the chiplet, and let it fetch the
+// image into its cluster's memory; then the ranges LM-1 lends and the
+// TACC.STORE images MegaPad writes into them, doorbells both ways and the
+// stop.  Then it runs what only the two RTL ends together show: MegaPad's
+// records of the runtime's refused requests, the runtime's requests and
+// bursts through the bridge, the mailbox's state around a doorbell, the
+// units each format sends and the bytes in place at LM-1's answer, a
+// doorbell rung after a store reaching LM-1 only after the image has landed,
+// a tile reading the image back, stores MegaPad refuses or cancels itself,
+// and the local side of the stop and the reset.
 //
 // Built by tb/link/run_link_tests.sh when MEGAPAD_ROOT is set.
 // ============================================================================
@@ -675,9 +680,204 @@ module lm1_megapad_link_tb;
         st_finish[0] = 1'b0;
     endtask
 
+    // ------------------------------------------------------------------
+    // The shared link cases (link_cases.svh), done this bench's way: MegaPad
+    // plays its part through its port registers and its mailbox, and its
+    // tile engine through the image stage; the bench plays LM-1's runtime.
+    // A case's image lies at 0x0010_4000, lent read-only, and 0x0010_6000
+    // is lent to nobody.  LM-1's memory is the cluster's shared memory.
+    // ------------------------------------------------------------------
+    localparam logic [63:0] LC_IMAGE = 64'h0010_4000, LC_UNLENT = 64'h0010_6000;
+    localparam logic [63:0] LC_HELD = 64'h02;       // RESET_HOLD
+    localparam logic [63:0] LC_OPEN = 64'h29;       // ENABLE, DOORBELL_EN, BORROW_EN
+    localparam logic [63:0] LC_STOP = 64'h04;       // STOP_REQ
+    int          lc_mark;               // link_requests at the release
+    logic [63:0] lc_before [0:63];      // LM-1's memory from the load base then
+    logic [63:0] lc_near [0:33];        // LM-1's memory around a store, before it
+    logic        lc_stop_req = 1'b0, lc_released = 1'b0;
+    string       lc_path;
+
+    task automatic lc_reset();
+        lc_stop_req = 1'b0;
+        lc_released = 1'b0;
+        reg_write(R_CTRL, LC_HELD);
+        runtime_ready = 1'b0; runtime_stopped = 1'b0;
+        dbo_valid = 1'b0; dbi_ready = 1'b0;
+        repeat (3) @(negedge clk);
+    endtask
+
+    task automatic lc_identity(input logic [7:0] index, input logic [63:0] value);
+        read_identity(index);
+        lc_check($sformatf("identity word %0d reads %h", index, value), idw == value);
+    endtask
+
+    task automatic lc_image(input int n, input logic [63:0] value);
+        for (int k = 0; k < n; k++)
+            xmem[17'(LC_IMAGE >> 3) + 17'(k)] = value + 64'(k);
+    endtask
+
+    task automatic lc_release(input logic [63:0] len, input logic [63:0] arg,
+                              input logic lent);
+        for (int k = 0; k < 64; k++)
+            lc_before[k] = lm1_word(LOAD_BASE + 64'(8 * k));
+        lc_mark = link_requests;
+        lend(3'd0, LC_IMAGE, LC_IMAGE + 64'h1000, 2'b01);
+        reg_write(R_BOOT_ADDR, lent ? LC_IMAGE : LC_UNLENT);
+        reg_write(R_BOOT_LEN, len);
+        reg_write(R_BOOT_ARG, arg);
+        lc_released = 1'b1;
+        reg_write(R_CTRL, LC_OPEN | (lc_stop_req ? LC_STOP : 64'd0));
+    endtask
+
+    task automatic lc_boot(input logic failed);
+        int guard = 0;
+        while (!boot_done && !boot_failed && guard < 20000) begin
+            @(negedge clk);
+            guard++;
+        end
+        repeat (40) @(negedge clk);     // a cancelled burst's responses drain
+        lc_check(failed ? "the fetch fails" : "the fetch completes",
+                 failed ? (boot_failed && !boot_done) : (boot_done && !boot_failed));
+    endtask
+
+    task automatic lc_boot_arg(input logic [63:0] value);
+        lc_check("the boot argument reaches the runtime", boot_arg == value);
+    endtask
+
+    task automatic lc_loaded(input int n, input logic [63:0] value);
+        logic ok = 1'b1;
+        for (int k = 0; k < n; k++)
+            if (lm1_word(LOAD_BASE + 64'(8 * k)) != value + 64'(k))
+                ok = 1'b0;
+        lc_check($sformatf("%0d words land in order from the load base", n), ok);
+        lc_check("the word after them is untouched",
+                 lm1_word(LOAD_BASE + 64'(8 * n)) == lc_before[n]);
+    endtask
+
+    task automatic lc_requests(input int n);
+        lc_check($sformatf("the fetch made %0d requests", n), link_requests - lc_mark == n);
+    endtask
+
+    task automatic lc_wait();
+        repeat (64) @(negedge clk);
+    endtask
+
+    task automatic lc_runtime_ready();
+        @(negedge clk);
+        runtime_ready = 1'b1;
+    endtask
+
+    task automatic lc_runtime_stop(input logic b);
+        @(negedge clk);
+        runtime_stopped = b;
+    endtask
+
+    task automatic lc_ready(input logic b);
+        repeat (2) @(negedge clk);
+        reg_read(R_STATUS);
+        lc_check($sformatf("MegaPad reads READY as %0d", b), rd[2] == b);
+    endtask
+
+    task automatic lc_stopped(input logic b);
+        repeat (2) @(negedge clk);
+        reg_read(R_STATUS);
+        lc_check($sformatf("MegaPad reads STOPPED as %0d", b), rd[1] == b);
+    endtask
+
+    task automatic lc_stop(input logic b);
+        lc_stop_req = b;
+        reg_write(R_CTRL, (lc_released ? LC_OPEN : LC_HELD) | (b ? LC_STOP : 64'd0));
+    endtask
+
+    task automatic lc_lend(input logic [7:0] index, input logic [63:0] base,
+                           input logic [63:0] limit, input logic w);
+        lm1_lend(index, base, limit, w);
+    endtask
+
+    task automatic lc_store(input int units, input int zeros, input logic [63:0] addr,
+                            input logic [7:0] seed, input logic [1:0] code);
+        logic          ok = 1'b1;
+        logic [3:0]    ew;
+        logic [2047:0] img;
+        int            answers;
+        ew = (units == 4) ? EW_U8 : (units == 2) ? EW_FP32 : EW_FP64;
+        for (int w = 0; w < 32; w++)
+            img[w*64 +: 64] = lc_image_word(seed, w);
+        for (int k = 0; k < 34; k++)
+            lc_near[k] = lm1_word(addr - 64'd8 + 64'(8 * k));
+        answers = wa_count;
+        tacc_store(WINDOW + addr, ew, img, 0);
+        lc_check($sformatf("LM-1 answers %0d", code),
+                 wa_count == answers + 1 && wa_code_last == code);
+        lc_check("the store ends as LM-1 answered: done, or a bus fault at its base",
+                 s_done && (code == 2'd0 ? s_fault == FAULT_NONE
+                                         : (s_fault == FAULT_BUS &&
+                                            s_fault_addr == WINDOW + addr)));
+        lc_check("the words beside the image are untouched",
+                 lm1_word(addr - 64'd8) == lc_near[0] &&
+                 lm1_word(addr + 64'd256) == lc_near[33]);
+        for (int w = 0; w < 32; w++)
+            if (code == 2'd0 ? lm1_word(addr + 64'(8 * w)) !=
+                                   ((w < 8 * units) ? lc_image_word(seed, w) : 64'd0)
+                             : lm1_word(addr + 64'(8 * w)) != lc_near[w + 1])
+                ok = 1'b0;
+        lc_check(code == 2'd0 ? "LM-1's memory holds the image and its zeros"
+                              : "LM-1's memory is untouched", ok);
+    endtask
+
+    task automatic lc_ring_in(input logic [7:0] src);
+        mbox_write(src, 4'h8, PORT_ID);     // MBOX_SEND from core src
+    endtask
+
+    task automatic lc_rung_in(input logic [7:0] src);
+        int guard = 0;
+        #1;
+        while (!dbi_valid && guard < 1000) begin
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+        lc_check($sformatf("LM-1 takes a doorbell from %0d", src),
+                 dbi_valid && dbi_src == src);
+        dbi_ready = 1'b1;
+        @(negedge clk);
+        dbi_ready = 1'b0;
+        repeat (2) @(negedge clk);
+    endtask
+
+    // LM-1's doorbell is offered and held until the port takes it.
+    task automatic lc_ring_out(input logic [7:0] dst);
+        @(negedge clk);
+        dbo_valid = 1'b1;
+        dbo_dst   = dst;
+    endtask
+
+    task automatic lc_rung_out(input logic [7:0] dst);
+        int guard = 0;
+        #1;
+        while (!dbo_ready && guard < 1000) begin
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+        @(negedge clk);                 // the rising edge between took it
+        dbo_valid = 1'b0;
+        repeat (2) @(negedge clk);
+        #1;
+        lc_check($sformatf("LM-1's doorbell raises core %0d's IPI line", dst),
+                 ipi_out[dst[3:0]] == 1'b1);
+        mbox_write(dst, 4'hA, PORT_ID);     // MBOX_ACK from that core
+    endtask
+
+    task automatic lc_no_ring_out();
+        #1;
+        lc_check("no doorbell leaves LM-1", ipi_out == 16'h0 && lk_dbr_valid == 1'b0);
+    endtask
+
+    `include "link_cases.svh"
+
     int prev_n, prev_w, prev_a, prev_u;
     logic [2047:0] img_a, img_b, img_c;
-    logic [63:0]   before_word, before_word2;
 
     initial begin
         for (int i = 0; i < 131072; i++) xmem[i] = 64'd0;
@@ -685,16 +885,22 @@ module lm1_megapad_link_tb;
         rst_n = 1'b1;
         repeat (6) @(posedge clk);
 
-        $display("\nIdentity, read through MegaPad's port registers");
+        $display("\nIn reset, through MegaPad's port registers");
         reg_read(R_STATUS);
         check("MegaPad sees a chiplet on the port", rd[0] == 1'b1);
         check("LM-1 is held in reset", core_rst_n == 1'b0);
-        read_identity(8'd0);
-        check("word 0 is CHIP and contract version 1",
-              idw == 64'h4348_4950_0000_0001);
-        read_identity(8'd1);
-        check("word 1 names the device LM1", idw == 64'h0000_0000_0031_4D4C);
 
+        $display("\nThe shared link cases");
+        if (!$value$plusargs("cases=%s", lc_path))
+            lc_path = "tb/link/link_cases.txt";
+        run_link_cases(lc_path);
+
+        // The cases this bench alone runs follow, from a start of its own:
+        // MegaPad's records of refusals, the runtime's requests through the
+        // bridge, what the stores carry across and when, a tile reading an
+        // image back, and the stores MegaPad itself refuses or cancels.
+        lc_reset();
+        reg_write(R_STATUS, 64'h10);        // clear the refusals of the cases
         $display("\nStart: lend, name the image, release");
         // A four-word image at 0x0010_4000 and a data page at 0x0010_8000.
         xmem[17'h00800] = 64'hC0DE_0000_0000_0001;
@@ -709,24 +915,11 @@ module lm1_megapad_link_tb;
         reg_write(R_CTRL, 64'h09);          // ENABLE, DOORBELL_EN, released
         #1;
         check("LM-1 leaves reset", core_rst_n == 1'b1);
-        check("the control block's address reaches LM-1's runtime",
-              boot_arg == 64'h0010_5000);
         while (!boot_done && !boot_failed) @(negedge clk);
         @(negedge clk);
-        check("LM-1 fetches its image through the bridge",
-              boot_done && !boot_failed);
-        check("the four words land in order in the cluster's memory",
-              lm1_writes == 4 &&
-              lm1_word(LOAD_BASE)        == 64'hC0DE_0000_0000_0001 &&
-              lm1_word(LOAD_BASE + 8)    == 64'hC0DE_0000_0000_0002 &&
-              lm1_word(LOAD_BASE + 16)   == 64'hC0DE_0000_0000_0003 &&
-              lm1_word(LOAD_BASE + 24)   == 64'hC0DE_0000_0000_0004);
-        check("the four-word image crosses the link as one burst",
-              link_requests == 1);
         runtime_ready = 1'b1;
         reg_read(R_STATUS);
-        check("MegaPad reads READY", rd[2] == 1'b1);
-        check("no request was refused during the fetch", rd[4] == 1'b0);
+        check("no request was refused during the fetch", boot_done && rd[4] == 1'b0);
 
         $display("\nLent memory");
         rt_access(64'h0010_8010, 64'h0BAD_C0FF_EE00_0042, 1'b1);
@@ -780,8 +973,8 @@ module lm1_megapad_link_tb;
         mbox_write(8'd0, 4'h8, PORT_ID);    // MBOX_SEND from core 0
         repeat (2) @(negedge clk);
         #1;
-        check("a core's signal reaches LM-1 with the core's ID",
-              dbi_valid == 1'b1 && dbi_src == 8'd0);
+        check("a core's signal waits in the mailbox until LM-1 takes it",
+              dbi_valid == 1'b1 && mb_db_valid == 1'b1);
         dbi_ready = 1'b1;
         @(negedge clk);
         dbi_ready = 1'b0;
@@ -817,30 +1010,20 @@ module lm1_megapad_link_tb;
         img_a = image_of(8'hA1);
         prev_u = wq_units; prev_w = lm1_writes;
         tacc_store(WINDOW + 64'h4040, EW_U8, img_a, 0);
-        check("before LM-1 lends a range the store is a bus fault at its base",
-              s_done && s_fault == FAULT_BUS && s_fault_addr == WINDOW + 64'h4040);
-        check("LM-1 refused it at its first unit and wrote nothing",
+        check("LM-1 refuses a store at its first unit, before it lends a range",
               wa_code_last == 2'd1 && wq_units == prev_u + 1 &&
               lm1_writes == prev_w);
 
         lm1_lend(8'd0, 64'h4000, 64'h4800, 1'b1);     // 2 KiB of shared memory
-        before_word  = lm1_word(64'h4038);
-        before_word2 = lm1_word(64'h4140);
         watch_addr = 64'h4040; watch_image = img_a; watch_on = 1'b1;
         prev_n = phy_launches; prev_u = wq_units; prev_w = lm1_writes;
         tacc_store(WINDOW + 64'h4040, EW_U8, img_a, 0);
-        check("a U8 store into the lent range completes without a fault",
-              s_done && s_fault == FAULT_NONE);
         $display("    (request to retirement: %0d cycles)", s_cycles);
-        check("four units cross the link, and LM-1 answers OK",
-              wq_units == prev_u + 4 && wa_code_last == 2'd0);
-        check("LM-1's cluster memory holds the image at 0x4040",
-              lm1_writes == prev_w + 32 && lm1_holds(64'h4040, img_a));
+        check("a U8 store sends four units, and LM-1 writes 32 words",
+              s_done && s_fault == FAULT_NONE && wq_units == prev_u + 4 &&
+              lm1_writes == prev_w + 32);
         check("every byte was there when LM-1 answered",
               img_at_answer && answer_cyc != 0);
-        check("the memory around it is untouched",
-              lm1_word(64'h4038) == before_word &&
-              lm1_word(64'h4140) == before_word2);
         check("the image never reached MegaPad's external memory",
               phy_launches == prev_n);
         reg_read(R_STATUS);
@@ -886,29 +1069,16 @@ module lm1_megapad_link_tb;
         img_b = image_of(8'hB2);
         prev_u = wq_units; prev_w = lm1_writes;
         tacc_store(WINDOW + 64'h4140, EW_FP64, img_b, 0);
-        check("an FP64 store completes", s_done && s_fault == FAULT_NONE);
-        check("one unit crosses and LM-1 writes 32 words",
-              wq_units == prev_u + 1 && lm1_writes == prev_w + 32);
-        check("its destination holds the canonical image, zeros included",
-              lm1_holds(64'h4140, active(img_b, EW_FP64)));
-        // Over that FP64 image, an FP32 one: two units, then two of zeros.
+        check("an FP64 store sends one unit, and LM-1 writes 32 words",
+              s_done && s_fault == FAULT_NONE && wq_units == prev_u + 1 &&
+              lm1_writes == prev_w + 32);
         img_c = image_of(8'hC3);
-        tacc_store(WINDOW + 64'h4140, EW_U8, image_of(8'hEE), 0);
         prev_u = wq_units;
         tacc_store(WINDOW + 64'h4140, EW_FP32, img_c, 0);
-        check("an FP32 store over a full image completes",
+        check("an FP32 store sends two units",
               s_done && s_fault == FAULT_NONE && wq_units == prev_u + 2);
-        check("and LM-1's zeros replace the old image's upper half",
-              lm1_holds(64'h4140, active(img_c, EW_FP32)));
 
-        $display("\nStores LM-1 refuses, and a cancel");
-        prev_u = wq_units; prev_w = lm1_writes; prev_a = wa_count;
-        tacc_store(WINDOW + 64'h4740, EW_U8, img_a, 0);
-        check("a store that runs past LM-1's range is a bus fault at its base",
-              s_done && s_fault == FAULT_BUS && s_fault_addr == WINDOW + 64'h4740);
-        check("LM-1 refused it at its first unit, writing nothing",
-              wa_code_last == 2'd1 && wq_units == prev_u + 1 &&
-              lm1_writes == prev_w && lm1_word(64'h4740) == 64'd0);
+        $display("\nStores MegaPad refuses or cancels");
         reg_write(R_CTRL, 64'h09);          // BORROW_EN clear
         prev_u = wq_units; prev_a = wa_count;
         tacc_store(WINDOW + 64'h4240, EW_U8, img_a, 0);
@@ -929,40 +1099,15 @@ module lm1_megapad_link_tb;
         check("the next store into the range completes",
               s_done && s_fault == FAULT_NONE && lm1_holds(64'h4240, img_a));
 
-        lm1_lend(8'd0, 64'h4000, 64'h4800, 1'b0);     // withdraw
-        prev_w = lm1_writes;
-        tacc_store(WINDOW + 64'h4340, EW_U8, img_a, 0);
-        check("once LM-1 withdraws the range a store into it faults",
-              s_done && s_fault == FAULT_BUS && wa_code_last == 2'd1 &&
-              lm1_writes == prev_w);
-        lm1_lend(8'd1, 64'h4800, 64'h4900, 1'b1);
-        tacc_store(WINDOW + 64'h4800, EW_U8, img_b, 0);
-        check("a second range takes a store of its own",
-              s_done && s_fault == FAULT_NONE && lm1_holds(64'h4800, img_b));
-
         $display("\nStop and reset");
         reg_write(R_CTRL, 64'h0D);          // + STOP_REQ
         #1;
         check("LM-1's runtime is asked to stop", stop_req == 1'b1);
         check("LM-1 takes no new request", rt_req_ready == 1'b0);
-        runtime_stopped = 1'b1;
-        reg_read(R_STATUS);
-        check("MegaPad reads STOPPED", rd[1] == 1'b1);
         runtime_stopped = 1'b0; runtime_ready = 1'b0;
         reg_write(R_CTRL, 64'h0B);          // RESET_HOLD
         #1;
         check("LM-1 returns to reset", core_rst_n == 1'b0);
-        prev_w = lm1_writes;
-        reg_write(R_CTRL, 64'h29);          // released, BORROW_EN set
-        @(negedge clk);
-        while (!boot_done && !boot_failed) @(negedge clk);
-        @(negedge clk);
-        check("released again, LM-1 fetches its image once more",
-              boot_done && lm1_writes == prev_w + 4);
-        tacc_store(WINDOW + 64'h4800, EW_U8, img_a, 0);
-        check("its reset cleared the ranges it lent: the second refuses now",
-              s_done && s_fault == FAULT_BUS && wa_code_last == 2'd1 &&
-              lm1_writes == prev_w + 4);
 
         $display("\n=== lm1_megapad_link_tb: %0d passed, %0d failed ===",
                  pass_count, fail_count);

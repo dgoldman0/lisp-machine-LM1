@@ -1,10 +1,19 @@
 # Link conformance cases: LM-1's end of the link (MegaPad's
 # docs/chiplet-link.md, this repository's rtl/doc/08-host-link.md).
 #
-# One list for every implementation of LM-1's end of the link.
-# emu/tests/test_chiplet_link.py runs it on the chiplet module, the C++
-# model in chiplet/, against a behavioural MegaPad written in Python (LM-1
-# batch chiplet_link), one test per case.
+# One list for every implementation of LM-1's end of the link, read by each
+# harness when it runs:
+#   - emu/tests/test_chiplet_link.py runs it on the chiplet module, the C++
+#     model in chiplet/, against a behavioural MegaPad written in Python
+#     (LM-1 batch chiplet_link), one test per case;
+#   - tb/link/lm1_link_tb.sv runs it on the RTL's lm1_link and
+#     lm1_link_boot against a behavioural MegaPad;
+#   - tb/link/lm1_megapad_link_tb.sv runs it on the same RTL joined to
+#     MegaPad's RTL: its port bridge, mailbox, external memory and the tile
+#     engines' image stage.
+# The benches read it through tb/link/link_cases.svh, and each keeps beside
+# it the cases only it can run, such as cycle counts, cancels and failing
+# memories.
 #
 # A case begins with "case NAME" and a line of text saying what it shows.
 # Every other line is one operation and its arguments, numbers in hex
@@ -22,6 +31,7 @@
 #                         argument ARG, and releases LM-1
 #   release_unlent LEN ARG  the same, naming an address MegaPad does not lend
 #   boot done|failed      the fetch ends, and ends so
+#   boot_arg V            LM-1's runtime is given the boot argument V
 #   loaded N V            LM-1's memory from the load base holds N words,
 #                         word k holding V + k, and the word after them
 #                         holds what it held before the release
@@ -72,6 +82,7 @@ reset
 image 3 1111111100000001
 release 14 2040
 boot done
+boot_arg 2040
 loaded 3 1111111100000001
 requests 1
 runtime_ready

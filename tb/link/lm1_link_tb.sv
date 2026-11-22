@@ -2,12 +2,17 @@
 // lm1_link_tb.sv — LM-1's host link against a behavioural MegaPad
 //
 // Drives lm1_link and lm1_link_boot from a model of MegaPad's side of the
-// link, with a behavioural LM-1 memory behind the memory write port.
-// Covers the identity record in reset, the boot fetch, a failed fetch, the
+// link, with a behavioural LM-1 memory behind the memory write port.  It
+// first runs the shared link conformance cases of tb/link/link_cases.txt
+// (link_cases.svh), the list the chiplet module and lm1_megapad_link_tb run
+// too: the identity record, the boot fetch and its failures, the ranges
+// LM-1 lends and MegaPad's writes into them, doorbells and the stop.  Then
+// it covers what only this bench can show: the local side's signals, the
 // runtime's requests with their latency and response codes, cancellation,
-// doorbells in both directions, MegaPad's writes into the ranges LM-1 lends
-// (admission, zero units, refusals, memory errors, slow memory, cancels and
-// withdrawals), the stop handshake and a return to reset.
+// the handshakes of the doorbells, cycle counts, memory errors, a slow
+// memory and a slow writer, cancels and a withdrawal during a write, the
+// stop handshake with a write in flight, a return to reset during one, and
+// a fetch that a failing memory word ends.
 // ============================================================================
 
 module lm1_link_tb;
@@ -445,6 +450,9 @@ module lm1_link_tb;
     int         w_taken;        // units LM-1 took
     int         w_cycles;       // falling edges from the first offer to the end
     int         w_answer_cyc;   // ncyc before the edge that took the answer
+    // With w_from_src set, the units sent are w_src's instead of unit_of's.
+    logic [511:0] w_src [0:3];
+    logic         w_from_src = 1'b0;
     task automatic mp_write(input logic [63:0] addr, input int len,
                             input int zeros, input logic [15:0] tag,
                             input int cancel_at, input int gap);
@@ -458,7 +466,7 @@ module lm1_link_tb;
             if (cancel_at >= 0 && cyc >= cancel_at)
                 lk_wq_cancel = 1'b1;
             lk_wq_valid = (u <= len) && !lk_wq_cancel && (hold == 0);
-            lk_wq_data  = unit_of(tag, u);
+            lk_wq_data  = (w_from_src && u < 4) ? w_src[u] : unit_of(tag, u);
             #1;
             if (lk_wa_valid) begin
                 w_answered   = 1'b1;
@@ -498,6 +506,190 @@ module lm1_link_tb;
         lend_valid = 1'b0;
     endtask
 
+    // ------------------------------------------------------------------
+    // The shared link cases (link_cases.svh), done this bench's way.  The
+    // behavioural MegaPad lends [0x1000, 0x3000) for reading and writing;
+    // a case's image lies at 0x1200, and 0x9000 is lent to nobody.  LM-1's
+    // memory is the 4 KiB above, from LOAD_BASE on for the image.
+    // ------------------------------------------------------------------
+    localparam logic [63:0] LC_IMAGE = 64'h1200, LC_UNLENT = 64'h9000;
+    int          lc_mark;               // host_requests at the release
+    logic [63:0] lc_before [0:63];      // LM-1's memory from the load base then
+    logic [63:0] lc_near [0:33];        // LM-1's memory around a store, before it
+    string       lc_path;
+
+    task automatic lc_reset();
+        @(negedge clk);
+        sb_rst_n = 1'b0; sb_stop_req = 1'b0;
+        runtime_ready = 1'b0; runtime_stopped = 1'b0;
+        lk_dbt_valid = 1'b0; dbi_ready = 1'b0;
+        dbo_valid = 1'b0; lk_dbr_ready = 1'b0;
+        repeat (3) @(negedge clk);
+    endtask
+
+    task automatic lc_identity(input logic [7:0] index, input logic [63:0] value);
+        read_identity(index);
+        lc_check($sformatf("identity word %0d reads %h", index, value), idw == value);
+    endtask
+
+    task automatic lc_image(input int n, input logic [63:0] value);
+        for (int k = 0; k < n; k++)
+            hostmem[LC_IMAGE[12:3] + 10'(k)] = value + 64'(k);
+    endtask
+
+    task automatic lc_release(input logic [63:0] len, input logic [63:0] arg,
+                              input logic lent);
+        for (int k = 0; k < 64; k++)
+            lc_before[k] = lmem[LOAD_BASE[11:3] + 9'(k)];
+        lc_mark = host_requests;
+        @(negedge clk);
+        sb_boot_addr = lent ? LC_IMAGE : LC_UNLENT;
+        sb_boot_len  = len;
+        sb_boot_arg  = arg;
+        sb_rst_n     = 1'b1;
+    endtask
+
+    task automatic lc_boot(input logic failed);
+        int guard = 0;
+        while (!boot_done && !boot_failed && guard < 20000) begin
+            @(posedge clk);
+            guard++;
+        end
+        repeat (40) @(posedge clk);     // a cancelled burst's responses drain
+        lc_check(failed ? "the fetch fails" : "the fetch completes",
+                 failed ? (boot_failed && !boot_done) : (boot_done && !boot_failed));
+    endtask
+
+    task automatic lc_boot_arg(input logic [63:0] value);
+        lc_check("the boot argument reaches the runtime", boot_arg == value);
+    endtask
+
+    task automatic lc_loaded(input int n, input logic [63:0] value);
+        logic ok = 1'b1;
+        for (int k = 0; k < n; k++)
+            if (lmem[LOAD_BASE[11:3] + 9'(k)] != value + 64'(k))
+                ok = 1'b0;
+        lc_check($sformatf("%0d words land in order from the load base", n), ok);
+        lc_check("the word after them is untouched",
+                 lmem[LOAD_BASE[11:3] + 9'(n)] == lc_before[n]);
+    endtask
+
+    task automatic lc_requests(input int n);
+        lc_check($sformatf("the fetch made %0d requests", n), host_requests - lc_mark == n);
+    endtask
+
+    task automatic lc_wait();
+        repeat (64) @(posedge clk);
+    endtask
+
+    task automatic lc_runtime_ready();
+        @(negedge clk);
+        runtime_ready = 1'b1;
+    endtask
+
+    task automatic lc_runtime_stop(input logic b);
+        @(negedge clk);
+        runtime_stopped = b;
+    endtask
+
+    task automatic lc_ready(input logic b);
+        repeat (2) @(posedge clk);
+        #1;
+        lc_check($sformatf("READY reads %0d", b), sb_ready == b);
+    endtask
+
+    task automatic lc_stopped(input logic b);
+        repeat (2) @(posedge clk);
+        #1;
+        lc_check($sformatf("STOPPED reads %0d", b), sb_stopped == b);
+    endtask
+
+    task automatic lc_stop(input logic b);
+        @(negedge clk);
+        sb_stop_req = b;
+    endtask
+
+    task automatic lc_lend(input logic [7:0] index, input logic [63:0] base,
+                           input logic [63:0] limit, input logic w);
+        lend(index, base, limit, w);
+    endtask
+
+    task automatic lc_store(input int units, input int zeros, input logic [63:0] addr,
+                            input logic [7:0] seed, input logic [1:0] code);
+        logic ok = 1'b1;
+        int   at = int'(addr[11:3]);
+        for (int k = 0; k < 34; k++)
+            lc_near[k] = lmem[9'(at - 1 + k)];
+        for (int u = 0; u < units; u++)
+            for (int i = 0; i < 8; i++)
+                w_src[u][i*64 +: 64] = lc_image_word(seed, u * 8 + i);
+        w_from_src = 1'b1;
+        mp_write(addr, units - 1, zeros, 16'h0, -1, 0);
+        w_from_src = 1'b0;
+        lc_check($sformatf("LM-1 answers %0d", code), w_answered && w_code == code);
+        lc_check("the words beside the image are untouched",
+                 lmem[9'(at - 1)] == lc_near[0] && lmem[9'(at + 32)] == lc_near[33]);
+        for (int w = 0; w < 32; w++)
+            if (code == 2'd0 ? lmem[9'(at + w)] != ((w < 8 * units) ? lc_image_word(seed, w)
+                                                                    : 64'd0)
+                             : lmem[9'(at + w)] != lc_near[w + 1])
+                ok = 1'b0;
+        lc_check(code == 2'd0 ? "LM-1's memory holds the image and its zeros"
+                              : "LM-1's memory is untouched", ok);
+    endtask
+
+    // A doorbell is offered and held until taken, as the handshake has it.
+    task automatic lc_ring_in(input logic [7:0] src);
+        @(negedge clk);
+        lk_dbt_valid = 1'b1;
+        lk_dbt_src   = src;
+    endtask
+
+    task automatic lc_rung_in(input logic [7:0] src);
+        int guard = 0;
+        #1;
+        while (!dbi_valid && guard < 1000) begin
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+        lc_check($sformatf("LM-1 takes a doorbell from %0d", src),
+                 dbi_valid && dbi_src == src);
+        @(negedge clk);
+        dbi_ready = 1'b1;               // taken at the next rising edge
+        @(negedge clk);
+        dbi_ready = 1'b0; lk_dbt_valid = 1'b0;
+    endtask
+
+    task automatic lc_ring_out(input logic [7:0] dst);
+        @(negedge clk);
+        dbo_valid = 1'b1;
+        dbo_dst   = dst;
+    endtask
+
+    task automatic lc_rung_out(input logic [7:0] dst);
+        int guard = 0;
+        #1;
+        while (!lk_dbr_valid && guard < 1000) begin
+            @(negedge clk);
+            #1;
+            guard++;
+        end
+        lc_check($sformatf("MegaPad takes a doorbell for %0d", dst),
+                 lk_dbr_valid && lk_dbr_dst == dst);
+        @(negedge clk);
+        lk_dbr_ready = 1'b1;            // taken at the next rising edge
+        @(negedge clk);
+        lk_dbr_ready = 1'b0; dbo_valid = 1'b0;
+    endtask
+
+    task automatic lc_no_ring_out();
+        #1;
+        lc_check("no doorbell leaves LM-1", lk_dbr_valid == 1'b0);
+    endtask
+
+    `include "link_cases.svh"
+
     int prev_n, prev_w;
     logic seen_stopped;
 
@@ -526,44 +718,35 @@ module lm1_link_tb;
         por_n = 1'b1;
         repeat (2) @(posedge clk);
 
-        $display("\nIdentity, read while LM-1 is held in reset");
+        $display("\nThe shared link cases");
+        if (!$value$plusargs("cases=%s", lc_path))
+            lc_path = "tb/link/link_cases.txt";
+        run_link_cases(lc_path);
+
+        // The cases this bench alone runs follow: the signals of LM-1's
+        // local side, cycle counts, cancels, and failing and slow memories.
+        lc_reset();
+        fill_lmem();
+        $display("\nIn reset");
         check("a chiplet reports itself present", sb_present == 1'b1);
         check("LM-1's own logic is in reset", core_rst_n == 1'b0);
-        read_identity(8'd0);
-        check("word 0 is CHIP and contract version 1",
-              idw == 64'h4348_4950_0000_0001);
-        read_identity(8'd1);
-        check("word 1 names the device LM1", idw == 64'h0000_0000_0031_4D4C);
-        read_identity(8'd7);
-        check("a word beyond the record reads zero", idw == 64'd0);
         check("the link asks for nothing in reset",
               lk_rq_valid == 1'b0 && sb_ready == 1'b0);
         check("in reset LM-1 takes no write and lends nothing",
               lk_wq_ready == 1'b0 && lk_wa_valid == 1'b0 &&
               lend_ready == 1'b0 && mw_valid == 1'b0);
 
-        $display("\nBoot fetch");
+        // The runtime starts from a short image, as the shared cases check.
         hostmem[10'h200] = 64'h1111_1111_0000_0001;
-        hostmem[10'h201] = 64'h2222_2222_0000_0002;
-        hostmem[10'h202] = 64'h3333_3333_0000_0003;
         sb_boot_addr = 64'h1000;
-        sb_boot_len  = 64'd20;          // two and a half words
+        sb_boot_len  = 64'd8;
         sb_boot_arg  = 64'h2040;
         @(posedge clk);
         sb_rst_n = 1'b1;
         while (!boot_done && !boot_failed) @(posedge clk);
         @(posedge clk);
-        check("the fetch completes", boot_done && !boot_failed);
-        check("the boot argument reaches the runtime", boot_arg == 64'h2040);
-        check("a length of 20 bytes writes three words", mem_writes == 3);
-        check("the words land in order from the load base",
-              lmem[LOAD_BASE[11:3]]     == 64'h1111_1111_0000_0001 &&
-              lmem[LOAD_BASE[11:3] + 1] == 64'h2222_2222_0000_0002 &&
-              lmem[LOAD_BASE[11:3] + 2] == 64'h3333_3333_0000_0003 &&
-              lmem[LOAD_BASE[11:3] + 3] == FILL);
         runtime_ready = 1'b1;
         @(posedge clk);
-        check("READY follows the runtime", sb_ready == 1'b1);
 
         $display("\nThe runtime's requests");
         rt_access(64'h2000, 64'hABCD_EF01_2345_6789, 1'b1, 0);
@@ -626,10 +809,8 @@ module lm1_link_tb;
         lk_dbt_valid <= 1'b1; lk_dbt_src <= 8'd2;
         @(posedge clk);
         #1;
-        check("a doorbell from MegaPad is offered locally with its source",
-              dbi_valid == 1'b1 && dbi_src == 8'd2);
-        check("it waits until the local side takes it",
-              lk_dbt_ready == 1'b0);
+        check("a doorbell waits until the local side takes it",
+              dbi_valid == 1'b1 && lk_dbt_ready == 1'b0);
         dbi_ready <= 1'b1;
         @(posedge clk);
         #1;
@@ -640,8 +821,8 @@ module lm1_link_tb;
         dbo_valid <= 1'b1; dbo_dst <= 8'd0;
         @(posedge clk);
         #1;
-        check("a local doorbell goes out with its destination",
-              lk_dbr_valid == 1'b1 && lk_dbr_dst == 8'd0);
+        check("a local doorbell is offered at once, before the link takes it",
+              lk_dbr_valid == 1'b1 && dbo_ready == 1'b0);
         lk_dbr_ready <= 1'b1;
         @(posedge clk);
         #1;
@@ -654,65 +835,21 @@ module lm1_link_tb;
         check("the table reports two ranges", lend_ranges == 8'd2);
         prev_w = mem_writes;
         mp_write(64'h400, 0, 0, 16'hA000, -1, 0);
-        check("before LM-1 lends a range a write is refused",
-              w_answered && w_code == 2'd1);
-        check("after its first message, with nothing written",
-              w_taken == 1 && mem_writes == prev_w && untouched(64'h400, 8));
+        check("a refusal comes after the write's first message, writing nothing",
+              w_answered && w_code == 2'd1 && w_taken == 1 && mem_writes == prev_w);
 
         lend(8'd0, 64'h400, 64'h800, 1'b1);     // sixteen units
         prev_w = mem_writes;
         mp_write(64'h400, 3, 0, 16'hA100, -1, 0);
-        check("a write of four units into the lent range is answered OK",
-              w_answered && w_code == 2'd0 && w_taken == 4);
-        check("its 32 words are in LM-1's memory in order",
-              mem_writes == prev_w + 32 && holds(64'h400, 4, 0, 16'hA100));
-        check("the memory around it is untouched",
-              untouched(64'h3F8, 1) && untouched(64'h500, 8));
+        check("an admitted write of four units gives the memory 32 words",
+              w_code == 2'd0 && w_taken == 4 && mem_writes == prev_w + 32);
         check("the answer leaves after the last word is written",
               w_answer_cyc > last_write_cyc);
         check("the units pass back to back: 35 cycles from the first offer",
               w_cycles == 35);
-
-        prev_w = mem_writes;
-        mp_write(64'h540, 0, 3, 16'hA200, -1, 0);
-        check("an FP64 image, one unit and three of zeros, is answered OK",
-              w_answered && w_code == 2'd0 && w_taken == 1);
-        check("LM-1 writes the unit and then the zeros, 32 words",
-              mem_writes == prev_w + 32 && holds(64'h540, 1, 3, 16'hA200) &&
-              untouched(64'h640, 1));
-        mp_write(64'h680, 1, 2, 16'hA300, -1, 0);
-        check("two units and two of zeros are answered OK",
-              w_answered && w_code == 2'd0 && w_taken == 2 &&
-              holds(64'h680, 2, 2, 16'hA300));
-        mp_write(64'h700, 3, 0, 16'hA400, -1, 0);
-        check("a write that ends at the range's limit is admitted",
-              w_code == 2'd0 && holds(64'h700, 4, 0, 16'hA400));
-
-        $display("\nRefusals write nothing");
-        fill_lmem();
-        prev_w = mem_writes;
-        mp_write(64'h420, 0, 0, 16'hB000, -1, 0);
-        check("a write not aligned to 64 bytes is refused",
-              w_code == 2'd1 && w_taken == 1);
         mp_write(64'h7C0, 1, 0, 16'hB100, -1, 0);
-        check("a write that runs past the range is refused at its first unit",
+        check("LM-1 refuses before it takes a write's second unit",
               w_code == 2'd1 && w_taken == 1);
-        mp_write(64'h780, 0, 2, 16'hB200, -1, 0);
-        check("so is one whose zero units run past it",
-              w_code == 2'd1 && w_taken == 1);
-        lend(8'd1, 64'h800, 64'h900, 1'b1);
-        mp_write(64'h7C0, 1, 0, 16'hB300, -1, 0);
-        check("a write across two ranges is refused: one must hold it all",
-              w_code == 2'd1);
-        lend(8'd5, 64'hC00, 64'hD00, 1'b1);
-        mp_write(64'hC00, 0, 0, 16'hB400, -1, 0);
-        check("a lend beyond the table's ranges lends nothing",
-              w_code == 2'd1);
-        check("no refused write touched LM-1's memory",
-              mem_writes == prev_w && untouched(64'h400, 256));
-        mp_write(64'h800, 1, 0, 16'hB500, -1, 0);
-        check("the second range takes a write of its own",
-              w_code == 2'd0 && holds(64'h800, 2, 0, 16'hB500));
 
         $display("\nA failing memory, a slow memory, a slow writer");
         fill_lmem();
@@ -776,14 +913,7 @@ module lm1_link_tb;
               w_code == 2'd0 && holds(64'h400, 4, 0, 16'hE000));
         check("the withdrawal is taken only once that write has ended",
               lend_cyc > w_answer_cyc);
-        prev_w = mem_writes;
-        mp_write(64'h400, 0, 0, 16'hE100, -1, 0);
-        check("after it a write into the range is refused",
-              w_code == 2'd1 && mem_writes == prev_w);
         lend(8'd0, 64'h400, 64'h800, 1'b1);
-        mp_write(64'h400, 0, 0, 16'hE200, -1, 0);
-        check("lent again, the range takes writes",
-              w_code == 2'd0 && holds(64'h400, 1, 0, 16'hE200));
 
         $display("\nStop");
         @(posedge clk);
@@ -792,18 +922,11 @@ module lm1_link_tb;
         #1;
         check("the runtime is asked to stop", stop_req == 1'b1);
         check("no new request is taken", rt_req_ready == 1'b0);
-        dbo_valid <= 1'b1;
-        @(posedge clk);
-        #1;
-        check("no new doorbell goes out", lk_dbr_valid == 1'b0);
-        dbo_valid <= 1'b0;
         check("LM-1 reports stopped only once the runtime has stopped",
               sb_stopped == 1'b0);
         runtime_stopped <= 1'b1;
         @(posedge clk);
         #1;
-        check("with the runtime stopped and nothing in flight it reports so",
-              sb_stopped == 1'b1);
         seen_stopped = 1'b0;
         mem_slow = 1'b1;
         fork
@@ -843,9 +966,6 @@ module lm1_link_tb;
         @(negedge clk);
         sb_rst_n = 1'b1;
         repeat (3) @(negedge clk);
-        mp_write(64'h400, 0, 0, 16'hF200, -1, 0);
-        check("LM-1's reset clears the ranges it lent",
-              w_answered && w_code == 2'd1);
 
         $display("\nA failed fetch");
         sb_rst_n <= 1'b0;
@@ -855,16 +975,13 @@ module lm1_link_tb;
               rt_req_ready == 1'b0 && sb_ready == 1'b0);
         sb_boot_addr <= 64'h9000;       // outside what the host lends
         sb_boot_len  <= 64'd16;
-        prev_w = mem_writes;
         @(posedge clk);
         sb_rst_n <= 1'b1;
         @(posedge clk);
         while (!boot_done && !boot_failed) @(posedge clk);
         @(posedge clk);
-        check("a refused image ends the fetch as failed",
-              boot_failed && !boot_done);
-        check("nothing is loaded from it", mem_writes == prev_w);
-        check("the runtime's port stays closed", rt_req_ready == 1'b0);
+        check("after a failed fetch the runtime's port stays closed",
+              boot_failed && rt_req_ready == 1'b0);
 
         $display("\nA word the memory fails ends the fetch");
         sb_rst_n <= 1'b0;
@@ -885,37 +1002,6 @@ module lm1_link_tb;
         check("the burst under way is cancelled and the link is idle again",
               hstate == H_IDLE && lk_rq_valid == 1'b0);
         mem_fail = '1;
-
-        $display("\nNo image");
-        sb_rst_n <= 1'b0;
-        repeat (2) @(posedge clk);
-        sb_boot_len <= 64'd0;
-        @(posedge clk);
-        sb_rst_n <= 1'b1;
-        repeat (3) @(posedge clk);
-        #1;
-        check("a length of zero finishes at once", boot_done == 1'b1);
-
-        $display("\nA long image, fetched in bursts");
-        sb_rst_n <= 1'b0;
-        repeat (2) @(posedge clk);
-        for (int i = 0; i < 20; i++)
-            hostmem[10'h240 + i] = 64'hF00D_0000 + 64'(i);
-        sb_boot_addr <= 64'h1200;
-        sb_boot_len  <= 64'd160;        // twenty words
-        prev_w = mem_writes;
-        @(posedge clk);
-        host_requests = 0;
-        sb_rst_n <= 1'b1;
-        @(posedge clk);
-        while (!boot_done && !boot_failed) @(posedge clk);
-        @(posedge clk);
-        check("twenty words load", boot_done && mem_writes == prev_w + 20);
-        check("the first and the last are right",
-              lmem[LOAD_BASE[11:3]]      == 64'hF00D_0000 &&
-              lmem[LOAD_BASE[11:3] + 19] == 64'hF00D_0013);
-        check("in three requests of eight, eight and four words",
-              host_requests == 3);
 
         $display("\n=== lm1_link_tb: %0d passed, %0d failed ===",
                  pass_count, fail_count);
