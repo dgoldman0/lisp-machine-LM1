@@ -136,10 +136,7 @@ private:
             const unsigned landed = code == MP64_CHIPLET_OK ? len + 1 : std::min(done, len + 1);
             for (unsigned i = 0; i < landed; ++i) s_.trace.emplace_back(addr + 8 * i, data[i]);
         }
-        if (code == MP64_CHIPLET_OK) return true;
-        link_failed_ = true;
-        failed_addr_ = addr;
-        return false;
+        return code == MP64_CHIPLET_OK;
     }
     bool read_words(u64 addr, u64 *out, u64 n) {
         while (n > 0) {
@@ -257,8 +254,6 @@ private:
     Model &m_;
     Standin &s_;
     u64 budget_, used_ = 0;
-    bool link_failed_ = false;
-    u64 failed_addr_ = 0;
     // The participants that rang since the last step.
     std::vector<bool> rung_ = std::vector<bool>(256, false);
     bool any_rung_ = false;
@@ -499,7 +494,6 @@ void Service::attach(const QEntry &e) {
         return;
     }
     if (s_.phase != MdPhase::Granted || e.w[3] < MC_SIZE || !check_records(e.w[2])) {
-        link_failed_ = false;
         reply(1, e, ST_BAD_RECORD);
         return;
     }
@@ -519,7 +513,6 @@ void Service::attach(const QEntry &e) {
     block[LB_SHAPE_CONS / 8 + 3] = SHAPE_STRING;
     block[LB_SHAPE_RANGE / 8] = SHAPE_REGISTRY_FIRST | (SHAPE_STANDIN_FIRST << 32);
     if (!write_words(s_.lm1_block, block.data(), block.size())) {
-        link_failed_ = false;
         reply(1, e, ST_BAD_RECORD);
         return;
     }
@@ -697,7 +690,6 @@ void Service::shape(u64 c, const QEntry &e) {
     const u64 addr = e.w[2], len = e.w[3];
     u64 head[3];
     if (len < SD_KINDS || !aligned8(addr) || !read_words(addr, head, 3)) {
-        link_failed_ = false;
         reply(2 + c, e, ST_BAD_RECORD);
         return;
     }
@@ -714,7 +706,6 @@ void Service::shape(u64 c, const QEntry &e) {
     }
     s.kinds.resize(size_t(s.tagged + s.raw));
     if (!read_words(addr + SD_KINDS, s.kinds.data(), s.kinds.size())) {
-        link_failed_ = false;
         reply(2 + c, e, ST_BAD_RECORD);
         return;
     }
@@ -740,7 +731,6 @@ void Service::shape(u64 c, const QEntry &e) {
     const u64 name_at = addr + SD_KINDS + 8 * s.kinds.size();
     std::vector<u64> words(size_t((name_len + 7) / 8 + 1), 0);
     if (name_len > 0 && !read_words(name_at, words.data(), (name_len + 7) / 8)) {
-        link_failed_ = false;
         reply(2 + c, e, ST_BAD_RECORD);
         return;
     }
@@ -1507,7 +1497,6 @@ bool Service::collect(u64 mode, std::vector<Extent> &released) {
 void Service::hook_writes() {
     for (const auto &p : s_.pokes) {
         if (!write(p.first, p.second)) {
-            link_failed_ = false;
             continue;
         }
         standin_barrier(m_, p.first, p.second);
@@ -1517,7 +1506,6 @@ void Service::hook_writes() {
         if (ch.left == 0) continue;
         const u64 v = (ch.turn & 1) ? ch.b : ch.a;
         if (!write(ch.addr, v)) {
-            link_failed_ = false;
             ch.left = 0;
             continue;
         }
@@ -1554,7 +1542,6 @@ void Service::fail(u64 kind, u64 why, u64 addr) {
     s_.phase = MdPhase::Failed;
     s_.why = why;
     s_.why_addr = addr;
-    link_failed_ = false;
     notice(kind, 0, addr);
     s_.hold_word = (epoch() << 3) | HOLD_FAILED;
     write(s_.lm1_block + LB_HOLD, s_.hold_word);
