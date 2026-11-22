@@ -78,26 +78,6 @@ uninitialized template slots.
 **Action:** Add a reset-sequencer that clears all 64 entries, or add a
 "template valid" bit and trap on access to invalid entries.
 
-### P0-6  MUL.FIX never traps on overflow
-
-`lm1_alu.sv` checks the product's truncated low 64 bits by untagging and
-retagging them.  The product of a fixnum and a tagged fixnum is always
-even, so the check always passes: `2**40 * 2**40` returns fixnum 0.  The
-spec traps `TRAP_FIXNUM_OVERFLOW` when the product leaves the fixnum range
-(spec/02-isa.md § 3.2), and the emulator checks the exact product.
-
-**Where:** `lm1_alu.sv`, `fix_mul_overflow`.
-**Action:** compare the product's high 64 bits with the sign extension of
-its low half, and trap when they differ.
-
-### P0-7  DIV.FIX of the most negative fixnum by -1 wraps
-
-The divider's sign correction yields 2**62, which `tag_fixnum` shifts into
-the sign bit, so `-2**62 / -1` returns the most negative fixnum.  The spec
-lists `TRAP_FIXNUM_OVERFLOW` for DIV.FIX, and the emulator traps there.
-
-**Where:** `lm1_alu.sv`, `FUNC_DIV_FIX` result.
-
 ### P0-8  FAA adds raw words without the fixnum check
 
 `S_MEM_WAIT` adds the delta to the loaded word whatever their tags.  The

@@ -16,6 +16,8 @@ Tests cover:
   40: JR / TAILCALL.DIR
   41: CALL.CLOSURE
   42: Backward branches and BR.T edge cases
+  45: MUL.FIX and DIV.FIX trap when the exact result leaves the fixnum range
+  46: An ALU fault saves its own PC, so ERET retries it
 """
 
 import os
@@ -779,6 +781,148 @@ brt_0_done:
 
 
 # ===========================================================================
+# Test 45: MUL.FIX and DIV.FIX overflow
+# ===========================================================================
+def gen_test_45():
+    source = f"""\
+    ; Test 45: MUL.FIX and DIV.FIX trap TRAP_FIXNUM_OVERFLOW when the exact
+    ; result leaves the fixnum range, -2**62 to 2**62 - 1 (spec/02-isa.md
+    ; section 3.2).  Fixnum n is the raw word 2n.
+    ;
+    ; The handler counts the trap in r20, keeps the trap PC in r21 and the
+    ; cause in r22, and resumes after the faulting instruction, whose
+    ; destination keeps the 0x77 put there first.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, ovf_handler
+    LI  r15, {TRAP_TABLE + 0x02 * 8}   ; slot 0x02 = TRAP_FIXNUM_OVERFLOW
+    STR r15, r14, 0
+    LI  r20, 0
+    LI  r9, 1
+
+    ; --- 2**40 * 2**40 = 2**80: the low 64 bits are 0, the product overflows ---
+    LI  r10, 41
+    SHL r10, r9, r10      ; fixnum 2**40
+    LI  r1, 0x77
+mul_big:
+    MUL.FIX r1, r10, r10  ; traps
+    LI  r11, mul_big
+    SUB r2, r21, r11      ; 0: the trap saved the MUL.FIX's own PC
+
+    ; --- 2**61 * 2 = 2**62, one past the largest fixnum ---
+    LI  r10, 62
+    SHL r10, r9, r10      ; fixnum 2**61
+    LI  r11, 4            ; fixnum 2
+    LI  r3, 0x77
+    MUL.FIX r3, r10, r11  ; traps
+
+    ; --- -2**61 * 2 = -2**62, the most negative fixnum, fits ---
+    LI  r12, 0
+    SUB r10, r12, r10     ; fixnum -2**61
+    MUL.FIX r4, r10, r11  ; fixnum -2**62
+
+    ; --- -3 * 5 = -15 ---
+    LI  r10, -6
+    LI  r11, 10
+    MUL.FIX r5, r10, r11
+
+    ; --- the most negative fixnum over -1 = 2**62: overflows ---
+    LI  r10, 63
+    SHL r10, r9, r10      ; fixnum -2**62
+    LI  r11, -2           ; fixnum -1
+    LI  r6, 0x77
+div_min:
+    DIV.FIX r6, r10, r11  ; traps
+    LI  r12, div_min
+    SUB r7, r21, r12      ; 0: the trap saved the DIV.FIX's own PC
+
+    ; --- the most negative fixnum over 1 and over -2 fit ---
+    LI  r11, 2            ; fixnum 1
+    DIV.FIX r8, r10, r11  ; fixnum -2**62
+    LI  r11, -4           ; fixnum -2
+    DIV.FIX r13, r10, r11 ; fixnum 2**61
+    MOV r16, r22          ; the last trap's cause
+    HALT
+
+ovf_handler:
+    TRAP.PC r21
+    TRAP.CAUSE r22
+    LI  r23, 1
+    ADD r20, r20, r23
+    LI  r23, 4
+    ADD r24, r21, r23     ; the instruction after the faulting one
+    JR  r24
+"""
+    emit_test('45_fix_overflow', source, {
+        'r1': 0x77,                   # 2**40 * 2**40 trapped, r1 unwritten
+        'r2': 0,                      # at the MUL.FIX's own PC
+        'r3': 0x77,                   # 2**61 * 2 trapped
+        'r4': tag_fixnum(-(1 << 62)),  # -2**61 * 2 fits
+        'r5': tag_fixnum(-15),
+        'r6': 0x77,                   # -2**62 / -1 trapped
+        'r7': 0,                      # at the DIV.FIX's own PC
+        'r8': tag_fixnum(-(1 << 62)),  # -2**62 / 1
+        'r13': tag_fixnum(1 << 61),   # -2**62 / -2
+        'r16': 0x02,                  # TRAP_FIXNUM_OVERFLOW
+        'r20': 3,                     # three overflows trapped
+    })
+
+
+# ===========================================================================
+# Test 46: ALU faults save their own PC
+# ===========================================================================
+def gen_test_46():
+    source = f"""\
+    ; Test 46: a fault saves the faulting instruction's PC, so ERET runs it
+    ; again (spec/03-core.md section 6.3), the ALU's faults among them.  The
+    ; handler for TRAP_NOT_FIXNUM makes r10 fixnum 3 and returns with ERET,
+    ; so each faulting instruction runs again and succeeds.  A DIV.FIX that
+    ; faults leaves the divider idle, so the retried DIV.FIX and the raw DIV
+    ; after it each get their own quotients.
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, fix_handler
+    LI  r15, {TRAP_TABLE + 0x01 * 8}   ; slot 0x01 = TRAP_NOT_FIXNUM
+    STR r15, r14, 0
+    LI  r20, 0
+
+    ; --- ADD.FIX on an odd word ---
+    LI  r10, 7            ; not a fixnum
+    LI  r11, 10           ; fixnum 5
+add_site:
+    ADD.FIX r1, r10, r11  ; traps, then fixnum 3 + 5
+    LI  r12, add_site
+    SUB r2, r21, r12      ; 0: the trap saved the ADD.FIX's own PC
+
+    ; --- DIV.FIX on an odd word, then a raw DIV ---
+    LI  r10, 0x7FFF       ; not a fixnum
+    LI  r11, 6            ; fixnum 3
+    DIV.FIX r3, r10, r11  ; traps, then fixnum 3 / 3
+    LI  r12, 100
+    LI  r13, 7
+    DIV r4, r12, r13      ; 100 / 7
+    MOV r5, r20
+    HALT
+
+fix_handler:
+    TRAP.PC r21
+    LI  r23, 1
+    ADD r20, r20, r23
+    LI  r10, 6            ; fixnum 3
+    ERET
+"""
+    emit_test('46_fault_retry', source, {
+        'r1': tag_fixnum(8),   # the retried ADD.FIX
+        'r2': 0,               # its trap PC
+        'r3': tag_fixnum(1),   # the retried DIV.FIX
+        'r4': 14,              # the raw DIV's own quotient
+        'r5': 2,               # two traps
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -798,4 +942,6 @@ if __name__ == '__main__':
     gen_test_40()
     gen_test_41()
     gen_test_42()
+    gen_test_45()
+    gen_test_46()
     print("Done. All gap tests generated.")

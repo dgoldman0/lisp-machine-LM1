@@ -152,7 +152,7 @@ All instructions are 32 bits wide. Four encoding formats:
 | 3 | ADD.FIX.IMM | I | `Rd = regs[Rs1] + tag_fixnum(imm16)` with overflow trap |
 | 4 | CMP.TAGGED | R | Tagged comparison → tagged -1/0/+1 (fixnum), or identity compare for non-fixnums |
 
-**Key implementation detail:** Fixnum ADD/SUB are single-cycle. The ALU performs the raw 64-bit add, then checks for overflow by comparing input/output sign bits. MUL uses the hardware multiplier and verifies the result fits in 63 bits. DIV uses a 64-cycle iterative divider — it untags both operands, divides, retags the quotient.
+**Key implementation detail:** Fixnum ADD/SUB are single-cycle. The ALU performs the raw 64-bit add, then checks for overflow by comparing input/output sign bits. MUL multiplies the untagged first operand by the tagged second one into a 128-bit product, which is the tagged result when it fits a signed 64-bit word and traps `FIXNUM_OVERFLOW` otherwise. DIV uses a 64-cycle iterative divider — it untags both operands, divides, retags the quotient — and traps `FIXNUM_OVERFLOW` for the one quotient outside the fixnum range, the most negative fixnum over -1. The divider starts only on two fixnums, so an operand that traps `NOT_FIXNUM` leaves it idle.
 
 ### Family 2: Allocation
 

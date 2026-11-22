@@ -131,7 +131,8 @@ Multi-cycle operations (DIV/MOD): The ALU's internal divider FSM runs for
 **64 clock cycles** (1 bit per cycle, shift-and-subtract). The control FSM
 polls `alu_valid` each cycle. On completion, the result is written back.
 
-If the ALU raises `alu_trap`, the FSM captures the trap code and transitions
+If the ALU raises `alu_trap`, the FSM keeps the PC at the faulting
+instruction, which `S_TRAP_LOOKUP` saves, captures the trap code and transitions
 to `S_TRAP_LOOKUP` instead.
 
 ### 5. Memory Access — `S_MEM` / `S_MEM_WAIT`
@@ -407,8 +408,11 @@ choice: the tagged-word ISA needs `nil` (0x05), not zero, as its
 
 **Tagged fixnum:**
 - ADD.FIX, SUB.FIX: single-cycle with overflow detection
-- MUL.FIX: single-cycle (untag × tagged, retag)
-- DIV.FIX: 64-cycle (untag both, divide, retag quotient)
+- MUL.FIX: single-cycle (untag × tagged into a 128-bit product, which traps
+  `FIXNUM_OVERFLOW` unless it fits a signed 64-bit word)
+- DIV.FIX: 64-cycle (untag both, divide, retag quotient; the most negative
+  fixnum over -1 traps `FIXNUM_OVERFLOW`, and the divider starts only on two
+  fixnums)
 
 **Bitwise:**
 - AND, OR, XOR, NOT, SHL, SHR, ASR: single-cycle
@@ -666,6 +670,9 @@ without entering the trap handler path:
 ### Exception Return
 
 `ERET` restores `pc = trap_pc`, clears `in_trap`, and returns to `S_FETCH`.
+A fault leaves `pc` at the faulting instruction when it enters
+`S_TRAP_LOOKUP`, so `ERET` runs that instruction again; an explicit `TRAP`
+advances `pc` first, so `ERET` resumes after it (spec/03-core.md § 6.3).
 If `ERET` is executed outside a trap handler, it traps `TRAP_UNIMPLEMENTED`.
 
 ---

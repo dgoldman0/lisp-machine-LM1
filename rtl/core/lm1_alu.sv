@@ -107,10 +107,15 @@ module lm1_alu
                             div_state   <= DIV_RUNNING;
                         end
                     end else if (start && (alu_op == OP_ARITH_FIX) &&
-                                 (alu_func == FUNC_DIV_FIX)) begin
+                                 (alu_func == FUNC_DIV_FIX) &&
+                                 !operand_a[0] && !operand_b[0]) begin
                         // Tagged fixnum divide: untag, take absolute values,
                         // divide unsigned, then correct signs in result mux.
                         // Avoid $signed/>>> for Verilator compatibility.
+                        // An operand that is not a fixnum traps at once in
+                        // the result mux, so the divider stays idle: a
+                        // division left running would answer the next
+                        // DIV or DIV.FIX with its own quotient.
                         logic [XLEN-1:0] fix_ua, fix_ub;
                         logic [XLEN-1:0] abs_a, abs_b;
                         logic a_neg, b_neg;
@@ -182,24 +187,24 @@ module lm1_alu
     // ---------------------------------------------------------------
     // Tagged fixnum multiply
     // untag(a) * b → result  (b stays tagged, a is untagged)
+    //
+    // The product of a fixnum and a tagged fixnum is the tagged product,
+    // which is even, so it is a fixnum exactly when the exact product fits
+    // a signed 64-bit word (spec/02-isa.md § 3.2).  The multiplier keeps
+    // all 128 bits of the signed product, and the product fits when its
+    // high half is the sign extension of its low half.
     // ---------------------------------------------------------------
     logic signed [XLEN-1:0] fix_a_untagged;
+    logic [2*XLEN-1:0]      fix_mul_full;
     logic [XLEN-1:0]        fix_mul_result;
     logic                   fix_mul_overflow;
 
     assign fix_a_untagged = $signed(operand_a) >>> 1;
-    assign fix_mul_result = fix_a_untagged * operand_b;
-
-    // Overflow check: untag result, retag, compare
-    logic signed [XLEN-1:0] fix_mul_check;
-    assign fix_mul_check = $signed(fix_mul_result) >>> 1;
-
-    // If tag_fixnum(untag_fixnum(result)) != result → overflow
-    // tag_fixnum(x) = x << 1, untag_fixnum(w) = w >>> 1
-    // So check: (fix_mul_result >>> 1) << 1 == fix_mul_result
-    // i.e., bit[0] must be 0 AND no sign-extension loss
-    assign fix_mul_overflow = (fix_mul_result[0] != 1'b0) ||
-                              ({fix_mul_check[XLEN-2:0], 1'b0} != fix_mul_result);
+    assign fix_mul_full   = {{XLEN{fix_a_untagged[XLEN-1]}}, fix_a_untagged} *
+                            {{XLEN{operand_b[XLEN-1]}}, operand_b};
+    assign fix_mul_result = fix_mul_full[XLEN-1:0];
+    assign fix_mul_overflow =
+        (fix_mul_full[2*XLEN-1:XLEN] != {XLEN{fix_mul_full[XLEN-1]}});
 
     // ---------------------------------------------------------------
     // Tagged fixnum divide
@@ -325,6 +330,14 @@ module lm1_alu
                                     corrected_q = div_sign_q ? (~div_q + 64'd1) : div_q;
                                     result       = tag_fixnum(corrected_q);
                                     result_valid = 1'b1;
+                                    // A fixnum holds 63 bits, so a quotient
+                                    // whose bits 63 and 62 differ leaves the
+                                    // range.  Only the most negative fixnum
+                                    // divided by -1 gives one, 2**62.
+                                    if (corrected_q[XLEN-1] != corrected_q[XLEN-2]) begin
+                                        trap_raise = 1'b1;
+                                        trap_code  = TRAP_FIXNUM_OVERFLOW;
+                                    end
                                 end
                             end
                             // else: not done yet → result_valid stays 0, FSM waits

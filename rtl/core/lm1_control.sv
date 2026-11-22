@@ -1430,12 +1430,15 @@ module lm1_control
                        (dr.opcode == OP_TST)         ? {48'b0, dr.imm16} : opc;
 
             if (alu_valid) begin
-                cyc_inc = 1'b1;
-                pc_n    = pc + 64'd4;
                 if (alu_trap) begin
+                    // A fault: the PC stays at the faulting instruction,
+                    // which S_TRAP_LOOKUP saves, so ERET runs it again
+                    // (spec/03-core.md § 6.3).
                     tc_n = alu_trap_code;
                     ns   = S_TRAP_LOOKUP;
                 end else begin
+                    cyc_inc   = 1'b1;
+                    pc_n      = pc + 64'd4;
                     rf_we     = 1'b1;
                     rf_w_addr = banked_addr(cur_thread, dr.rd);
                     rf_w_data = alu_result;
