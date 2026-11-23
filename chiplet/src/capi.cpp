@@ -443,6 +443,12 @@ LM1C_API int lm1c_md_drain(lm1c_model *model, int on) {
     return LM1C_OK;
 }
 
+LM1C_API int lm1c_md_stop_at_flip(lm1c_model *model, int on) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    model->standin.stop_at_flip = on != 0;
+    return LM1C_OK;
+}
+
 LM1C_API int lm1c_md_trace(lm1c_model *model, int on) {
     if (model == nullptr) return LM1C_BAD_INDEX;
     model->standin.tracing = on != 0;

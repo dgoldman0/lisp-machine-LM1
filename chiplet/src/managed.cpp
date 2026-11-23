@@ -19,7 +19,11 @@
 // ACTIVE work, from draining the logs to the last rewrite.  A stop request,
 // which MegaPad makes between steps, therefore never finds a hold in the
 // middle of its moves, and LM-1 reports STOPPED with MOVE reading NONE or
-// FIXED (spec/05-memory-gc.md section 12.9).  Each step stands for the budget
+// FIXED (spec/05-memory-gc.md section 12.9).  A test hook makes the request
+// arrive as a hold begins flipping; the stand-in then finishes the hold's
+// moves and rewrites, writes FIXED, and writes nothing more, leaving the
+// hold ACTIVE, which is how LM-1 answers a stop only between moves.  Each
+// step stands for the budget
 // it was given, budget times unit_ns nanoseconds of LM-1's time, by which the
 // stand-in keeps HOLD_GAP, WINDOW_LIMIT and the test hook's timed holds.
 //
@@ -970,7 +974,7 @@ void Service::holds() {
         }
         if (open) return;
         active_work();
-        if (!serving()) return;
+        if (!serving() || m_.link.stop_req) return;
     }
     if (s_.hold == HoldPhase::Active && s_.current.keep_ns != ~0ull && s_.clock_ns >= s_.keep_until_ns)
         end_hold();
@@ -991,6 +995,11 @@ void Service::active_work() {
     std::vector<Extent> released;
     if (!retire_regions(released) || !walk_runs()) return;
     if (s_.current.mode <= 2 && !collect(s_.current.mode, released)) return;
+    // A stop that came while the hold flipped is answered here, with MOVE
+    // reading FIXED: LM-1 writes nothing more, and the hold stays ACTIVE
+    // for MegaPad's rule to end (MegaPad's docs/managed-data.md section 11,
+    // row 6).
+    if (m_.link.stop_req) return;
     // What the hold freed, and the rest of every region it retired, are
     // free once its moves are done.
     for (const Extent &x : released) give_back(x.base, x.limit);
@@ -1383,6 +1392,14 @@ bool Service::collect(u64 mode, std::vector<Extent> &released) {
             fail(NOTICE_CORRUPT, WHY_LINK, move_set);
             return false;
         }
+        // The test hook's stop arrives now, while the hold flips.  LM-1
+        // answers a stop only between moves (spec/05-memory-gc.md section
+        // 12.9): it finishes every move and rewrite below, writes FIXED,
+        // and only then stops.
+        if (s_.stop_at_flip) {
+            s_.stop_at_flip = false;
+            m_.link.stop_req = true;
+        }
         // Each copy whole, then the forwarding pointer over the old
         // header, in a request of its own.
         for (u64 a : moving) {
@@ -1612,6 +1629,8 @@ void Service::run() {
         hook_writes();
         holds();
     }
+    // A stop that arrived in this step's hold: nothing more goes out.
+    if (m_.link.stop_req) return;
     if (!s_.outbox.empty()) flush_outbox();
 }
 

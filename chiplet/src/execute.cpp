@@ -893,8 +893,14 @@ void Model::init_tiles() {
 
 void Model::reset_chiplet() {
     init_tiles();
-    // LM-1's runtime loses everything it keeps in LM-1's memory.
+    // LM-1's runtime loses everything it keeps in LM-1's memory.  The test
+    // hook's record of the stand-in's writes is the test's, not LM-1's, so
+    // it outlives the reset that ends a recovery test's hold.
+    bool tracing = standin.tracing;
+    std::vector<std::pair<u64, u64>> trace = std::move(standin.trace);
     standin = Standin{};
+    standin.tracing = tracing;
+    standin.trace = std::move(trace);
     for (Tile &tile : tiles) {
         for (Thread &t : tile.threads) t.halted = true;
     }

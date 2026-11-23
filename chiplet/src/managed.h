@@ -177,8 +177,14 @@ struct Standin {
     // LM-1 that stopped serving would leave a full log.
     bool no_drain = false;
 
+    // The test hook that makes MegaPad's stop request arrive at the moment
+    // a hold writes MOVE reading FLIPPING, which the link's own stop, made
+    // between steps, never does.  Used once; not saved.
+    bool stop_at_flip = false;
+
     // The test hook's record of every word the stand-in writes across the
-    // link, in order, as (address, value), while tracing is on.  Not saved.
+    // link, in order, as (address, value), while tracing is on.  Not saved,
+    // and kept across a reset, since it is the test's record.
     bool tracing = false;
     std::vector<std::pair<u64, u64>> trace;
 

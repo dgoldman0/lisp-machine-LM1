@@ -772,4 +772,6 @@ def test_hooks_find_the_module_and_check_their_arguments():
         else:
             raise AssertionError("a hook took an argument it cannot")
     model.md_hold(3, 1000)
+    model.md_stop_at_flip(True)
+    model.md_stop_at_flip(False)
     assert model.md(chiplet.MD_PHASE) == 0 and model.md(chiplet.MD_EPOCH) == 0

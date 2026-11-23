@@ -165,11 +165,24 @@ restores the port while the function serves. The runtime stays off by
 default, since the link's shared cases also run on the RTL, where nothing
 reads the control block. A step of the module stands for `unit_ns` times
 its budget of LM-1's time, set so that LM-1's clock keeps within a small
-factor of MegaPad's in both of MegaPad's models. Left for later: recovery's
-stage 1 and beyond, with MegaPad's never-free engine; `KIND`, which the
-stand-in never needs, since it puts no kinds of its own in the shared heap;
-the field kinds of LM-1 code's stores, which no LM-1 code makes yet; and
-the stand-in's tasks, which wait for the link's layer for jobs.
+factor of MegaPad's in both of MegaPad's models.
+
+Recovery's stage 1 is built (2026-11-23), with MegaPad's never-free engine
+on MegaPad's side. The stand-in answers a stop only between moves
+(`spec/05-memory-gc.md` § 12.9): a hold does its whole `ACTIVE` work within
+a step, so a stop MegaPad makes between steps finds `MOVE` reading `NONE`
+or `FIXED`, and a test hook, `lm1c_md_stop_at_flip`, makes the request
+arrive as `MOVE` comes to read `FLIPPING`; the stand-in then finishes the
+hold's moves and rewrites, writes `FIXED`, and writes nothing more, leaving
+the hold `ACTIVE`, and LM-1's threads run no further in that step. The
+record of the stand-in's writes outlives a reset, so that a recovery test
+reads it after MegaPad has stopped LM-1. MegaPad's
+`tests/test_lm1_managed_data.py` runs the recovery tests of stage 1 with
+the module on both of MegaPad's models. Left for later: recovery's stage 2
+and beyond; `KIND`, which the stand-in never needs, since it puts no kinds
+of its own in the shared heap; the field kinds of LM-1 code's stores, which
+no LM-1 code makes yet; and the stand-in's tasks, which wait for the link's
+layer for jobs.
 
 *Estimate: 20 to 35 agent hours for both ends.*
 

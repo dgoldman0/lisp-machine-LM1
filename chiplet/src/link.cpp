@@ -277,7 +277,9 @@ int step(void *self, uint32_t budget) {
         // first; LM-1's threads take what the step has left.
         m.in_step = true;
         left = standin_step(m, left);
-        left = run_threads(m, left);
+        // A stop that arrived during the stand-in's work pauses the threads
+        // at once, as one between steps does.
+        if (!l.stop_req) left = run_threads(m, left);
         ring_out(m);
         m.in_step = false;
     }

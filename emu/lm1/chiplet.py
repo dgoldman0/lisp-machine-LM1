@@ -300,6 +300,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_md_get": (i32, [p, i32, pu64]),
         "lm1c_md_trace": (i32, [p, i32]),
         "lm1c_md_drain": (i32, [p, i32]),
+        "lm1c_md_stop_at_flip": (i32, [p, i32]),
         "lm1c_md_trace_take": (i32, [p, pu64, u64, pu64]),
     }
     for name, (restype, argtypes) in sig.items():
@@ -378,6 +379,11 @@ class Model:
     def md_drain(self, on: bool) -> None:
         """Whether LM-1 drains a store log when its core rings."""
         _check(self._lib.lm1c_md_drain(self._handle, int(on)), "md_drain")
+
+    def md_stop_at_flip(self, on: bool) -> None:
+        """Whether MegaPad's stop request reaches LM-1 as the next moving
+        hold begins to flip; LM-1 then stops once MOVE reads FIXED."""
+        _check(self._lib.lm1c_md_stop_at_flip(self._handle, int(on)), "md_stop_at_flip")
 
     def md_trace(self, on: bool) -> None:
         """Record every word the stand-in writes across the link."""

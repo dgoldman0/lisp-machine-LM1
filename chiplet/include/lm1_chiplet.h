@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /* Raised when a function of this interface changes or is added. */
-#define LM1C_INTERFACE_VERSION 3
+#define LM1C_INTERFACE_VERSION 4
 
 #define LM1C_OK          0
 #define LM1C_BAD_INDEX  (-1)  /* no such tile, thread, register or entry */
@@ -331,6 +331,13 @@ LM1C_API int lm1c_md_hold(lm1c_model *model, uint32_t mode, uint64_t keep_ns);
 /* With ON 0, LM-1 drains no store log when a core rings, as an LM-1 that
    stopped serving would leave a full one; ON 1 restores the draining. */
 LM1C_API int lm1c_md_drain(lm1c_model *model, int on);
+/* With ON 1, MegaPad's stop request reaches LM-1 at the moment the next
+   moving hold writes MOVE reading FLIPPING, as a request made then would
+   on the chip.  LM-1 answers a stop only between moves: it finishes the
+   hold's moves and rewrites, writes MOVE reading FIXED, and only then
+   writes nothing more and says STOPPED, the hold still ACTIVE.  The hook
+   acts once; a reset clears it. */
+LM1C_API int lm1c_md_stop_at_flip(lm1c_model *model, int on);
 /* LM-1 writes VALUE into the word at ADDR in MegaPad's memory, as its own
    store would, through the link and its barrier. */
 LM1C_API int lm1c_md_write(lm1c_model *model, uint64_t addr, uint64_t value);
@@ -339,7 +346,8 @@ LM1C_API int lm1c_md_write(lm1c_model *model, uint64_t addr, uint64_t value);
 LM1C_API int lm1c_md_churn(lm1c_model *model, uint64_t addr, uint64_t a, uint64_t b,
                            uint64_t times);
 
-/* While ON, record every word the stand-in writes across the link.
+/* While ON, record every word the stand-in writes across the link; the
+   record, and the switch, outlive a reset of the chiplet.
    lm1c_md_trace_take copies at most CAPACITY (address, value) pairs, oldest
    first, sets *COUNT to the pairs recorded, and forgets what it copied. */
 LM1C_API int lm1c_md_trace(lm1c_model *model, int on);
