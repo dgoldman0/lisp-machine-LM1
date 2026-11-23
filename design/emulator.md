@@ -147,10 +147,13 @@ def run(emu: Emulator) -> None:
             case SCALAR:          exec_scalar(tile, thread, decoded)
             case SYSTEM:          exec_system(tile, thread, decoded)
 
-        thread.cycle_count += 1
+        tile.instruction_count += 1
+        tile.cycles += cost(decoded, outcome)  # the timing model, chiplet/src/timing.h
+        if retired(thread, decoded):            # neither a fault nor a RECV that waits
+            thread.instret += 1
 
         # Check for pending interrupts, GC requests, etc.
-        if thread.cycle_count % 1024 == 0:
+        if tile.instruction_count % 1024 == 0:
             check_interrupts(tile, thread)
 ```
 
@@ -188,7 +191,7 @@ The emulator provides I/O devices as memory-mapped regions or via special TRAP c
 | **Console** | TRAP #0x80 with char in r1 | Print a character to the host terminal |
 | **Console input** | TRAP #0x81, char returned in r0 | Read a character from the host terminal |
 | **Block storage** | TRAP #0x82 with args | Read/write a 4K block from a host file |
-| **Timer** | CYCLE instruction | Read host cycle counter (or wall clock) |
+| **Timer** | CYCLE instruction | The cycles the timing model of `chiplet/src/timing.h` charged the core (`spec/02-isa.md` § 11.6); no host clock enters it |
 | **Shutdown** | HALT instruction | Exit emulator |
 
 These traps are **not** part of the ISA spec — they're emulator-specific stand-ins for I/O, which the chiplet receives from MegaPad over the link. They use system trap codes, 0x80 to 0x82, 0x84 and 0x9F, which the spec leaves reserved (`spec/02-isa.md` § 11.6), so on the RTL, which has no such bridge, each traps `TRAP_UNIMPLEMENTED`.

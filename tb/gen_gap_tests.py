@@ -26,6 +26,7 @@ Tests cover:
   52: ALLOC.CONS takes car and cdr registers, read before np moves; r0 gives nil
   53: ALLOCV's lengths run from 0 to 65,534; others trap TRAP_BAD_LENGTH
   54: INSTRET counts retired instructions: a fault retires nothing
+  55: the performance counters count the same events on the RTL and the models
 """
 
 import os
@@ -1641,6 +1642,94 @@ unimpl_handler:
 
 
 # ===========================================================================
+# Test 55: the performance counters count the same events everywhere
+# ===========================================================================
+def gen_test_55():
+    def counter(rd: int, number: int) -> str:
+        return f"    .u32 {encode_i(Op.SYS_INFO, rd, 10, number):#010x}   ; r{rd} = counter {number}"
+    source = f"""\
+    ; Test 55: SYS_INFO 10 reads the performance counter its immediate
+    ; names (spec/02-isa.md section 11.6).  The RTL and both models count
+    ; the same events: allocations and their bytes, the barrier's marks and
+    ; the stores it filters, and inline-cache misses.  Counter 8, the cycles
+    ; the core waited on memory, counts each implementation's own waits, so
+    ; the program reads it without checking it, and a number past the
+    ; counters reads 0.  The RTL's CALL.IC never hits yet, so the program
+    ; takes one miss and its handler passes the call with ERET.NEXT.
+
+    LI  sp, {STACK_TOP}
+    LI  fp, 0
+    LI  np, {NURSERY_BASE}
+    LI  nl, {NURSERY_LIMIT}
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, ic_handler
+    LI  r15, {TRAP_TABLE + 0x20 * 8}   ; TRAP_IC_MISS
+    STR r15, r14, 0
+
+    ; Templates 0, the cons, and 1, an object of shape 9
+    LI  r1, 0
+    LI  r2, 7
+    TRAP 0x91
+    LI  r1, 1
+    LI32 r2, {make_header(0, 0, 9)}
+    TRAP 0x91
+    LI  r1, {CARD_TABLE}
+    TRAP 0x92
+    LI  r1, {CARD_SHIFT}
+    TRAP 0x93
+    LI  r1, {GEN_BOUNDARY_V}
+    TRAP 0x94
+
+    ; Two allocations of 24 bytes: a young cons and an old object
+    LI  r1, {tag_fixnum(1)}
+    LI  r2, {NIL}
+    ALLOC.CONS r9, r1, r2
+    MOV r13, np
+    LI  np, {GEN_BOUNDARY_V}
+    ALLOC r10, 2, 1
+    MOV np, r13
+
+    ; The barrier marks the card of a young ref stored into the old object
+    ; and filters the store of a fixnum
+    ST.WB r10, r9, 0
+    LI  r3, {tag_fixnum(5)}
+    ST.WB r10, r3, 1
+
+    ; The CALL.IC misses, and the handler passes it
+    CALL.IC r10
+
+{counter(16, 0)}
+{counter(17, 1)}
+{counter(18, 2)}
+{counter(19, 3)}
+{counter(22, 4)}
+{counter(23, 5)}
+{counter(4, 6)}
+{counter(5, 7)}
+{counter(6, 8)}
+{counter(7, 9)}
+    HALT
+
+ic_handler:
+    LI  r12, 0x12
+    ERET.NEXT
+"""
+    emit_test('55_perf_counters', source, {
+        'r16': 2,                 # allocations
+        'r17': 48,                # their bytes, headers included
+        'r18': 1,                 # barrier marks
+        'r19': 1,                 # stores the barrier filtered
+        'r22': 0,                 # inline-cache hits
+        'r23': 1,                 # inline-cache misses
+        'r4': 0,                  # no movement engine ran
+        'r5': 0,                  # no nursery overflow
+        'r7': 0,                  # no counter 9
+        'r12': 0x12,              # the miss's handler ran
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -1670,4 +1759,5 @@ if __name__ == '__main__':
     gen_test_52()
     gen_test_53()
     gen_test_54()
+    gen_test_55()
     print("Done. All gap tests generated.")

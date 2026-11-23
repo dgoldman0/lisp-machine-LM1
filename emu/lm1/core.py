@@ -34,11 +34,9 @@ class ThreadContext:
     # Program counter
     pc: int = 0
 
-    # Cycle counter
-    cycle_count: int = 0
-
     # INSTRET, the instructions this thread has retired: a fault and a RECV
-    # that waits retire nothing (spec/02-isa.md section 11.6)
+    # that waits retire nothing (spec/02-isa.md section 11.6).  CYCLE is the
+    # core's, the tile's instruction_count.
     instret: int = 0
 
     # Halted flag
@@ -123,7 +121,7 @@ class ThreadContext:
 
     def dump_regs(self) -> str:
         """Pretty-print all registers."""
-        lines = [f"  PC  = {self.pc:#010x}  cycle = {self.cycle_count}  instret = {self.instret}"]
+        lines = [f"  PC  = {self.pc:#010x}  instret = {self.instret}"]
         for i in range(0, 32, 4):
             parts = []
             for j in range(4):

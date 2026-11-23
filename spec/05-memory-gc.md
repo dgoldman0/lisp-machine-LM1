@@ -402,7 +402,7 @@ Each tile and cluster maintain hardware performance counters:
 | `engine_fixup_count` | Pointers fixed up by movement engine |
 | `gc_pause_cycles` | Total cycles spent in GC pauses (per tile) |
 
-These counters are readable via `TILE.COUNTER Rd, #counter_id` (a supplementary system instruction).
+`SYS_INFO` 10 reads the counters built so far, which [02-isa.md](02-isa.md) § 11.6 numbers: allocations, bytes allocated, barrier fires and filtered stores, inline-cache hits and misses, nursery overflows, the cycles a movement engine worked, and the core's memory stall cycles. The rest of this table is not built.
 
 ---
 

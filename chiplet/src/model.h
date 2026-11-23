@@ -88,10 +88,25 @@ constexpr unsigned QUEUES = 4;
 // The block device's block (emulator TRAP 0x82).
 constexpr u64 BLOCK_SIZE = 4096;
 
+// LM-1's architectural timing model: the cycles each instruction costs,
+// from timing.h, the table the Python emulator reads too (spec/02-isa.md
+// section 11.6).
+namespace timing {
+#define LM1_TIMING(name, cycles) constexpr u64 name = cycles;
+#include "timing.h"
+#undef LM1_TIMING
+}  // namespace timing
+
+// The performance counters SYS_INFO 10 reads, by the number in bits 4:0 of
+// its immediate (spec/02-isa.md section 11.6); a number past them reads 0.
+constexpr unsigned CTR_ALLOC_COUNT = 0, CTR_ALLOC_BYTES = 1, CTR_BARRIER_FIRES = 2,
+                   CTR_BARRIER_FILTERED = 3, CTR_IC_HITS = 4, CTR_IC_MISSES = 5,
+                   CTR_GC_CYCLES = 6, CTR_NURSERY_OVERFLOWS = 7, CTR_MEMORY_STALLS = 8;
+constexpr unsigned PERF_COUNTERS = 9;
+
 struct Thread {
     u64 regs[REGS] = {};
     u64 pc = 0;
-    u64 cycle_count = 0;
     u64 instret = 0;  // INSTRET: the instructions the thread has retired
     bool halted = false;
     bool stalled = false;
@@ -157,7 +172,12 @@ struct Tile {
     u64 queue_base = 0;  // SET_QUEUE_BASE records it, SYS_INFO 8 reads it back
     std::vector<uint8_t> cards;  // one byte per card, 0xFF when dirty
     u64 gc_count = 0;
+    // The instructions the core has issued, whatever became of them; the
+    // cycles the timing model charged them, which CYCLE reads; and the
+    // performance counters SYS_INFO 10 reads.
     u64 instruction_count = 0;
+    u64 cycles = 0;
+    u64 perf[PERF_COUNTERS] = {};
     std::unordered_map<IcKey, u64, IcHash> ic;
     Queue queues[QUEUES];
 };
@@ -274,6 +294,10 @@ struct Model {
     // Whether a step of the chiplet module runs, the one time LM-1 may
     // reach MegaPad's memory; not state.
     bool in_step = false;
+    // Data reads so far, which the timing model's memory latency follows,
+    // and the cards the current instruction marked; not state.
+    u64 data_reads = 0;
+    u64 marks = 0;
 
     explicit Model(const Config &config);
 

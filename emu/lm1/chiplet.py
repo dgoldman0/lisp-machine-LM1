@@ -36,6 +36,7 @@ import weakref
 from pathlib import Path
 from typing import TextIO
 
+from .decode import PERF_COUNTERS
 from .traps import LM1Trap
 from .word import WORD_MASK
 
@@ -51,14 +52,15 @@ STOP_BUDGET, STOP_IDLE, STOP_TRAP, STOP_MEMORY, STOP_OLDGEN, STOP_HOST = range(6
 HOST_OK, HOST_IO_ERROR, HOST_FAIL = 0, 1, 2
 
 # enum lm1c_thread_field
-(THREAD_PC, THREAD_CYCLE_COUNT, THREAD_INSTRET, THREAD_HALTED, THREAD_STALLED,
- THREAD_STALL_QUEUE, THREAD_TRAP_TABLE_BASE, THREAD_TRAP_CAUSE, THREAD_TRAP_PC,
- THREAD_IN_TRAP, THREAD_TILE_ID, THREAD_THREAD_ID, THREAD_SLICE_BASE) = range(13)
+(THREAD_PC, THREAD_INSTRET, THREAD_HALTED, THREAD_STALLED, THREAD_STALL_QUEUE,
+ THREAD_TRAP_TABLE_BASE, THREAD_TRAP_CAUSE, THREAD_TRAP_PC, THREAD_IN_TRAP,
+ THREAD_TILE_ID, THREAD_THREAD_ID, THREAD_SLICE_BASE) = range(12)
 # enum lm1c_tile_field
 (TILE_ID, TILE_MEM_SIZE, TILE_THREADS, TILE_CURRENT_THREAD, TILE_NURSERY_BASE,
  TILE_NURSERY_SIZE, TILE_OLDGEN_BASE, TILE_OLDGEN_SIZE, TILE_OLDGEN_PTR,
  TILE_CARD_SHIFT, TILE_CARD_TABLE_BASE, TILE_GEN_BOUNDARY, TILE_CARD_TABLE_SIZE,
- TILE_GC_COUNT, TILE_INSTRUCTION_COUNT, TILE_NURSERY_CHUNK, TILE_NURSERY_FREE) = range(17)
+ TILE_GC_COUNT, TILE_INSTRUCTION_COUNT, TILE_NURSERY_CHUNK, TILE_NURSERY_FREE,
+ TILE_CYCLES) = range(18)
 
 BLOCK_SIZE = 4096
 
@@ -267,6 +269,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_tiles": (u32, [p]),
         "lm1c_tile_get": (i32, [p, u32, i32, pu64]),
         "lm1c_tile_set": (i32, [p, u32, i32, u64]),
+        "lm1c_tile_perf": (i32, [p, u32, u32, pu64]),
         "lm1c_thread_get": (i32, [p, u32, u32, i32, pu64]),
         "lm1c_thread_set": (i32, [p, u32, u32, i32, u64]),
         "lm1c_reg_get": (i32, [p, u32, u32, u32, pu64]),
@@ -449,6 +452,12 @@ class Model:
 
     def tile_set(self, tile: int, field: int, value: int) -> None:
         _check(self._lib.lm1c_tile_set(self._handle, tile, field, value & WORD_MASK), "tile_set")
+
+    def tile_perf(self, tile: int, index: int) -> int:
+        """Performance counter INDEX of the tile's core, as SYS_INFO 10 reads it."""
+        out = ctypes.c_uint64()
+        _check(self._lib.lm1c_tile_perf(self._handle, tile, index, ctypes.byref(out)), "tile_perf")
+        return out.value
 
     def thread_get(self, tile: int, thread: int, field: int) -> int:
         out = ctypes.c_uint64()
@@ -795,7 +804,6 @@ class Thread:
         return _Templates(self._m, self._tile)
 
     pc = _thread_field(THREAD_PC)
-    cycle_count = _thread_field(THREAD_CYCLE_COUNT)
     instret = _thread_field(THREAD_INSTRET)
     halted = _thread_field(THREAD_HALTED, flag=True)
     stalled = _thread_field(THREAD_STALLED, flag=True)
@@ -1081,9 +1089,15 @@ class Emulator:
     card_table_size = _tile_field(TILE_CARD_TABLE_SIZE)
     gc_count = _tile_field(TILE_GC_COUNT)
     instruction_count = _tile_field(TILE_INSTRUCTION_COUNT)
+    cycles = _tile_field(TILE_CYCLES)
     nursery_chunk = _tile_field(TILE_NURSERY_CHUNK)
     nursery_free = _tile_field(TILE_NURSERY_FREE)
     _current_thread_idx = _tile_field(TILE_CURRENT_THREAD)
+
+    @property
+    def perf(self) -> list[int]:
+        """The core's performance counters, as SYS_INFO 10 reads them."""
+        return [self._model.tile_perf(self._tile, i) for i in range(PERF_COUNTERS)]
 
     @property
     def threads(self) -> list[Thread]:

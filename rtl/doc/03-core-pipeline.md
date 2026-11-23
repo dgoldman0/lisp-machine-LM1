@@ -685,7 +685,7 @@ executed outside a trap handler, or `ERET` carries another func, it traps
 
 ## Performance Counters
 
-`lm1_perf_counters.sv` — 8 × 64-bit saturating counters.
+`lm1_perf_counters.sv` — 9 × 64-bit counters, which wrap.
 
 | Index | Counter | Strobe Signal |
 |-------|---------|---------------|
@@ -695,11 +695,17 @@ executed outside a trap handler, or `ERET` carries another func, it traps
 | 3 | Barrier filtered | `ctr_barrier_filt_inc` |
 | 4 | IC hits | `ctr_ic_hit_inc` |
 | 5 | IC misses | `ctr_ic_miss_inc` |
-| 6 | Nursery overflows | `ctr_nursery_ovf_inc` |
-| 7 | GC engine busy cycles | `gc_engine_busy` (level) |
+| 6 | GC engine busy cycles | `gc_engine_busy` (level) |
+| 7 | Nursery overflows | `ctr_nursery_ovf_inc` |
+| 8 | Memory stall cycles | `ctr_mem_stall_inc` |
 
 Counters are read via `SYS_INFO` with `rs1 = SYS_PERF_CTR` and `imm16[4:0]`
-selecting the counter index.
+selecting the counter index; an index past 8 reads 0. The control FSM
+raises `ctr_mem_stall_inc` in each clock it waits on memory: in `S_FETCH`
+while an I-cache fill runs, in a state that requests the LSU while the LSU
+cannot take the request, and in a state that waits for the LSU's answer
+while none has come. spec/02-isa.md § 11.6 lists what each counter counts
+on the RTL and in the models.
 
 ### Cycle and Instruction Counters
 

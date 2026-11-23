@@ -101,7 +101,6 @@ typedef struct lm1c_host {
 /* Fields of a hardware thread, read and written as 64-bit values. */
 enum lm1c_thread_field {
     LM1C_THREAD_PC = 0,
-    LM1C_THREAD_CYCLE_COUNT,
     LM1C_THREAD_INSTRET,         /* the instructions the thread has retired */
     LM1C_THREAD_HALTED,          /* 0 or 1 */
     LM1C_THREAD_STALLED,         /* 0 or 1 */
@@ -133,9 +132,12 @@ enum lm1c_tile_field {
     LM1C_TILE_GEN_BOUNDARY,
     LM1C_TILE_CARD_TABLE_SIZE,   /* entries; read only */
     LM1C_TILE_GC_COUNT,          /* minor collections so far */
-    LM1C_TILE_INSTRUCTION_COUNT,
+    LM1C_TILE_INSTRUCTION_COUNT, /* instructions the core issued: its cycles, which
+                                    CYCLE reads */
     LM1C_TILE_NURSERY_CHUNK,     /* bytes of the chunk a thread takes at a time; read only */
     LM1C_TILE_NURSERY_FREE,      /* the nursery's first free byte after the chunks threads hold */
+    LM1C_TILE_CYCLES,            /* the cycles the timing model charged the core, which
+                                    CYCLE reads */
     LM1C_TILE_FIELDS
 };
 
@@ -185,6 +187,11 @@ LM1C_API int lm1c_tile_get(const lm1c_model *model, uint32_t tile, int field,
                            uint64_t *value);
 LM1C_API int lm1c_tile_set(lm1c_model *model, uint32_t tile, int field,
                            uint64_t value);
+/* Performance counter INDEX of a tile's core, the one SYS_INFO 10 reads by
+   that number (spec/02-isa.md section 11.6); an index past the counters is
+   refused with LM1C_BAD_INDEX. */
+LM1C_API int lm1c_tile_perf(const lm1c_model *model, uint32_t tile, uint32_t index,
+                            uint64_t *value);
 LM1C_API int lm1c_thread_get(const lm1c_model *model, uint32_t tile, uint32_t thread,
                              int field, uint64_t *value);
 LM1C_API int lm1c_thread_set(lm1c_model *model, uint32_t tile, uint32_t thread,

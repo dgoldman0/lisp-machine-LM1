@@ -35,7 +35,11 @@ from .decode import (
     FUNC_TILE_ID, FUNC_THREAD_ID, FUNC_CYCLE,
     FUNC_HALT, FUNC_NOP,
     FUNC_ERET_NEXT,
+    CTR_ALLOC_COUNT, CTR_ALLOC_BYTES, CTR_BARRIER_FIRES, CTR_BARRIER_FILTERED,
+    CTR_IC_HITS, CTR_IC_MISSES, CTR_NURSERY_OVERFLOWS, CTR_MEMORY_STALLS,
+    PERF_COUNTERS,
 )
+from . import timing
 from .traps import (
     LM1Trap,
     TRAP_NOT_FIXNUM, TRAP_FIXNUM_OVERFLOW, TRAP_DIVIDE_BY_ZERO,
@@ -47,6 +51,15 @@ from .traps import (
 )
 from .core import ThreadContext, HEADER_TEMPLATES
 from .memory import Memory
+
+# The instructions whose reads of data memory wait one memory latency in the
+# timing model (spec/02-isa.md section 11.6).  The stack's reads, POP's,
+# POP.MULTI's and RET's, come from the stack cache and wait none.
+_READS_WAIT = frozenset((
+    Op.LD, Op.LD_CAR_CDR, Op.LDR, Op.LDB, Op.LDH, Op.LDW, Op.TST_SHAPE,
+    Op.CALL_IC, Op.TAILCALL_IC, Op.IC_INSTALL, Op.CALL_CLOSURE, Op.CAS_TAGGED,
+    Op.FAA_FENCE,
+))
 
 from collections import deque
 
@@ -210,8 +223,15 @@ class Emulator:
         # Block device (Phase 7)
         self.block_device_path: str | None = block_device
 
-        # Stats
+        # The instructions the tile's core has issued, whatever became of
+        # them; the cycles the timing model charged them, which CYCLE reads
+        # (lm1/timing.py, spec/02-isa.md section 11.6); and the performance
+        # counters SYS_INFO 10 reads.  _marks counts the cards the current
+        # instruction marked.
         self.instruction_count = 0
+        self.cycles = 0
+        self.perf = [0] * PERF_COUNTERS
+        self._marks = 0
 
     @property
     def thread(self) -> ThreadContext:
@@ -259,35 +279,69 @@ class Emulator:
         run loop: fetch, decode, execute, and answer a trap it raises
         (_take_trap); a trap no handler answers stands, and the run ends.
 
-        The instruction retires, and adds one to the thread's INSTRET, when
-        it has done its work.  A fault retires nothing, and neither does a
-        RECV that waits for a word: each runs again.  An explicit TRAP
-        retires before its trap is taken, whether a handler answers it or
-        not, as the RTL retires it.
+        Once fetched, the instruction has issued, and the timing model
+        charges the core its cycles, whatever becomes of it (_charge).  It
+        retires, and adds one to the thread's INSTRET, when it has done its
+        work.  A fault retires nothing, and neither does a RECV that waits
+        for a word: each runs again.  An explicit TRAP retires before its
+        trap is taken, whether a handler answers it or not, as the RTL
+        retires it.
         """
         t = self.thread
         raw = self.mem.load_u32(t.pc)
         inst = decode(raw)
+        self.instruction_count += 1
 
         if self.trace:
             self._trace_instruction(t.pc, inst)
 
         # Advance PC (may be overwritten by branches)
         next_pc = t.pc + 4
+        reads = self.mem.reads
+        self._marks = 0
 
         try:
             next_pc = self._execute(inst, next_pc)
             if not t.stalled:
                 t.instret += 1
+            self._charge(inst, self.mem.reads != reads, None)
         except LM1Trap as trap:
             if trap.resume_pc is not None:   # an explicit TRAP
                 t.instret += 1
+            self._charge(inst, self.mem.reads != reads, trap)
             next_pc = self._take_trap(trap)
 
         # The PC is a 64-bit register: a branch below address 0 wraps.
         t.pc = next_pc & WORD_MASK
-        t.cycle_count += 1
-        self.instruction_count += 1
+
+    def _charge(self, inst: Instruction, read: bool, trap: LM1Trap | None) -> None:
+        """Charge the core the cycles of an instruction that READ data memory
+        or not and raised TRAP or none, by the timing model (lm1/timing.py,
+        spec/02-isa.md section 11.6), and count its memory stall cycles and
+        nursery overflow."""
+        op = inst.opcode
+        latency = timing.MEMORY_LATENCY if read and op in _READS_WAIT else 0
+        if trap is not None:
+            cycles = timing.ISSUE + latency + timing.TRAP_ENTRY
+            if trap.code == TRAP_NURSERY_OVERFLOW:
+                self.perf[CTR_NURSERY_OVERFLOWS] += 1
+        else:
+            cycles = timing.ISSUE
+            if op == Op.ARITH_FIX:
+                if inst.func == FUNC_MUL_FIX:
+                    cycles = timing.MUL
+                elif inst.func == FUNC_DIV_FIX:
+                    cycles = timing.DIV
+            elif op == Op.ARITH_RAW:
+                if inst.func == FUNC_MUL:
+                    cycles = timing.MUL
+                elif inst.func in (FUNC_DIV, FUNC_MOD):
+                    cycles = timing.DIV
+            elif op == Op.ALLOCV:
+                cycles = timing.ALLOCV
+            cycles += latency + timing.BARRIER_MARK * self._marks
+        self.cycles += cycles
+        self.perf[CTR_MEMORY_STALLS] += latency
 
     # -- Execute dispatch ---
 
@@ -512,17 +566,20 @@ class Emulator:
             match sub:
                 case 0:  t.regs[inst.rd] = t.tile_id
                 case 1:  t.regs[inst.rd] = t.thread_id
-                case 2:  t.regs[inst.rd] = t.cycle_count & WORD_MASK
+                # CYCLE: the cycles the core spent before this instruction
+                case 2:  t.regs[inst.rd] = self.cycles & WORD_MASK
                 case 3:  t.regs[inst.rd] = t.trap_cause    # TRAP_CAUSE
                 case 4:  t.regs[inst.rd] = t.trap_pc       # TRAP_PC
                 case 5:  t.regs[inst.rd] = self.card_table_base   # CARD_BASE
                 case 6:  t.regs[inst.rd] = self.card_shift        # CARD_SHIFT
                 case 7:  t.regs[inst.rd] = self.gen_boundary      # GEN_BOUNDARY
                 case 8:  t.regs[inst.rd] = self.queue_base        # QUEUE_BASE
-                # The emulator models no movement engines and no counters,
-                # so it reads 0 for their status and results.
+                # The emulator models no movement engines, so it reads 0
+                # for their status and results.
                 case 9:  t.regs[inst.rd] = 0                      # GC_STATUS (stub)
-                case 10: t.regs[inst.rd] = 0                      # PERF_CTR (stub)
+                case 10:                                          # PERF_CTR
+                    ctr = inst.imm16 & 0x1F
+                    t.regs[inst.rd] = self.perf[ctr] if ctr < PERF_COUNTERS else 0
                 case 11: t.regs[inst.rd] = 0                      # SCAN_COUNT (stub)
                 case 12: t.regs[inst.rd] = 0                      # SCAN_HEAD_OBJ (stub)
                 case 13: t.regs[inst.rd] = 0                      # SCAN_HEAD_FIELD (stub)
@@ -772,10 +829,12 @@ class Emulator:
             target = self.ic_table.get(key)
             if target is not None:
                 # IC hit — push frame and jump
+                self.perf[CTR_IC_HITS] += 1
                 self._push_frame(t, next_pc)
                 next_pc = target
             else:
                 # IC miss — trap.  Handler should IC.INSTALL then ERET.
+                self.perf[CTR_IC_MISSES] += 1
                 raise LM1Trap(TRAP_IC_MISS,
                               f"IC miss: callsite={callsite:#x} shape={shape}")
 
@@ -847,8 +906,10 @@ class Emulator:
             target = self.ic_table.get(key)
             if target is not None:
                 # Tail call: DON'T push a new frame, reuse current
+                self.perf[CTR_IC_HITS] += 1
                 next_pc = target
             else:
+                self.perf[CTR_IC_MISSES] += 1
                 raise LM1Trap(TRAP_IC_MISS,
                               f"IC miss (tail): callsite={callsite:#x} shape={shape}")
 
@@ -1019,13 +1080,16 @@ class Emulator:
                 the collector's scan of that card.
         """
         if not is_any_ref(stored_val):
+            self.perf[CTR_BARRIER_FILTERED] += 1
             return
         val_addr = ref_address(stored_val)
         # Filter: container in old-gen, value in young-gen
-        if store_addr < self.gen_boundary:
-            return   # container is in young-gen — no barrier
-        if val_addr >= self.gen_boundary:
-            return   # value is also in old-gen — no cross-gen store
+        if store_addr < self.gen_boundary or val_addr >= self.gen_boundary:
+            # The container is young, or the value old too: no cross-gen store
+            self.perf[CTR_BARRIER_FILTERED] += 1
+            return
+        self.perf[CTR_BARRIER_FIRES] += 1
+        self._marks += 1
         # Mark the card as dirty (0xFF)
         card_idx = store_addr >> self.card_shift
         if self.card_table_base != 0:
@@ -1075,6 +1139,8 @@ class Emulator:
 
         # Write a ref to the new object into Rd
         t.regs[rd] = make_ref(addr)
+        self.perf[CTR_ALLOC_COUNT] += 1
+        self.perf[CTR_ALLOC_BYTES] += total_bytes
 
     def _alloc_cons(self, t: ThreadContext, rd: int,
                     car: int = NIL, cdr: int = NIL) -> None:
@@ -1092,6 +1158,8 @@ class Emulator:
 
         # Cons ref (tag = 011)
         t.regs[rd] = make_ref(addr, cons=True)
+        self.perf[CTR_ALLOC_COUNT] += 1
+        self.perf[CTR_ALLOC_BYTES] += 24
 
     # -- Trap handling (Phase 1: emulator-level I/O traps) ---
 

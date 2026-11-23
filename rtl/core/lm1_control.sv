@@ -142,6 +142,7 @@ module lm1_control
     output logic                ctr_ic_hit_inc,
     output logic                ctr_ic_miss_inc,
     output logic                ctr_nursery_ovf_inc,
+    output logic                ctr_mem_stall_inc,
 
     // -- I-Cache fetch interface --
     output logic                icache_fetch_req,
@@ -357,6 +358,19 @@ module lm1_control
             OP_SYS_INFO:    return d.rs1 > SYS_INSTRET;
             OP_HALT_NOP:    return d.rd > SEL_NOP;
             default:        return 1'b0;
+        endcase
+    endfunction
+
+    // The states that wait for the LSU's answer to a request issued in the
+    // state before them.
+    function automatic logic lsu_wait(state_t s);
+        case (s)
+            S_FETCH_WAIT, S_MEM_WAIT, S_FIELD_WAIT, S_BARRIER_MARK_W,
+            S_PUSH_FRAME_W0, S_PUSH_FRAME_W1, S_POP_FRAME_W0, S_POP_FRAME_1,
+            S_MULTI_PUSH, S_MULTI_POP_WAIT, S_ALLOC_HDR_W, S_ALLOC_ZERO_W,
+            S_ALLOC_INIT_W, S_ALLOC_INIT2_W, S_HDR_WAIT, S_CLOS_CODE_WAIT,
+            S_ATOMIC_STORE_W, S_TRAP_WAIT:  return 1'b1;
+            default:                        return 1'b0;
         endcase
     endfunction
 
@@ -609,6 +623,7 @@ module lm1_control
         ctr_ic_hit_inc       = 1'b0;
         ctr_ic_miss_inc      = 1'b0;
         ctr_nursery_ovf_inc  = 1'b0;
+        ctr_mem_stall_inc    = 1'b0;
 
         // I-Cache fetch defaults
         icache_fetch_req  = 1'b0;
@@ -2537,6 +2552,13 @@ module lm1_control
         default: ns = S_HALTED;
 
         endcase  // state
+
+        // A clock the core waits on memory: on an I-cache fill, on an LSU
+        // that cannot take its request yet, or on the answer to a read or
+        // write it issued (spec/02-isa.md section 11.6, counter 8).
+        ctr_mem_stall_inc = (state == S_FETCH && !icache_fetch_valid) ||
+                            (lsu_req && !lsu_ready) ||
+                            (lsu_wait(state) && !lsu_valid);
     end
 
 endmodule

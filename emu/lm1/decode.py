@@ -151,6 +151,19 @@ FUNC_SCAN_HEAD_FIELD = 13
 FUNC_SCAN_POP_REF    = 14
 FUNC_INSTRET         = 15   # the last assigned: sub-codes above it are reserved
 
+# The performance counters SYS_INFO 10 reads, by the number in bits 4:0 of
+# its immediate (spec/02-isa.md section 11.6); a number past them reads 0.
+CTR_ALLOC_COUNT       = 0
+CTR_ALLOC_BYTES       = 1
+CTR_BARRIER_FIRES     = 2
+CTR_BARRIER_FILTERED  = 3
+CTR_IC_HITS           = 4
+CTR_IC_MISSES         = 5
+CTR_GC_CYCLES         = 6
+CTR_NURSERY_OVERFLOWS = 7
+CTR_MEMORY_STALLS     = 8
+PERF_COUNTERS         = 9
+
 # HALT_NOP sub-functions (bits 25:21)
 FUNC_HALT = 0
 FUNC_NOP  = 1

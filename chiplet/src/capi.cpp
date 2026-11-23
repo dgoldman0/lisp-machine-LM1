@@ -98,8 +98,17 @@ LM1C_API int lm1c_tile_get(const lm1c_model *model, uint32_t tile, int field, ui
     case LM1C_TILE_INSTRUCTION_COUNT: *value = t->instruction_count; break;
     case LM1C_TILE_NURSERY_CHUNK: *value = t->nursery_chunk; break;
     case LM1C_TILE_NURSERY_FREE: *value = t->nursery_free; break;
+    case LM1C_TILE_CYCLES: *value = t->cycles; break;
     default: return LM1C_BAD_FIELD;
     }
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_tile_perf(const lm1c_model *model, uint32_t tile, uint32_t index,
+                            uint64_t *value) {
+    Tile *t = tile_at(model, tile);
+    if (t == nullptr || index >= PERF_COUNTERS) return LM1C_BAD_INDEX;
+    *value = t->perf[index];
     return LM1C_OK;
 }
 
@@ -127,6 +136,7 @@ LM1C_API int lm1c_tile_set(lm1c_model *model, uint32_t tile, int field, uint64_t
     case LM1C_TILE_GC_COUNT: t->gc_count = value; break;
     case LM1C_TILE_INSTRUCTION_COUNT: t->instruction_count = value; break;
     case LM1C_TILE_NURSERY_FREE: t->nursery_free = value; break;
+    case LM1C_TILE_CYCLES: t->cycles = value; break;
     default: return LM1C_BAD_FIELD;
     }
     return LM1C_OK;
@@ -138,7 +148,6 @@ LM1C_API int lm1c_thread_get(const lm1c_model *model, uint32_t tile, uint32_t th
     if (t == nullptr) return LM1C_BAD_INDEX;
     switch (field) {
     case LM1C_THREAD_PC: *value = t->pc; break;
-    case LM1C_THREAD_CYCLE_COUNT: *value = t->cycle_count; break;
     case LM1C_THREAD_INSTRET: *value = t->instret; break;
     case LM1C_THREAD_HALTED: *value = t->halted; break;
     case LM1C_THREAD_STALLED: *value = t->stalled; break;
@@ -161,7 +170,6 @@ LM1C_API int lm1c_thread_set(lm1c_model *model, uint32_t tile, uint32_t thread,
     if (t == nullptr) return LM1C_BAD_INDEX;
     switch (field) {
     case LM1C_THREAD_PC: t->pc = value; break;
-    case LM1C_THREAD_CYCLE_COUNT: t->cycle_count = value; break;
     case LM1C_THREAD_INSTRET: t->instret = value; break;
     case LM1C_THREAD_HALTED: t->halted = value != 0; break;
     case LM1C_THREAD_STALLED: t->stalled = value != 0; break;

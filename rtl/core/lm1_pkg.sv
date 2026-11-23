@@ -346,6 +346,8 @@ package lm1_pkg;
     parameter logic [4:0] CTR_IC_MISSES       = 5'd5;
     parameter logic [4:0] CTR_GC_CYCLES       = 5'd6;
     parameter logic [4:0] CTR_NURSERY_OVERFLOWS = 5'd7;
+    parameter logic [4:0] CTR_MEMORY_STALLS   = 5'd8;  // clocks the core waits on memory
+    parameter int         PERF_COUNTERS       = 9;
 
     // ---------------------------------------------------------------
     // Message queue constants

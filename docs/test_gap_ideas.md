@@ -111,6 +111,38 @@ the link, is never hidden.
 core to another ready thread, shown by a four-thread bench at realistic
 memory latency.
 
+### P0-16  CALL.IC and TAILCALL.IC never hit
+
+`S_HDR_WAIT` presents the call site and the receiver's shape to the IC
+table, whose lookup is combinational, and moves on to `S_IC_DISPATCH`,
+which reads `ic_hit` a clock later, when the lookup's inputs are back at
+their defaults and `lu_valid` is low.  Every `CALL.IC` therefore misses,
+and a handler that installs the entry and returns with `ERET` runs the
+call again into the same miss, for ever.  Bench program 55 takes one miss
+and passes the call with `ERET.NEXT`; the models hit, as
+`emu/tests/test_timing.py` shows.
+
+**Where:** `lm1_control.sv` (`S_HDR_WAIT`, `S_IC_DISPATCH`).
+**Risk:** Every dynamic dispatch on the RTL traps.
+**Action:** look the entry up in the state that reads `ic_hit`, or
+register the hit and target in `S_HDR_WAIT`, with a bench program whose
+handler installs the entry and whose retry hits.
+
+### P0-17  CAS.TAGGED runs no write barrier
+
+spec/02-isa.md § 8.4 has `CAS.TAGGED` run the write barrier when it
+stores a reference across generations, and both models do.  The RTL's
+`CAS.TAGGED` stores through `S_ATOMIC_STORE` and never reaches
+`S_BARRIER_CHECK`, so a young reference it stores into an old object marks
+no card, and counter 3 counts no filtered store for it (bench program 36
+shows the counts differ).
+
+**Where:** `lm1_control.sv` (`OP_CAS_TAGGED`, `S_ATOMIC_STORE_W`).
+**Risk:** A minor collection misses an old-to-young reference that a
+`CAS.TAGGED` stored, and frees a live object.
+**Action:** send a successful `CAS.TAGGED` of a reference through
+`S_BARRIER_CHECK`, with a bench program that checks the card.
+
 ---
 
 ## P1 — Entirely Untested Instructions
@@ -132,7 +164,8 @@ nothing, then 512 RECVs that return the words in order.
 
 ### P2-2  CALL.IC / TAILCALL.IC / IC.INSTALL (inline cache dispatch)
 
-The entire inline-cache dispatch system is untested.
+Bench program 55 takes one miss; nothing else of the inline-cache dispatch
+system is tested on the RTL, and hits wait on P0-16.
 
 **Test ideas:**
 - IC.INSTALL shape + target, then CALL.IC on matching shape → hits
@@ -170,18 +203,6 @@ When the loaded trap handler address is 0, the CPU halts.
 **Test ideas:**
 - Trigger a trap for a vector that was never configured → verify HALT
 - Set a vector to 0 explicitly, trigger it → verify HALT
-
-### P2-8  SYS_PERF_CTR readback
-
-Counter wiring is present but no test reads any counter.
-
-**Test ideas:**
-- Read CTR_CYCLES (id=0) — should be non-zero after some instructions
-- Read CTR_INSTRS (id=1) — should match instruction count
-- Read CTR_BRANCHES (id=2), CTR_ALLOCS (id=3), etc.
-- Read invalid counter ID (8-31) → should return 0
-- Verify counter IDs are encoded in the correct instruction field
-  (`imm16[4:0]` per RTL)
 
 ### P2-12 CMP.TAGGED cross-type comparison
 
@@ -285,6 +306,7 @@ value:
 2. **P1-2** (SEND to a full queue) — one bench program
 3. **P2-5, P2-6, P2-12** — short programs on the trap paths and
    `CMP.TAGGED`
-4. **P2-2** (CALL.IC) — the dispatch system
-5. **P2-4, P2-8** — nested traps and the performance counters
+4. **P0-16, P0-17, P2-2** (CALL.IC's hits and CAS.TAGGED's barrier) —
+   the dispatch system
+5. **P2-4** — nested traps
 6. **P0-3, P3-*** — need a design decision or new infrastructure

@@ -142,10 +142,14 @@ private:
 // model's table and in the one the runtime configured in memory
 // (spec/02-isa.md section 5.4, spec/05-memory-gc.md section 4.2).
 Flow Executor::write_barrier(u64 store_addr, u64 stored) {
-    if (!is_any_ref(stored)) return Flow::Next;
-    u64 val_addr = ref_address(stored);
-    if (store_addr < tile_.gen_boundary) return Flow::Next;
-    if (val_addr >= tile_.gen_boundary) return Flow::Next;
+    // A store that is no young ref into an old word is filtered.
+    if (!is_any_ref(stored) || store_addr < tile_.gen_boundary ||
+        ref_address(stored) >= tile_.gen_boundary) {
+        tile_.perf[CTR_BARRIER_FILTERED] += 1;
+        return Flow::Next;
+    }
+    tile_.perf[CTR_BARRIER_FIRES] += 1;
+    m_.marks += 1;
     u64 card_idx = tile_.card_shift < 64 ? store_addr >> tile_.card_shift : 0;
     if (tile_.card_table_base != 0) {
         if (!store_byte(m_, tile_, u128(tile_.card_table_base) + card_idx, 0xFF)) return Flow::Stop;
@@ -180,6 +184,8 @@ Flow Executor::alloc_object(unsigned rd, i128 total_bytes, u64 tmpl_idx, i64 n_w
     }
     if (init && !store_word(m_, tile_, u128(addr) + 8, init_value)) return Flow::Stop;
     reg(rd) = make_ref(addr, false);
+    tile_.perf[CTR_ALLOC_COUNT] += 1;
+    tile_.perf[CTR_ALLOC_BYTES] += u64(total_bytes);
     return Flow::Next;
 }
 
@@ -193,6 +199,8 @@ Flow Executor::alloc_cons(unsigned rd, u64 car, u64 cdr) {
     if (!store_word(m_, tile_, u128(addr) + 8, car)) return Flow::Stop;
     if (!store_word(m_, tile_, u128(addr) + 16, cdr)) return Flow::Stop;
     reg(rd) = make_ref(addr, true);
+    tile_.perf[CTR_ALLOC_COUNT] += 1;
+    tile_.perf[CTR_ALLOC_BYTES] += 24;
     return Flow::Next;
 }
 
@@ -521,16 +529,21 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         switch (in.rs1) {
         case 0: v = t_.tile_id; break;
         case 1: v = t_.thread_id; break;
-        case 2: v = t_.cycle_count; break;
+        case 2: v = tile_.cycles; break;  // the cycles the core spent before this instruction
         case 3: v = t_.trap_cause; break;
         case 4: v = t_.trap_pc; break;
         case 5: v = tile_.card_table_base; break;
         case 6: v = tile_.card_shift; break;
         case 7: v = tile_.gen_boundary; break;
         case 8: v = tile_.queue_base; break;
+        case 10: {
+            const u64 ctr = u64(in.imm16) & 0x1F;
+            v = ctr < PERF_COUNTERS ? tile_.perf[ctr] : 0;
+            break;
+        }
         case 15: v = t_.instret; break;  // the instructions retired before this one
         default:
-            v = 0;  // GC status, counters and scan results: no engines are modeled
+            v = 0;  // GC status and scan results: no engines are modeled
             break;
         }
         r[in.rd] = v;
@@ -707,7 +720,11 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         u64 shape;
         if (shape_of(receiver, shape) != Flow::Next) return Flow::Stop;
         auto hit = tile_.ic.find(IcKey{t_.pc, shape});  // the call site is the PC
-        if (hit == tile_.ic.end()) return raise(TRAP_IC_MISS);
+        if (hit == tile_.ic.end()) {
+            tile_.perf[CTR_IC_MISSES] += 1;
+            return raise(TRAP_IC_MISS);
+        }
+        tile_.perf[CTR_IC_HITS] += 1;
         if (in.op == OP_CALL_IC) {
             Flow f = push_frame(next_pc);
             if (f != Flow::Next) return f;
@@ -858,6 +875,8 @@ void Model::init_tiles() {
         std::fill(std::begin(tile.templates), std::end(tile.templates), 0);
         tile.gc_count = 0;
         tile.instruction_count = 0;
+        tile.cycles = 0;
+        std::fill(std::begin(tile.perf), std::end(tile.perf), 0);
         tile.card_table_base = 0;
         tile.queue_base = 0;
         tile.ic.clear();
@@ -944,6 +963,41 @@ void card_table_reset(Tile &tile) {
     tile.cards.assign(size_t(entries), 0);
 }
 
+// Charges the core the cycles of an instruction that READ data memory or not
+// and raised a trap or not, by the timing model (timing.h, spec/02-isa.md
+// section 11.6), and counts its memory stall cycles and nursery overflow
+// (Emulator._charge).  The reads that wait are those of the loads, the
+// header reads and the atomics; the stack's, POP's, POP.MULTI's and RET's,
+// come from the stack cache and wait none.
+static void charge(Model &m, Tile &tile, const Inst &in, bool read, bool trapped) {
+    bool waits = false;
+    switch (in.op) {
+    case OP_LD: case OP_LD_CAR_CDR: case OP_LDR: case OP_LDB: case OP_LDH: case OP_LDW:
+    case OP_TST_SHAPE: case OP_CALL_IC: case OP_TAILCALL_IC: case OP_IC_INSTALL:
+    case OP_CALL_CLOSURE: case OP_CAS_TAGGED: case OP_FAA_FENCE:
+        waits = read;
+        break;
+    default:
+        break;
+    }
+    const u64 latency = waits ? timing::MEMORY_LATENCY : 0;
+    u64 cycles;
+    if (trapped) {
+        cycles = timing::ISSUE + latency + timing::TRAP_ENTRY;
+        if (m.trap.code == TRAP_NURSERY_OVERFLOW) tile.perf[CTR_NURSERY_OVERFLOWS] += 1;
+    } else {
+        cycles = timing::ISSUE;
+        if (in.op == OP_ARITH_FIX && in.func == 2) cycles = timing::MUL;           // MUL.FIX
+        if (in.op == OP_ARITH_FIX && in.func == 3) cycles = timing::DIV;           // DIV.FIX
+        if (in.op == OP_ARITH_RAW && in.func == 2) cycles = timing::MUL;           // MUL
+        if (in.op == OP_ARITH_RAW && (in.func == 3 || in.func == 4)) cycles = timing::DIV;  // DIV, MOD
+        if (in.op == OP_ALLOCV) cycles = timing::ALLOCV;
+        cycles += latency + timing::BARRIER_MARK * m.marks;
+    }
+    tile.cycles += cycles;
+    tile.perf[CTR_MEMORY_STALLS] += latency;
+}
+
 // One step of a thread, a turn of the reference's run loop.  A trap below
 // 0x80 vectors through the thread's trap table (Emulator._take_trap): ERET
 // resumes a fault at the faulting instruction and an explicit TRAP after
@@ -955,17 +1009,23 @@ void card_table_reset(Tile &tile) {
 // and no thread has taken free space since the last collection, no
 // collection makes room, and the trap stands.
 //
-// The instruction retires, and adds one to the thread's INSTRET, when it has
-// done its work (Emulator._step): a fault and a RECV that waits retire
-// nothing, and an explicit TRAP retires before its trap is taken, whether a
-// handler answers it or not.
+// Once fetched, the instruction has issued, and the timing model charges the
+// core its cycles whatever becomes of it (charge, Emulator._step).  It
+// retires, and adds one to the thread's INSTRET, when it has done its work:
+// a fault and a RECV that waits retire nothing, and an explicit TRAP retires
+// before its trap is taken, whether a handler answers it or not.
 Flow Model::step(Tile &tile, Thread &t) {
     u64 raw;
     if (!load_u32(*this, tile, t.pc, raw)) return Flow::Stop;
+    tile.instruction_count += 1;
     u64 next_pc = t.pc + 4;
+    const Inst inst = decode(raw);
+    const u64 reads = data_reads;
+    marks = 0;
     Executor ex(*this, tile, t);
-    Flow f = ex.execute(decode(raw), next_pc);
+    Flow f = ex.execute(inst, next_pc);
     if ((f == Flow::Next && !t.stalled) || (f == Flow::Trap && trap.resumes)) t.instret += 1;
+    if (f != Flow::Stop) charge(*this, tile, inst, data_reads != reads, f == Flow::Trap);
     if (f == Flow::Trap) {
         uint32_t code = trap.code;
         bool handled_by_table = false;
@@ -1016,8 +1076,6 @@ Flow Model::step(Tile &tile, Thread &t) {
         return f;
     }
     t.pc = next_pc;
-    t.cycle_count += 1;
-    tile.instruction_count += 1;
     return Flow::Next;
 }
 

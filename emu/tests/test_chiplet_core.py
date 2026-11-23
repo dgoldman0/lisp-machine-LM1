@@ -70,7 +70,6 @@ def _thread_state(t) -> dict:
     return {
         "regs": list(t.regs),
         "pc": t.pc & WORD_MASK,
-        "cycle_count": t.cycle_count & WORD_MASK,
         "instret": t.instret & WORD_MASK,
         "halted": bool(t.halted),
         "stalled": bool(t.stalled),
@@ -86,7 +85,7 @@ def _thread_state(t) -> dict:
 
 _TILE_FIELDS = ("nursery_base", "nursery_size", "nursery_chunk", "nursery_free", "oldgen_base",
                 "oldgen_size", "oldgen_ptr", "card_shift", "card_table_base", "gen_boundary",
-                "card_table_size", "gc_count", "instruction_count", "tile_id",
+                "card_table_size", "gc_count", "instruction_count", "cycles", "tile_id",
                 "_current_thread_idx")
 
 
@@ -101,6 +100,7 @@ def tile_state(emu, *, full: bool = True) -> dict:
     state = {
         "threads": [_thread_state(t) for t in emu.threads],
         "fields": {name: getattr(emu, name) for name in _TILE_FIELDS},
+        "perf": list(emu.perf),
         "slices": list(emu.nursery_slices),
     }
     if full:
