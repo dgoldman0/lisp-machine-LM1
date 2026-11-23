@@ -423,6 +423,7 @@ void save_standin(Writer &w, const Standin &s) {
         w.word64(p.first);
         w.word64(p.second);
     }
+    w.flag(s.no_drain);
     w.word64(s.churns.size());
     for (const Standin::Churn &c : s.churns) {
         w.word64(c.addr);
@@ -506,7 +507,7 @@ bool restore_standin(Reader &r, Standin &s) {
     for (auto &p : s.pokes) {
         if (!r.word64(p.first) || !r.word64(p.second)) return false;
     }
-    if (!r.word64(n) || !count_fits(r, n, 40)) return false;
+    if (!r.flag(s.no_drain) || !r.word64(n) || !count_fits(r, n, 40)) return false;
     s.churns.assign(size_t(n), Standin::Churn{});
     for (Standin::Churn &c : s.churns) {
         if (!r.word64(c.addr) || !r.word64(c.a) || !r.word64(c.b) || !r.word64(c.left) || !r.word64(c.turn))

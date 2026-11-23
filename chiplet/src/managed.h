@@ -100,7 +100,8 @@ struct MdShape {
 
 // A hold asked for: by a core's COLLECT, by LM-1's own policy, or by the
 // test hook.  Mode 0 collects the young objects, 1 the whole shared heap, 2
-// the whole heap moving every object it can, and 3 (the hook's) nothing.
+// the whole heap moving every object it can, 3 (the hook's) nothing, and 4
+// (the hook's) stops at HELD, as an LM-1 that stopped there would.
 struct HoldAsk {
     u64 mode = 0;
     u64 keep_ns = 0;       // the hook keeps the hold ACTIVE this long; ~0 for ever
@@ -171,6 +172,10 @@ struct Standin {
         u64 addr = 0, a = 0, b = 0, left = 0, turn = 0;
     };
     std::vector<Churn> churns;
+
+    // The test hook that stops LM-1 draining logs when a core rings, as an
+    // LM-1 that stopped serving would leave a full log.
+    bool no_drain = false;
 
     // The test hook's record of every word the stand-in writes across the
     // link, in order, as (address, value), while tracing is on.  Not saved.

@@ -947,6 +947,7 @@ void Service::holds() {
         if (!serving()) return;
     }
     if (s_.hold == HoldPhase::Held) {
+        if (s_.current.mode == 4) return;   // the hook's hold that never goes on
         // A core's window word is read again when the core rings.
         bool open = false;
         for (u64 c = 0; c < s_.cores; ++c) {
@@ -1602,7 +1603,8 @@ void Service::run() {
                 if (!rung_[size_t(c)] && !s_.core[size_t(c)].pair_known) continue;
                 serve_core(c);
                 // A core rings when its store log is half full or full.
-                if (serving() && rung_[size_t(c)] && s_.hold != HoldPhase::Active) drain_log(c);
+                if (serving() && rung_[size_t(c)] && s_.hold != HoldPhase::Active && !s_.no_drain)
+                    drain_log(c);
             }
         }
     }
@@ -1629,6 +1631,7 @@ bool standin_waits(const Model &m) {
     if (s.phase == MdPhase::Off && s.control_block == 0 && m.link.boot_arg != 0) return true;
     if (!s.outbox.empty()) return true;
     if (s.phase != MdPhase::Serving) return false;
+    if (s.hold == HoldPhase::Held && s.current.mode == 4) return false;   // stopped at HELD
     if (s.hold != HoldPhase::None || !s.holds.empty() || !s.pokes.empty() || !s.churns.empty()) return true;
     return false;
 }

@@ -753,7 +753,7 @@ def test_runtime_stand_in_needs_a_control_block():
 def test_hooks_find_the_module_and_check_their_arguments():
     """A test finds the model inside a chiplet module by its hook_id, the
     most recent one made with it, until the module goes; the hooks refuse
-    a mode or an address they cannot take."""
+    a mode past 4 or an address that is not aligned."""
     first = chiplet.Module("hook_id=77")
     second = chiplet.Module("hook_id=77")
     found = chiplet.attached_model(77)
@@ -763,7 +763,7 @@ def test_hooks_find_the_module_and_check_their_arguments():
     first.close()
     assert chiplet.attached_model(77) is None
     model = chiplet.Module("runtime=1").model
-    for call in (lambda: model.md_hold(4), lambda: model.md_write(0x1004, 0),
+    for call in (lambda: model.md_hold(5), lambda: model.md_write(0x1004, 0),
                  lambda: model.md_churn(0x1001, 0, 0, 1)):
         try:
             call()

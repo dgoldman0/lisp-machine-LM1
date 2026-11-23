@@ -69,6 +69,7 @@ BLOCK_SIZE = 4096
  MD_NOTICE_ADDR, MD_MOVED, MD_GROWS, MD_RETURNS, MD_WHY, MD_WHY_ADDR, MD_SHAPES,
  MD_CLOCK_NS, MD_WAKES) = range(22)
 MD_HOLD_ONLY = 3
+MD_HOLD_STALLS = 4
 MD_FOR_EVER = (1 << 64) - 1
 
 
@@ -298,6 +299,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_md_churn": (i32, [p, u64, u64, u64, u64]),
         "lm1c_md_get": (i32, [p, i32, pu64]),
         "lm1c_md_trace": (i32, [p, i32]),
+        "lm1c_md_drain": (i32, [p, i32]),
         "lm1c_md_trace_take": (i32, [p, pu64, u64, pu64]),
     }
     for name, (restype, argtypes) in sig.items():
@@ -372,6 +374,10 @@ class Model:
     def md_write(self, addr: int, value: int) -> None:
         """A word written as LM-1's store would, at the next step."""
         _check(self._lib.lm1c_md_write(self._handle, addr, value & WORD_MASK), "md_write")
+
+    def md_drain(self, on: bool) -> None:
+        """Whether LM-1 drains a store log when its core rings."""
+        _check(self._lib.lm1c_md_drain(self._handle, int(on)), "md_drain")
 
     def md_trace(self, on: bool) -> None:
         """Record every word the stand-in writes across the link."""

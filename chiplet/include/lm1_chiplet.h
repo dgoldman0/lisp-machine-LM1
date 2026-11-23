@@ -325,8 +325,12 @@ LM1C_API lm1c_model *lm1c_chiplet_find(uint64_t id);
 /* A hold LM-1 takes as soon as HOLD_GAP allows: MODE 0 collects the young
    objects, 1 the whole shared heap, 2 the whole heap moving every object it
    can, and 3 collects nothing.  Once ACTIVE and its work done, it stays
-   ACTIVE KEEP_NS more, or for ever with UINT64_MAX. */
+   ACTIVE KEEP_NS more, or for ever with UINT64_MAX.  MODE 4 stores HELD and
+   goes no further, as an LM-1 that stopped just after storing it would. */
 LM1C_API int lm1c_md_hold(lm1c_model *model, uint32_t mode, uint64_t keep_ns);
+/* With ON 0, LM-1 drains no store log when a core rings, as an LM-1 that
+   stopped serving would leave a full one; ON 1 restores the draining. */
+LM1C_API int lm1c_md_drain(lm1c_model *model, int on);
 /* LM-1 writes VALUE into the word at ADDR in MegaPad's memory, as its own
    store would, through the link and its barrier. */
 LM1C_API int lm1c_md_write(lm1c_model *model, uint64_t addr, uint64_t value);

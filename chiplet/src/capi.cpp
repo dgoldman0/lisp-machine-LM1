@@ -409,7 +409,7 @@ LM1C_API lm1c_model *lm1c_chiplet_find(uint64_t id) {
 
 LM1C_API int lm1c_md_hold(lm1c_model *model, uint32_t mode, uint64_t keep_ns) {
     if (model == nullptr) return LM1C_BAD_INDEX;
-    if (mode > 3) return LM1C_BAD_VALUE;
+    if (mode > 4) return LM1C_BAD_VALUE;
     HoldAsk a;
     a.mode = mode;
     a.keep_ns = keep_ns;
@@ -434,6 +434,12 @@ LM1C_API int lm1c_md_churn(lm1c_model *model, uint64_t addr, uint64_t a, uint64_
     c.b = b;
     c.left = times;
     model->standin.churns.push_back(c);
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_md_drain(lm1c_model *model, int on) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    model->standin.no_drain = on == 0;
     return LM1C_OK;
 }
 
