@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /* Raised when a function of this interface changes or is added. */
-#define LM1C_INTERFACE_VERSION 4
+#define LM1C_INTERFACE_VERSION 5
 
 #define LM1C_OK          0
 #define LM1C_BAD_INDEX  (-1)  /* no such tile, thread, register or entry */
@@ -101,7 +101,7 @@ typedef struct lm1c_host {
 /* Fields of a hardware thread, read and written as 64-bit values. */
 enum lm1c_thread_field {
     LM1C_THREAD_PC = 0,
-    LM1C_THREAD_CYCLE_COUNT,
+    LM1C_THREAD_INSTRET,         /* the instructions the thread has retired */
     LM1C_THREAD_HALTED,          /* 0 or 1 */
     LM1C_THREAD_STALLED,         /* 0 or 1 */
     LM1C_THREAD_STALL_QUEUE,     /* the descriptor value, tile * 4 + queue, of the
@@ -132,9 +132,12 @@ enum lm1c_tile_field {
     LM1C_TILE_GEN_BOUNDARY,
     LM1C_TILE_CARD_TABLE_SIZE,   /* entries; read only */
     LM1C_TILE_GC_COUNT,          /* minor collections so far */
-    LM1C_TILE_INSTRUCTION_COUNT,
+    LM1C_TILE_INSTRUCTION_COUNT, /* instructions the core issued: its cycles, which
+                                    CYCLE reads */
     LM1C_TILE_NURSERY_CHUNK,     /* bytes of the chunk a thread takes at a time; read only */
     LM1C_TILE_NURSERY_FREE,      /* the nursery's first free byte after the chunks threads hold */
+    LM1C_TILE_CYCLES,            /* the cycles the timing model charged the core, which
+                                    CYCLE reads */
     LM1C_TILE_FIELDS
 };
 
@@ -184,6 +187,28 @@ LM1C_API int lm1c_tile_get(const lm1c_model *model, uint32_t tile, int field,
                            uint64_t *value);
 LM1C_API int lm1c_tile_set(lm1c_model *model, uint32_t tile, int field,
                            uint64_t value);
+/* Performance counter INDEX of a tile's core, the one SYS_INFO 10 reads by
+   that number (spec/02-isa.md section 11.6); an index past the counters is
+   refused with LM1C_BAD_INDEX. */
+LM1C_API int lm1c_tile_perf(const lm1c_model *model, uint32_t tile, uint32_t index,
+                            uint64_t *value);
+
+/*
+ * The per-function profile (docs/profile.md).  With profile=N in the
+ * configuration the model samples each core's current thread every N
+ * cycles of its timing model and appends a record of each core's samples to
+ * profile_file every profile_interval cycles (100000000 unless set):
+ *   profile=0                cycles between samples; 0 for no profile
+ *   profile_interval=100000000  cycles a record covers
+ *   profile_file=PATH        the file of records, JSON lines; PATH holds no comma
+ * A chiplet module reads the symbol table its boot image carries at its end;
+ * lm1c_profile_symbols reads it from the SIZE bytes of an image that end
+ * with one, or refuses bytes with none with LM1C_BAD_VALUE.
+ * lm1c_profile_flush writes each core's record in hand, as destroying the
+ * model does.
+ */
+LM1C_API int lm1c_profile_symbols(lm1c_model *model, const uint8_t *image, size_t size);
+LM1C_API int lm1c_profile_flush(lm1c_model *model);
 LM1C_API int lm1c_thread_get(const lm1c_model *model, uint32_t tile, uint32_t thread,
                              int field, uint64_t *value);
 LM1C_API int lm1c_thread_set(lm1c_model *model, uint32_t tile, uint32_t thread,

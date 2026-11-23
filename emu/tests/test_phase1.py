@@ -578,7 +578,8 @@ def test_nop():
 
 @test("cycle_count", batch="phase1_system")
 def test_cycle_count():
-    """CYCLE returns a non-zero value after some instructions."""
+    """CYCLE reads the cycles the core spent before it, which the timing
+    model gives a NOP one each (spec/02-isa.md section 11.6)."""
     emu = _emu()
     program = [
         encode_x(Op.HALT_NOP, 1 << 21),   # NOP
@@ -589,7 +590,30 @@ def test_cycle_count():
         encode_x(Op.HALT_NOP, 0),
     ]
     _load_and_run(emu, program)
-    assert emu.thread.regs[1] >= 3, f"CYCLE: expected >= 3, got {emu.thread.regs[1]}"
+    assert emu.thread.regs[1] == 3, f"CYCLE: expected 3, got {emu.thread.regs[1]}"
+    assert emu.instruction_count == 5 and emu.cycles == 5
+
+
+@test("cycle_count_is_the_cores", batch="phase1_system")
+def test_cycle_count_is_the_cores():
+    """The cycle count belongs to the core, so both threads of a tile read
+    one count, which advances with every instruction either of them issues,
+    while each thread's INSTRET counts its own.  Every instruction here
+    costs one cycle."""
+    emu = _emu(num_threads=2)
+    nop, halt = encode_x(Op.HALT_NOP, 1 << 21), encode_x(Op.HALT_NOP, 0)
+    cycle = encode_i(Op.SYS_INFO, 1, 2, 0)     # CYCLE r1
+    instret = encode_i(Op.SYS_INFO, 2, 15, 0)  # INSTRET r2
+    emu.mem.load_instructions(0, [nop, cycle, instret, halt])
+    emu.mem.load_instructions(0x100, [nop, nop, cycle, instret, halt])
+    emu.threads[0].pc, emu.threads[1].pc = 0, 0x100
+    emu.run_round_robin(max_instructions=100)
+    # One instruction of each thread in turn: thread 0's CYCLE is the third
+    # instruction the core issues, and thread 1's the sixth.
+    assert emu.threads[0].regs[1] == 2 and emu.threads[0].regs[2] == 2
+    assert emu.threads[1].regs[1] == 5 and emu.threads[1].regs[2] == 3
+    assert emu.instruction_count == 9 and emu.cycles == 9
+    assert emu.threads[0].instret == 4 and emu.threads[1].instret == 5
 
 
 @test("sys_info_writes_only_rd", batch="phase1_system")

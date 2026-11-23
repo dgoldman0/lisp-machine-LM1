@@ -17,7 +17,9 @@ namespace lm1 {
 namespace {
 
 constexpr char MAGIC[8] = {'L', 'M', '1', 'C', 'H', 'I', 'P', 'S'};
-constexpr uint32_t VERSION = 3;  // 2: a tile's queue base; 3: the runtime's stand-in
+constexpr uint32_t VERSION = 4;  // 2: a tile's queue base; 3: the runtime's stand-in;
+                                 // 4: a thread's INSTRET in place of its cycle count, and a
+                                 //    tile's cycles and performance counters
 
 class Writer {
 public:
@@ -146,7 +148,7 @@ private:
 void save_thread(Writer &w, const Thread &t) {
     for (u64 r : t.regs) w.word64(r);
     w.word64(t.pc);
-    w.word64(t.cycle_count);
+    w.word64(t.instret);
     w.flag(t.halted);
     w.flag(t.stalled);
     w.word64(u64(t.stall_queue));
@@ -163,7 +165,7 @@ bool restore_thread(Reader &r, Thread &t) {
     for (u64 &reg : t.regs) {
         if (!r.word64(reg)) return false;
     }
-    return r.word64(t.pc) && r.word64(t.cycle_count) && r.flag(t.halted) && r.flag(t.stalled) &&
+    return r.word64(t.pc) && r.word64(t.instret) && r.flag(t.halted) && r.flag(t.stalled) &&
            r.signed64(t.stall_queue) && r.word64(t.trap_table_base) && r.word64(t.trap_cause) &&
            r.word64(t.trap_pc) && r.flag(t.in_trap) && r.word64(t.tile_id) && r.word64(t.thread_id) &&
            r.word64(t.slice_base);
@@ -191,6 +193,8 @@ void save_tile(Writer &w, const Tile &tile) {
     w.bytes(tile.cards);
     w.word64(tile.gc_count);
     w.word64(tile.instruction_count);
+    w.word64(tile.cycles);
+    for (u64 v : tile.perf) w.word64(v);
     // The inline cache in key order, so one state has one form.
     std::vector<std::pair<IcKey, u64>> ic(tile.ic.begin(), tile.ic.end());
     std::sort(ic.begin(), ic.end(), [](const auto &a, const auto &b) {
@@ -232,8 +236,12 @@ bool restore_tile(Reader &r, Tile &tile, size_t queue_depth) {
     if (cards != (tile.mem_size >> tile.card_shift)) return false;
     tile.cards.assign(size_t(cards), 0);
     if (!r.bytes(tile.cards) || !r.word64(tile.gc_count) || !r.word64(tile.instruction_count) ||
-        !r.word64(ic_count))
+        !r.word64(tile.cycles))
         return false;
+    for (u64 &v : tile.perf) {
+        if (!r.word64(v)) return false;
+    }
+    if (!r.word64(ic_count)) return false;
     tile.ic.clear();
     for (uint64_t i = 0; i < ic_count; ++i) {
         IcKey key;
@@ -588,11 +596,13 @@ bool restore_state(Model &m, const uint8_t *data, size_t size) {
         if (!restore_tile(r, tile, fresh.queue_depth)) return false;
     }
     if (!restore_standin(r, fresh.standin) || !r.done()) return false;
+    m.profile_flush();
     m.tiles = std::move(fresh.tiles);
     m.link = std::move(fresh.link);
     m.standin = std::move(fresh.standin);
     m.trap = {};
     m.stop = {};
+    m.profile_restart();
     return true;
 }
 

@@ -178,6 +178,14 @@ module lm1_tb;
             $display("TIMEOUT after %0d cycles (PC=%0h)", ncycles, pc_out);
         end
 
+        // The core's cycle counter, which SYS_INFO 2 reads, the
+        // instructions thread 0 retired, which SYS_INFO 15 reads, and the
+        // performance counters, which SYS_INFO 10 reads.
+        $display("CYCLE = %0d", cycle_count);
+        $display("INSTRET = %0d", u_dut.u_ctrl.instret[0]);
+        for (int i = 0; i < PERF_COUNTERS; i++)
+            $display("PERF %0d = %0d", i, u_dut.u_perf_ctrs.counters[i]);
+
         // Dump all 32 registers
         for (int i = 0; i < 32; i++) begin
             // To read register i, we would need the debug port.

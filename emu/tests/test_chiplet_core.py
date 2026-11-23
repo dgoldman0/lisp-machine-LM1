@@ -70,7 +70,7 @@ def _thread_state(t) -> dict:
     return {
         "regs": list(t.regs),
         "pc": t.pc & WORD_MASK,
-        "cycle_count": t.cycle_count & WORD_MASK,
+        "instret": t.instret & WORD_MASK,
         "halted": bool(t.halted),
         "stalled": bool(t.stalled),
         "stall_queue": t.stall_queue,
@@ -85,7 +85,7 @@ def _thread_state(t) -> dict:
 
 _TILE_FIELDS = ("nursery_base", "nursery_size", "nursery_chunk", "nursery_free", "oldgen_base",
                 "oldgen_size", "oldgen_ptr", "card_shift", "card_table_base", "gen_boundary",
-                "card_table_size", "gc_count", "instruction_count", "tile_id",
+                "card_table_size", "gc_count", "instruction_count", "cycles", "tile_id",
                 "_current_thread_idx")
 
 
@@ -100,6 +100,7 @@ def tile_state(emu, *, full: bool = True) -> dict:
     state = {
         "threads": [_thread_state(t) for t in emu.threads],
         "fields": {name: getattr(emu, name) for name in _TILE_FIELDS},
+        "perf": list(emu.perf),
         "slices": list(emu.nursery_slices),
     }
     if full:
@@ -563,8 +564,8 @@ class _Stream:
             return encode_i(op, rng.choice((0, 0, 0, 1, 1, 1, 2)), 0, rng.getrandbits(16) & 0x1FE0)
         if op == Op.TRAP:
             return encode_x(op, rng.choice(_SAFE_TRAPS))
-        if op == Op.SYS_INFO:
-            return encode_i(op, pick(R_ANY + R_FIX), rng.randrange(16), 0)
+        if op == Op.SYS_INFO:   # every sub-code, INSTRET's 15 last, or the first reserved
+            return encode_i(op, pick(R_ANY + R_FIX), rng.randrange(17), 0)
         if op == Op.HALT_NOP:   # HALT, NOP, or a selector neither names
             return encode_x(op, rng.choices((0, 1, 2, 31), (2, 7, 1, 0.5))[0] << 21)
         if op == Op.ERET:   # ERET, ERET.NEXT, or a func neither names

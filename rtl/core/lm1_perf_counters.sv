@@ -1,9 +1,10 @@
 // ============================================================================
 // LM-1 Performance Counters
 //
-// 8 64-bit counters for GC and runtime telemetry.
-// Counters are incremented via strobe inputs from the control FSM.
-// Readable via SYS_INFO with SYS_PERF_CTR sub-code.
+// 9 64-bit counters for GC and runtime telemetry and the core's memory
+// stalls (spec/02-isa.md section 11.6).  Counters are incremented via strobe
+// inputs from the control FSM.  Readable via SYS_INFO with SYS_PERF_CTR
+// sub-code; a number past them reads 0.
 // ============================================================================
 module lm1_perf_counters
     import lm1_pkg::*;
@@ -20,18 +21,19 @@ module lm1_perf_counters
     input  logic               ic_miss_inc,       // CTR_IC_MISSES
     input  logic               gc_cycle_inc,      // CTR_GC_CYCLES (1 cycle of engine active)
     input  logic               nursery_ovf_inc,   // CTR_NURSERY_OVERFLOWS
+    input  logic               mem_stall_inc,     // CTR_MEMORY_STALLS (a clock waiting on memory)
 
     // Read port
     input  logic [4:0]         rd_id,
     output logic [XLEN-1:0]   rd_value
 );
 
-    logic [XLEN-1:0] counters [0:7];
+    logic [XLEN-1:0] counters [0:PERF_COUNTERS-1];
 
     // Combinational read
     always_comb begin
-        if (rd_id < 5'd8)
-            rd_value = counters[rd_id[2:0]];
+        if (rd_id < 5'(PERF_COUNTERS))
+            rd_value = counters[rd_id[3:0]];
         else
             rd_value = '0;
     end
@@ -39,7 +41,7 @@ module lm1_perf_counters
     // Sequential update
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i = 0; i < 8; i++)
+            for (int i = 0; i < PERF_COUNTERS; i++)
                 counters[i] <= '0;
         end else begin
             if (alloc_inc)
@@ -59,6 +61,8 @@ module lm1_perf_counters
                 counters[CTR_GC_CYCLES[2:0]] <= counters[CTR_GC_CYCLES[2:0]] + 64'd1;
             if (nursery_ovf_inc)
                 counters[CTR_NURSERY_OVERFLOWS[2:0]] <= counters[CTR_NURSERY_OVERFLOWS[2:0]] + 64'd1;
+            if (mem_stall_inc)
+                counters[CTR_MEMORY_STALLS[3:0]] <= counters[CTR_MEMORY_STALLS[3:0]] + 64'd1;
         end
     end
 

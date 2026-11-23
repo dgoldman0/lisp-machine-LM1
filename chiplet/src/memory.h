@@ -25,8 +25,11 @@ inline bool shared_route(const Model &m, u128 addr) {
     return m.in_step && !m.standin.blocks.empty() && addr <= ~0ull && in_shared_heap(m, u64(addr));
 }
 
+// A data read counts in Model::data_reads, which the timing model's memory
+// latency follows; an instruction fetch, load_u32, does not.
 inline bool load_word(Model &m, Tile &tile, u128 addr, u64 &out) {
     size_t i;
+    m.data_reads += 1;
     if (shared_route(m, addr)) {
         if (link_access(m, addr, 64, false, out)) return true;
         m.memory_fault(addr);
@@ -63,6 +66,7 @@ inline bool load_u32(Model &m, Tile &tile, u128 addr, u64 &out) {
 // bits inside the word.
 inline bool load_bits(Model &m, Tile &tile, u128 addr, unsigned width, u64 &out) {
     size_t i;
+    m.data_reads += 1;
     unsigned shift = unsigned(u64(addr) & 7) * 8;
     u64 field = width == 64 ? ~0ull : (1ull << width) - 1;
     if (shared_route(m, addr)) {

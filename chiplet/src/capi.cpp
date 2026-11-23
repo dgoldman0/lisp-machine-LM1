@@ -58,12 +58,19 @@ LM1C_API lm1c_model *lm1c_create(const char *config, char *error, size_t error_s
         write_error(error, error_size, why);
         return nullptr;
     }
+    lm1c_model *model = nullptr;
     try {
-        return new lm1c_model(c);
+        model = new lm1c_model(c);
     } catch (const std::bad_alloc &) {
         write_error(error, error_size, "not enough host memory for the model");
         return nullptr;
     }
+    if (!profile_open(*model, why)) {
+        delete model;
+        write_error(error, error_size, why);
+        return nullptr;
+    }
+    return model;
 }
 
 LM1C_API void lm1c_destroy(lm1c_model *model) { delete model; }
@@ -98,8 +105,28 @@ LM1C_API int lm1c_tile_get(const lm1c_model *model, uint32_t tile, int field, ui
     case LM1C_TILE_INSTRUCTION_COUNT: *value = t->instruction_count; break;
     case LM1C_TILE_NURSERY_CHUNK: *value = t->nursery_chunk; break;
     case LM1C_TILE_NURSERY_FREE: *value = t->nursery_free; break;
+    case LM1C_TILE_CYCLES: *value = t->cycles; break;
     default: return LM1C_BAD_FIELD;
     }
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_tile_perf(const lm1c_model *model, uint32_t tile, uint32_t index,
+                            uint64_t *value) {
+    Tile *t = tile_at(model, tile);
+    if (t == nullptr || index >= PERF_COUNTERS) return LM1C_BAD_INDEX;
+    *value = t->perf[index];
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_profile_symbols(lm1c_model *model, const uint8_t *image, size_t size) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    return model->profiler.load_symbols(image, size) ? LM1C_OK : LM1C_BAD_VALUE;
+}
+
+LM1C_API int lm1c_profile_flush(lm1c_model *model) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    model->profile_flush();
     return LM1C_OK;
 }
 
@@ -127,6 +154,7 @@ LM1C_API int lm1c_tile_set(lm1c_model *model, uint32_t tile, int field, uint64_t
     case LM1C_TILE_GC_COUNT: t->gc_count = value; break;
     case LM1C_TILE_INSTRUCTION_COUNT: t->instruction_count = value; break;
     case LM1C_TILE_NURSERY_FREE: t->nursery_free = value; break;
+    case LM1C_TILE_CYCLES: t->cycles = value; break;
     default: return LM1C_BAD_FIELD;
     }
     return LM1C_OK;
@@ -138,7 +166,7 @@ LM1C_API int lm1c_thread_get(const lm1c_model *model, uint32_t tile, uint32_t th
     if (t == nullptr) return LM1C_BAD_INDEX;
     switch (field) {
     case LM1C_THREAD_PC: *value = t->pc; break;
-    case LM1C_THREAD_CYCLE_COUNT: *value = t->cycle_count; break;
+    case LM1C_THREAD_INSTRET: *value = t->instret; break;
     case LM1C_THREAD_HALTED: *value = t->halted; break;
     case LM1C_THREAD_STALLED: *value = t->stalled; break;
     case LM1C_THREAD_STALL_QUEUE: *value = uint64_t(t->stall_queue); break;
@@ -160,7 +188,7 @@ LM1C_API int lm1c_thread_set(lm1c_model *model, uint32_t tile, uint32_t thread,
     if (t == nullptr) return LM1C_BAD_INDEX;
     switch (field) {
     case LM1C_THREAD_PC: t->pc = value; break;
-    case LM1C_THREAD_CYCLE_COUNT: t->cycle_count = value; break;
+    case LM1C_THREAD_INSTRET: t->instret = value; break;
     case LM1C_THREAD_HALTED: t->halted = value != 0; break;
     case LM1C_THREAD_STALLED: t->stalled = value != 0; break;
     case LM1C_THREAD_STALL_QUEUE: t->stall_queue = int64_t(value); break;

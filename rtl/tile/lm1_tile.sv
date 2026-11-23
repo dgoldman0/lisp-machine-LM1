@@ -28,7 +28,7 @@ module lm1_tile
     // --- Status ---
     output logic               halted,
     output logic [XLEN-1:0]   pc_out,
-    output logic [XLEN-1:0]   cycle_count,
+    output logic [XLEN-1:0]   cycle_count,   // the core's clocks, stopped while gated
 
     // --- External memory port (for initial program load) ---
     input  logic               ext_mem_en,

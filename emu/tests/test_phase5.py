@@ -392,6 +392,48 @@ def test_recv_stall_unstall():
     assert emu.threads[1].halted
 
 
+@test("recv_wait_retires_nothing", batch="phase5_multithread")
+def test_recv_wait_retires_nothing():
+    """A RECV that finds its queue empty waits and retires nothing; it
+    retires once, when it runs again and takes the word.  INSTRET, SYS_INFO
+    15, counts each thread's retired instructions apart."""
+    emu = _emu(num_threads=2)
+    queue = tag_fixnum(0) & 0xFFFF
+
+    # Thread 0 sends only after the consumer's RECV has found the queue empty.
+    prog0 = [
+        encode_i(Op.LI, 1, 0, queue),
+        encode_i(Op.LI, 2, 0, tag_fixnum(77) & 0xFFFF),
+        encode_x(Op.HALT_NOP, 1 << 21),   # NOP
+        encode_x(Op.HALT_NOP, 1 << 21),   # NOP
+        encode_s(Op.SEND, 1, 2, 0),
+        encode_x(Op.HALT_NOP, 0),
+    ]
+    prog1_base = 0x100
+    prog1 = [
+        encode_i(Op.LI, 1, 0, queue),
+        encode_i(Op.RECV, 5, 1, 0),       # waits, then takes fixnum(77)
+        encode_i(Op.SYS_INFO, 6, 15, 0),  # INSTRET r6
+        encode_x(Op.HALT_NOP, 0),
+    ]
+    for i, insn in enumerate(prog0):
+        emu.mem.store_u32(i * 4, insn)
+    for i, insn in enumerate(prog1):
+        emu.mem.store_u32(prog1_base + i * 4, insn)
+    emu.threads[0].pc = 0
+    emu.threads[1].pc = prog1_base
+
+    emu.run_round_robin(max_instructions=1000)
+
+    consumer = emu.threads[1]
+    assert consumer.halted and consumer.regs[5] == tag_fixnum(77)
+    assert consumer.regs[6] == 2, f"INSTRET read {consumer.regs[6]}: LI and RECV retired"
+    assert consumer.instret == 4, f"the consumer retired {consumer.instret}"
+    assert emu.threads[0].instret == 6, f"the producer retired {emu.threads[0].instret}"
+    # Every instruction run retired, save the RECV that found the queue empty.
+    assert emu.instruction_count == 4 + 6 + 1, f"{emu.instruction_count} instructions ran"
+
+
 # ===================================================================
 # Batch: phase5_multitile — cluster with cross-tile messaging
 # ===================================================================

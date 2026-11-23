@@ -757,7 +757,8 @@ Every conditional branch tests one register, and every branch counts its offset 
 `NOP` — no operation  
 `TILE.ID Rd` — read current tile ID  
 `THREAD.ID Rd` — read current hardware thread ID  
-`CYCLE Rd` — read cycle counter
+`CYCLE Rd` — read the core's cycle counter  
+`INSTRET Rd` — read the number of instructions the thread has retired
 
 `TRAP #code` with a code below 0x80 raises that code: the thread enters the handler the trap table names for it, and `ERET` resumes after the `TRAP`, as a return from a system call does (§ 12). A code from 0x80 up is a system trap, which the core carries out itself and which no handler sees:
 
@@ -772,13 +773,13 @@ Every conditional branch tests one register, and every branch counts its offset 
 
 Every other code from 0x80 up is reserved, and a `TRAP` naming one raises `TRAP_UNIMPLEMENTED`, a fault that saves the `TRAP`'s own PC. The emulators give 0x80 to 0x82, 0x84 and 0x9F to their host's console and block device (`design/emulator.md` § 7), a bridge the chip lacks: LM-1's own I/O travels the link to MegaPad.
 
-`TILE.ID`, `THREAD.ID` and `CYCLE` are three of the reads of `SYS_INFO Rd, #sub`, which writes `Rd` from the source its sub-code names:
+`TILE.ID`, `THREAD.ID`, `CYCLE` and `INSTRET` are four of the reads of `SYS_INFO Rd, #sub`, which writes `Rd` from the source its sub-code names:
 
 | Sub | Mnemonic | Reads |
 |:---:|----------|-------|
 | 0 | `TILE.ID` | The tile's ID |
 | 1 | `THREAD.ID` | The hardware thread's ID |
-| 2 | `CYCLE` | The cycle counter |
+| 2 | `CYCLE` | The core's cycle counter |
 | 3 | `TRAP.CAUSE` | The code of the last trap taken |
 | 4 | `TRAP.PC` | The PC the last trap saved |
 | 5 | `CARD.BASE` | The card table's base |
@@ -791,8 +792,44 @@ Every other code from 0x80 up is reserved, and a `TRAP` naming one raises `TRAP_
 | 12 | — | The object address of the FIFO's head entry |
 | 13 | — | The field index of the head entry |
 | 14 | — | The reference of the head entry, popping the entry |
+| 15 | `INSTRET` | The number of instructions the thread has retired |
 
-Sub-codes 15 to 31 are reserved. The emulators model no movement engines and no counters, so they read 0 for sub-codes 9 to 14.
+Sub-codes 16 to 31 are reserved. The emulators model no movement engines, so they read 0 for sub-codes 9 and 11 to 14.
+
+`CYCLE` and `INSTRET` measure different things. `CYCLE` counts the clock cycles of the core since reset, one count that all four of its threads read. The RTL counts every clock its core receives, so the count stops while the tile gates the clock of a halted core. `INSTRET` counts the instructions the reading thread has retired since reset, not counting the `SYS_INFO` that reads it. An instruction retires once it has done its work. A fault retires nothing, and the instruction that faulted retires when it runs again; one that a handler carries out and passes with `ERET.NEXT` never retires. A `RECV` that finds its queue empty retires nothing until it runs again and takes a word. An explicit `TRAP` retires before its handler runs, as the system traps, `ERET`, `ERET.NEXT` and `HALT` retire. The RTL, the Python emulator and the chiplet module retire the same instructions, so a program whose path does not depend on the timing of other threads or tiles reads the same `INSTRET` on all three, while a loop that polls a queue, or two tiles racing for one, retires as many instructions as its timing gives it.
+
+The two models have no clock. As MegaPad's emulator does, they count the cycles of an architectural timing model, which charges each instruction the cycles the table below gives it; the chiplet module includes the table and the Python emulator reads it, both from `chiplet/src/timing.h`, so the two charge alike. A model's `CYCLE` reads the cycles its core spent before the reading instruction. An instruction costs its issue, or its own entry where it has one. One that reads data memory adds one memory latency, however many words it reads; a store whose barrier marks a card adds the mark; and an instruction that raises a trap below 0x80 costs its issue, any read before the trap, and the trap's entry, and costs its own cycles again if it runs again.
+
+| Entry | Cycles | What it charges, and the figure it takes |
+|-------|:------:|------------------------------------------|
+| `ISSUE` | 1 | An instruction's issue: every instruction §§ 3 to 10 give 1 cycle or a range from 1, as `CMP.TAGGED`, `ALLOC.CLOSURE`, `ST.WB` and `IC.INSTALL` have, and every instruction they give no figure, among them the scalar and system instructions of this section |
+| `MUL` | 3 | `MUL.FIX`, whose 3 to 5 cycles depend on the multiplier, and the raw `MUL` |
+| `DIV` | 8 | `DIV.FIX`, whose 8 to 32 depend on the divider, and the raw `DIV` and `MOD` |
+| `ALLOCV` | 2 | `ALLOCV`'s fast path |
+| `MEMORY_LATENCY` | 4 | The wait of an instruction that reads data memory: a load, the header reads of `TST.SHAPE`, `CALL.IC`, `TAILCALL.IC`, `IC.INSTALL` and `CALL.CLOSURE`, `CAS.TAGGED` and `FAA`. Tile SRAM's latency ([03-core.md](03-core.md) § 4.2), and the low end of the cluster SRAM's 4 to 8 ([04-soc.md](04-soc.md)) |
+| `BARRIER_MARK` | 1 | The card mark of a store whose barrier fires: the second cycle of `ST.WB`'s 1 to 2, which `ST.CAR`, `ST.CDR` and `CAS.TAGGED` share |
+| `TRAP_ENTRY` | 3 | A trap's entry, from its detection to its handler's first instruction ([03-core.md](03-core.md) § 6.2) |
+
+Each range takes its low end, the fast path or the fastest unit the spec allows. An instruction whose reads pipeline waits one latency, as the spec's "1 + memory latency" for `CALL.CLOSURE`'s two reads has it. `POP`, `POP.MULTI` and `RET` read the stack, which the stack cache of [03-core.md](03-core.md) § 5.5 holds, and wait none, as `RET`'s 1 assumes. The prefetches cost their issue, since no implementation prefetches, and so does `FENCE.GC`, since the models keep no store buffer. The models' stand-in for the runtime answers a nursery overflow by collecting natively, and its collection costs nothing beyond the overflow's trap. The table charges every latency to the core, as a core running one thread would wait it; the core of [03-core.md](03-core.md) § 4.2 hides latency behind its other threads, so with several threads running a model's count runs ahead of that core's.
+
+The RTL's core is a multi-cycle state machine that takes 4 clocks for the simplest instructions, 5 to 11 for most others and about 68 for a division (`rtl/doc/03-core-pipeline.md`), and over the CPU bench's 54 programs it counts 3.8 clocks for each cycle the models charge, 3.5 over those that do not divide. The timing model makes no claim of parity with the RTL; `INSTRET` is the count all three share. Clock-level figures without running the RTL need a timing model calibrated against it, which is the authentic profiler of the second release.
+
+`SYS_INFO` 10 reads the performance counter the immediate's bits 4:0 number. The RTL counts each event as it happens; the models count by their own execution and timing model:
+
+| # | Counts | RTL | Models |
+|:-:|--------|-----|--------|
+| 0 | Allocations | Each allocation that completes | The same |
+| 1 | Bytes allocated, headers included | Adds 16 bits of each allocation's size, so one of 64 KiB or more adds a wrapped count | The full count |
+| 2 | Barrier marks: stores of a young reference into an old word | Each mark | The same |
+| 3 | Stores the barrier filtered | Each filtered store | The same, with `CAS.TAGGED`'s stores of a reference (§ 8.4) |
+| 4 | Inline-cache hits of `CALL.IC` and `TAILCALL.IC` | Each hit | The same |
+| 5 | Inline-cache misses | Each miss | The same |
+| 6 | Cycles a movement engine worked | Each such clock | 0: the models have no engines |
+| 7 | Nursery overflows | Each `TRAP_NURSERY_OVERFLOW` raised | The same |
+| 8 | Memory stall cycles | Each clock the core waits on an I-cache fill, on an LSU that cannot take its request, or on the answer to a read or write | The latency the timing model charges |
+| — | Words moved to and from the shared heap in MegaPad's memory, MegaPad's `PERF_EXTMEM` | Pending: built on all three when the link's endpoint joins LM-1's top level ([`rtl/doc/08-host-link.md`](../rtl/doc/08-host-link.md)) | Pending |
+
+A number past 8 reads 0. No counter resets or pauses: software measures an interval by subtracting two readings, of `CYCLE`, `INSTRET` or a counter.
 
 ### 11.7 Immediate Loads
 

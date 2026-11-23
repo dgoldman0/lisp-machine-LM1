@@ -19,11 +19,14 @@ class Memory:
     Total size is given in bytes and must be a multiple of 8.
     """
 
-    __slots__ = ("_data", "_size")
+    __slots__ = ("_data", "_size", "reads")
 
     def __init__(self, size_bytes: int):
         assert size_bytes % 8 == 0, "Memory size must be a multiple of 8"
         self._size = size_bytes
+        # Data reads so far, which the timing model's memory latency follows
+        # (lm1/timing.py); instruction fetches are not data reads.
+        self.reads = 0
         word_count = size_bytes // 8
         # 'Q' = unsigned long long (uint64)
         self._data = array.array("Q", (0 for _ in range(word_count)))
@@ -36,6 +39,7 @@ class Memory:
 
     def load_word(self, addr: int) -> int:
         """Load a 64-bit word.  addr must be 8-byte aligned."""
+        self.reads += 1
         return self._data[addr >> 3]
 
     def store_word(self, addr: int, value: int) -> None:
@@ -69,6 +73,7 @@ class Memory:
     # -- byte access ---
 
     def load_byte(self, addr: int) -> int:
+        self.reads += 1
         word = self._data[addr >> 3]
         shift = (addr & 7) * 8
         return (word >> shift) & 0xFF
@@ -82,6 +87,7 @@ class Memory:
     # -- 16-bit access ---
 
     def load_u16(self, addr: int) -> int:
+        self.reads += 1
         word = self._data[addr >> 3]
         shift = (addr & 7) * 8
         return (word >> shift) & 0xFFFF
@@ -95,6 +101,7 @@ class Memory:
     # -- 32-bit data access (may be at non-instruction-aligned addresses) ---
 
     def load_u32_data(self, addr: int) -> int:
+        self.reads += 1
         word = self._data[addr >> 3]
         shift = (addr & 7) * 8
         return (word >> shift) & 0xFFFF_FFFF

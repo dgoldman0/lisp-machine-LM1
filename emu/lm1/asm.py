@@ -31,7 +31,7 @@ from .decode import (
     FUNC_TILE_ID, FUNC_THREAD_ID, FUNC_CYCLE,
     FUNC_TRAP_CAUSE, FUNC_TRAP_PC,
     FUNC_CARD_BASE, FUNC_CARD_SHIFT, FUNC_GEN_BOUNDARY,
-    FUNC_QUEUE_BASE, FUNC_GC_STATUS,
+    FUNC_QUEUE_BASE, FUNC_GC_STATUS, FUNC_INSTRET,
     BR_T, BR_NIL, BR_FIX_LT, BR_FIX_EQ, BR_FIX_GT, BR_EQ,
     FUNC_ERET, FUNC_ERET_NEXT,
 )
@@ -690,7 +690,7 @@ class Assembler:
             return encode_r(Op.FAA_FENCE, 0, 0, 0, 0x1F)
 
         # ---------------------------------------------------------------
-        # System: TRAP, ERET, TILE.ID, THREAD.ID, CYCLE, HALT, NOP
+        # System: TRAP, ERET, TILE.ID, THREAD.ID, CYCLE, INSTRET, HALT, NOP
         # ---------------------------------------------------------------
         if mn == 'TRAP':
             code = self._eval_expr(args[0], ln)
@@ -708,6 +708,9 @@ class Assembler:
         if mn == 'CYCLE':
             rd = self._reg(args[0], ln)
             return encode_r(Op.SYS_INFO, rd, FUNC_CYCLE, 0, 0)
+        if mn == 'INSTRET':
+            rd = self._reg(args[0], ln)
+            return encode_r(Op.SYS_INFO, rd, FUNC_INSTRET, 0, 0)
         if mn == 'TRAP.CAUSE':
             rd = self._reg(args[0], ln)
             return encode_r(Op.SYS_INFO, rd, FUNC_TRAP_CAUSE, 0, 0)

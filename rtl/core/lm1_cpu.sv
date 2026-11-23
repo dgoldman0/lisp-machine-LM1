@@ -41,7 +41,7 @@ module lm1_cpu
     // Status
     output logic               halted,
     output logic [XLEN-1:0]   pc_out,
-    output logic [XLEN-1:0]   cycle_count,
+    output logic [XLEN-1:0]   cycle_count,   // the core's clocks since reset (SYS_INFO 2)
 
     // External memory port (optional — directly expose SRAM for loading)
     input  logic               ext_mem_en,
@@ -190,6 +190,7 @@ module lm1_cpu
     logic               ctr_ic_hit_inc;
     logic               ctr_ic_miss_inc;
     logic               ctr_nursery_ovf_inc;
+    logic               ctr_mem_stall_inc;
 
     // I-Cache wires
     logic               icache_fetch_req, icache_fetch_valid;
@@ -537,6 +538,7 @@ module lm1_cpu
         .ctr_ic_hit_inc      (ctr_ic_hit_inc),
         .ctr_ic_miss_inc     (ctr_ic_miss_inc),
         .ctr_nursery_ovf_inc (ctr_nursery_ovf_inc),
+        .ctr_mem_stall_inc   (ctr_mem_stall_inc),
         // I-Cache interface
         .icache_fetch_req   (icache_fetch_req),
         .icache_fetch_addr  (icache_fetch_addr),
@@ -592,6 +594,7 @@ module lm1_cpu
         .ic_miss_inc      (ctr_ic_miss_inc),
         .gc_cycle_inc     (gc_engine_busy),  // count every cycle an engine is active
         .nursery_ovf_inc  (ctr_nursery_ovf_inc),
+        .mem_stall_inc    (ctr_mem_stall_inc),
         .rd_id            (ctr_id),
         .rd_value         (ctr_value)
     );

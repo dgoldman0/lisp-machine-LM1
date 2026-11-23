@@ -197,6 +197,24 @@ library that LM-1's tests load. No test runs against a library older than
 its sources. Tests that need MegaPad, from stage 2 on, run as MegaPad or
 Akashic test files that attach the built module.
 
+## 4a. Timing and the per-function profile
+
+The module and the Python emulator count cycles by one architectural timing
+model, whose table `chiplet/src/timing.h` holds for both, and the
+performance counters of `spec/02-isa.md` § 11.6 count by it. The module also
+profiles the LM-1 code it runs, as MegaPad's simulator profiles guest words:
+with `profile=N` in its configuration it samples each core's current thread
+every N cycles of the timing model, names the function holding the PC and
+the callers the frame chain names from the symbol table an image carries at
+its end, and appends a record of each core's samples to `profile_file`
+every `profile_interval` cycles, in the shape of MegaPad's
+`guest-words.jsonl`. The profile reads the model and never writes it, so a
+profiled run computes the same as an unprofiled one, and with the default
+`profile=0` it costs one comparison an instruction. `docs/profile.md`
+describes the sampling, the configuration, the symbol table that
+`lm1.image` builds and LM-1's compiler names, and the records. The Python
+emulator has no profile.
+
 ## 5. Decisions
 
 All decided on 2026-11-22.

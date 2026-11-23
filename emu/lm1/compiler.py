@@ -191,6 +191,12 @@ class Compiler:
     def _emit_comment(self, text: str) -> None:
         self._emit(f"    ; {text}")
 
+    def symbols(self) -> dict[str, str]:
+        """The functions compiled so far, the runtime's helpers among them:
+        each one's assembly label and its Lisp name, as an image's symbol
+        table names it (lm1/image.py)."""
+        return {label: name for name, label in self._functions.items()}
+
     def get_output(self) -> str:
         """Return accumulated assembly text, including data section."""
         result = list(self.lines)

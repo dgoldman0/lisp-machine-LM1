@@ -270,7 +270,10 @@ Each runs the shared cases first, then those only it can run:
   of the spec places them.
 - **LM-1's top level.** Wiring the link into LM-1's clusters, and choosing
   which cluster's memory a link address reaches, wait on where LM-1's main
-  memory is placed.
+  memory is placed (release plan Part 8e). The same work builds the
+  performance counter of the words LM-1 code moves to and from the shared
+  heap in MegaPad's memory, MegaPad's `PERF_EXTMEM`, on the RTL and both
+  models together; `spec/02-isa.md` § 11.6 lists it as pending.
 - **Contention at the cluster's port B.** No bench runs the GC engines
   while the link writes; that a word waits at most one cycle behind them
   follows from the engines' state machines and is not measured.

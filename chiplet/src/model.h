@@ -11,6 +11,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -88,10 +90,26 @@ constexpr unsigned QUEUES = 4;
 // The block device's block (emulator TRAP 0x82).
 constexpr u64 BLOCK_SIZE = 4096;
 
+// LM-1's architectural timing model: the cycles each instruction costs,
+// from timing.h, the table the Python emulator reads too (spec/02-isa.md
+// section 11.6).
+namespace timing {
+#define LM1_TIMING(name, cycles) constexpr u64 name = cycles;
+#include "timing.h"
+#undef LM1_TIMING
+}  // namespace timing
+
+// The performance counters SYS_INFO 10 reads, by the number in bits 4:0 of
+// its immediate (spec/02-isa.md section 11.6); a number past them reads 0.
+constexpr unsigned CTR_ALLOC_COUNT = 0, CTR_ALLOC_BYTES = 1, CTR_BARRIER_FIRES = 2,
+                   CTR_BARRIER_FILTERED = 3, CTR_IC_HITS = 4, CTR_IC_MISSES = 5,
+                   CTR_GC_CYCLES = 6, CTR_NURSERY_OVERFLOWS = 7, CTR_MEMORY_STALLS = 8;
+constexpr unsigned PERF_COUNTERS = 9;
+
 struct Thread {
     u64 regs[REGS] = {};
     u64 pc = 0;
-    u64 cycle_count = 0;
+    u64 instret = 0;  // INSTRET: the instructions the thread has retired
     bool halted = false;
     bool stalled = false;
     i64 stall_queue = -1;  // the descriptor value, tile * 4 + queue, a RECV waits on
@@ -156,7 +174,12 @@ struct Tile {
     u64 queue_base = 0;  // SET_QUEUE_BASE records it, SYS_INFO 8 reads it back
     std::vector<uint8_t> cards;  // one byte per card, 0xFF when dirty
     u64 gc_count = 0;
+    // The instructions the core has issued, whatever became of them; the
+    // cycles the timing model charged them, which CYCLE reads; and the
+    // performance counters SYS_INFO 10 reads.
     u64 instruction_count = 0;
+    u64 cycles = 0;
+    u64 perf[PERF_COUNTERS] = {};
     std::unordered_map<IcKey, u64, IcHash> ic;
     Queue queues[QUEUES];
 };
@@ -223,6 +246,13 @@ struct Config {
     // keeps LM-1's clock and MegaPad's within a small factor of each other.
     u64 unit_ns = 200;
     u64 hook_id = 0;              // names the model to the test hooks
+    // The per-function profile (profile.cpp): a sample every profile cycles
+    // of the timing model, 0 for none, a record every profile_interval
+    // cycles, appended to profile_file.  They change nothing the model
+    // computes, so the configuration a saved state carries leaves them out.
+    u64 profile = 0;
+    u64 profile_interval = 100000000;
+    std::string profile_file;
 };
 
 // Parses a configuration string; on failure returns false with a reason.
@@ -230,6 +260,42 @@ bool parse_config(const char *text, Config &config, std::string &error);
 // The configuration as one canonical string, every key in a fixed order,
 // which a saved state carries so that it restores only where it fits.
 std::string config_text(const Config &config);
+
+// The per-function profile (profile.cpp, docs/profile.md).  Every profile
+// cycles of the timing model it samples a core's current thread: the
+// function holding its PC and the callers its frame chain names, from the
+// symbol table an image carries at its end.  Each core's samples go into a
+// record every profile_interval cycles, in the shape of MegaPad's
+// guest-words.jsonl.  It reads the model and never writes it, so a run
+// computes the same with it as without.
+struct Symbol {
+    u64 address;
+    std::string name;
+};
+
+struct CoreProfile {
+    u64 next_sample = 0;  // the cycle count at which the next sample falls
+    u64 start = 0;        // the cycle count the record in hand began at
+    u64 cycles = 0, samples = 0;
+    std::map<std::string, u64> inclusive, leaf, chains;
+};
+
+class Profiler {
+public:
+    Profiler() = default;
+    Profiler(const Profiler &) = delete;
+    Profiler &operator=(const Profiler &) = delete;
+    ~Profiler();
+
+    // The symbol table at the end of SIZE bytes of an image: false, and no
+    // table, when the bytes end in none.
+    bool load_symbols(const uint8_t *data, size_t size);
+    std::vector<Symbol> symbols;  // by address
+    std::vector<CoreProfile> cores;
+    std::string path;
+    u64 interval = 0;
+    std::FILE *out = nullptr;
+};
 
 // Where LM-1's end of the link stands (link.cpp).
 enum class Boot : uint8_t {
@@ -273,8 +339,16 @@ struct Model {
     // Whether a step of the chiplet module runs, the one time LM-1 may
     // reach MegaPad's memory; not state.
     bool in_step = false;
+    // Data reads so far, which the timing model's memory latency follows,
+    // and the cards the current instruction marked; not state.
+    u64 data_reads = 0;
+    u64 marks = 0;
+    // The per-function profile; not state.
+    Profiler profiler;
 
     explicit Model(const Config &config);
+    // Writes the profile's records in hand.
+    ~Model();
 
     // Every tile back to the state the configuration gives it.
     void init_tiles();
@@ -301,7 +375,20 @@ struct Model {
     // Ends the run with a fault at ADDRESS, outside the tile's memory.
     Flow memory_fault(u128 address);
     Flow host_failure();
+
+    // The per-function profile (profile.cpp).  profile_sample takes the
+    // samples due once an instruction of thread T has charged TILE's
+    // cycles; profile_restart writes the records in hand and starts each
+    // core's sampling over from its cycle count, as after a reset or a
+    // restore; profile_flush writes the records in hand.
+    void profile_sample(Tile &tile, const Thread &t);
+    void profile_restart();
+    void profile_flush();
 };
+
+// Opens the profile's file when the configuration asks for a profile, and
+// starts each core's sampling; on failure returns false with a reason.
+bool profile_open(Model &m, std::string &error);
 
 // The models mp64_chiplet_create made, which lm1c_chiplet_find searches.
 void register_module_model(lm1c_model *model);

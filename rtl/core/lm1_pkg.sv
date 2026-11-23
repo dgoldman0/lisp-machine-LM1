@@ -322,6 +322,10 @@ package lm1_pkg;
     parameter logic [REG_IDX_W-1:0] SYS_SCAN_HEAD_FIELD  = 5'd13;  // head entry: field index
     parameter logic [REG_IDX_W-1:0] SYS_SCAN_POP_REF     = 5'd14;  // head entry: ref (+ pop)
 
+    // SYS_INFO sub-code for the thread's retired instructions, the last
+    // one assigned: SYS_INFO's sub-codes above it are reserved
+    parameter logic [REG_IDX_W-1:0] SYS_INSTRET          = 5'd15;
+
     // ---------------------------------------------------------------
     // GC engine command codes  (for ENQ.* opcodes → engine command port)
     // ---------------------------------------------------------------
@@ -342,6 +346,8 @@ package lm1_pkg;
     parameter logic [4:0] CTR_IC_MISSES       = 5'd5;
     parameter logic [4:0] CTR_GC_CYCLES       = 5'd6;
     parameter logic [4:0] CTR_NURSERY_OVERFLOWS = 5'd7;
+    parameter logic [4:0] CTR_MEMORY_STALLS   = 5'd8;  // clocks the core waits on memory
+    parameter int         PERF_COUNTERS       = 9;
 
     // ---------------------------------------------------------------
     // Message queue constants
