@@ -757,7 +757,8 @@ Every conditional branch tests one register, and every branch counts its offset 
 `NOP` — no operation  
 `TILE.ID Rd` — read current tile ID  
 `THREAD.ID Rd` — read current hardware thread ID  
-`CYCLE Rd` — read cycle counter
+`CYCLE Rd` — read the core's cycle counter  
+`INSTRET Rd` — read the number of instructions the thread has retired
 
 `TRAP #code` with a code below 0x80 raises that code: the thread enters the handler the trap table names for it, and `ERET` resumes after the `TRAP`, as a return from a system call does (§ 12). A code from 0x80 up is a system trap, which the core carries out itself and which no handler sees:
 
@@ -772,13 +773,13 @@ Every conditional branch tests one register, and every branch counts its offset 
 
 Every other code from 0x80 up is reserved, and a `TRAP` naming one raises `TRAP_UNIMPLEMENTED`, a fault that saves the `TRAP`'s own PC. The emulators give 0x80 to 0x82, 0x84 and 0x9F to their host's console and block device (`design/emulator.md` § 7), a bridge the chip lacks: LM-1's own I/O travels the link to MegaPad.
 
-`TILE.ID`, `THREAD.ID` and `CYCLE` are three of the reads of `SYS_INFO Rd, #sub`, which writes `Rd` from the source its sub-code names:
+`TILE.ID`, `THREAD.ID`, `CYCLE` and `INSTRET` are four of the reads of `SYS_INFO Rd, #sub`, which writes `Rd` from the source its sub-code names:
 
 | Sub | Mnemonic | Reads |
 |:---:|----------|-------|
 | 0 | `TILE.ID` | The tile's ID |
 | 1 | `THREAD.ID` | The hardware thread's ID |
-| 2 | `CYCLE` | The cycle counter |
+| 2 | `CYCLE` | The core's cycle counter |
 | 3 | `TRAP.CAUSE` | The code of the last trap taken |
 | 4 | `TRAP.PC` | The PC the last trap saved |
 | 5 | `CARD.BASE` | The card table's base |
@@ -791,8 +792,11 @@ Every other code from 0x80 up is reserved, and a `TRAP` naming one raises `TRAP_
 | 12 | — | The object address of the FIFO's head entry |
 | 13 | — | The field index of the head entry |
 | 14 | — | The reference of the head entry, popping the entry |
+| 15 | `INSTRET` | The number of instructions the thread has retired |
 
-Sub-codes 15 to 31 are reserved. The emulators model no movement engines and no counters, so they read 0 for sub-codes 9 to 14.
+Sub-codes 16 to 31 are reserved. The emulators model no movement engines and no performance counters, so they read 0 for sub-codes 9 to 14.
+
+`CYCLE` and `INSTRET` measure different things. `CYCLE` counts the clock cycles of the core since reset, one count that all four of its threads read. The RTL counts every clock its core receives, so the count stops while the tile gates the clock of a halted core. `INSTRET` counts the instructions the reading thread has retired since reset, not counting the `SYS_INFO` that reads it. An instruction retires once it has done its work. A fault retires nothing, and the instruction that faulted retires when it runs again; one that a handler carries out and passes with `ERET.NEXT` never retires. A `RECV` that finds its queue empty retires nothing until it runs again and takes a word. An explicit `TRAP` retires before its handler runs, as the system traps, `ERET`, `ERET.NEXT` and `HALT` retire. The RTL, the Python emulator and the chiplet module retire the same instructions, so a program whose path does not depend on the timing of other threads or tiles reads the same `INSTRET` on all three, while a loop that polls a queue, or two tiles racing for one, retires as many instructions as its timing gives it.
 
 ### 11.7 Immediate Loads
 

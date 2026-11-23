@@ -149,6 +149,7 @@ FUNC_SCAN_COUNT      = 11
 FUNC_SCAN_HEAD_OBJ   = 12
 FUNC_SCAN_HEAD_FIELD = 13
 FUNC_SCAN_POP_REF    = 14
+FUNC_INSTRET         = 15   # the last assigned: sub-codes above it are reserved
 
 # HALT_NOP sub-functions (bits 25:21)
 FUNC_HALT = 0
@@ -193,7 +194,7 @@ def reserved(inst: "Instruction") -> bool:
     if op == Op.ERET:
         return inst.func > FUNC_ERET_NEXT
     if op == Op.SYS_INFO:
-        return inst.rs1 > FUNC_SCAN_POP_REF
+        return inst.rs1 > FUNC_INSTRET
     if op == Op.HALT_NOP:
         return inst.rd > FUNC_NOP
     return False

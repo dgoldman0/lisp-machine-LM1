@@ -41,7 +41,7 @@ module lm1_cpu
     // Status
     output logic               halted,
     output logic [XLEN-1:0]   pc_out,
-    output logic [XLEN-1:0]   cycle_count,
+    output logic [XLEN-1:0]   cycle_count,   // the core's clocks since reset (SYS_INFO 2)
 
     // External memory port (optional — directly expose SRAM for loading)
     input  logic               ext_mem_en,

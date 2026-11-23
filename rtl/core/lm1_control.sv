@@ -132,7 +132,7 @@ module lm1_control
     // -- Status --
     output logic                halted,
     output logic [XLEN-1:0]    pc_out,
-    output logic [XLEN-1:0]    cycle_count,
+    output logic [XLEN-1:0]    cycle_count,     // the core's clocks since reset
 
     // -- Performance counter increment strobes --
     output logic                ctr_alloc_inc,
@@ -233,12 +233,16 @@ module lm1_control
     // ---------------------------------------------------------------
     state_t          state;
     logic [XLEN-1:0] pc;
-    logic [XLEN-1:0] cyc;
+    logic [XLEN-1:0] cyc;               // CYCLE: every clock since reset
 
     // --- FGMT: 4 hardware threads ---
     logic [THREAD_IDX_W-1:0] cur_thread;     // currently active thread (0..3)
     logic [XLEN-1:0] thread_pc    [0:NUM_THREADS-1];  // per-thread PC
     logic [NUM_THREADS-1:0] thread_active;   // which threads are active (not halted)
+    // INSTRET: the instructions each thread has retired.  An instruction
+    // retires in the state that sets retire, once it has done its work: a
+    // fault, and a RECV that ends its turn waiting, retire nothing.
+    logic [XLEN-1:0] instret      [0:NUM_THREADS-1];
 
     // Helper: build banked register address from thread + reg index
     function automatic logic [FULL_REG_W-1:0] banked_addr(
@@ -285,7 +289,7 @@ module lm1_control
     // ---------------------------------------------------------------
     state_t          ns;
     logic [XLEN-1:0] pc_n;
-    logic            cyc_inc;
+    logic            retire;            // the current thread's instruction retires
 
     decoded_t        dr_n;
     logic [XLEN-1:0] imm_n;
@@ -350,7 +354,7 @@ module lm1_control
             OP_PUSH_MULTI,
             OP_POP_MULTI:   return d.rd > 5'd1;       // two banks of 16
             OP_ERET:        return d.func > FUNC_ERET_NEXT;
-            OP_SYS_INFO:    return d.rs1 > SYS_SCAN_POP_REF;
+            OP_SYS_INFO:    return d.rs1 > SYS_INSTRET;
             OP_HALT_NOP:    return d.rd > SEL_NOP;
             default:        return 1'b0;
         endcase
@@ -376,6 +380,7 @@ module lm1_control
             cur_thread <= '0;
             for (int t = 0; t < NUM_THREADS; t++) begin
                 thread_pc[t] <= '0;
+                instret[t]   <= '0;
             end
             thread_active <= {{(NUM_THREADS-1){1'b0}}, 1'b1};  // only thread 0 active at reset
             dr         <= '0;
@@ -407,8 +412,11 @@ module lm1_control
         end else begin
             state      <= ns;
             pc         <= pc_n;
-            cyc        <= cyc_inc ? (cyc + 64'd1) : cyc;
-
+            cyc        <= cyc + 64'd1;
+            // cur_thread holds the retiring instruction's thread until this
+            // edge, the one that may switch threads.
+            if (retire)
+                instret[cur_thread] <= instret[cur_thread] + 64'd1;
 
             // FGMT: save/restore thread context at instruction boundaries
             // When entering S_FETCH from a completed instruction, save
@@ -510,7 +518,7 @@ module lm1_control
         // === Defaults: hold all state ===
         ns          = state;
         pc_n        = pc;
-        cyc_inc     = 1'b0;
+        retire      = 1'b0;
         dr_n        = dr;
         imm_n       = imm_r;
         opa_n       = opa;
@@ -679,14 +687,14 @@ module lm1_control
             // Use rf_rd1_data as rs2 value immediate this cycle
             // (wire directly — no latency issue since regfile reads are combinational)
 
-            // Default: advance PC, count cycle
+            // Default: advance PC; the instruction retires
             pc_n    = pc + 64'd4;
-            cyc_inc = 1'b1;
+            retire  = 1'b1;
 
             if (reserved_encoding(dr)) begin
                 // A fault: the PC stays, and nothing else changes
                 tc_n    = TRAP_UNIMPLEMENTED;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_TRAP_LOOKUP;
             end else begin
@@ -699,7 +707,7 @@ module lm1_control
                 alu_a    = opb;            // rs1
                 alu_b    = rf_rd1_data;    // rs2 (live)
                 alu_start = (dr.func inside {FUNC_DIV, FUNC_MOD});
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_ALU_WAIT;
             end
@@ -709,7 +717,7 @@ module lm1_control
                 alu_func = dr.func;
                 alu_a    = opb;
                 alu_b    = rf_rd1_data;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_ALU_WAIT;
             end
@@ -720,7 +728,7 @@ module lm1_control
                 alu_a    = opb;
                 alu_b    = rf_rd1_data;
                 alu_start = (dr.func == FUNC_DIV_FIX);
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_ALU_WAIT;
             end
@@ -729,7 +737,7 @@ module lm1_control
                 alu_op  = OP_ADD_FIX_IMM;
                 alu_a   = opb;
                 alu_b   = imm_r;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_ALU_WAIT;
             end
@@ -739,7 +747,7 @@ module lm1_control
                 alu_func = dr.func;
                 alu_a    = opb;
                 alu_b    = rf_rd1_data;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_ALU_WAIT;
             end
@@ -748,7 +756,7 @@ module lm1_control
                 alu_op  = OP_TST;
                 alu_a   = opb;
                 alu_b   = {48'b0, dr.imm16};
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_ALU_WAIT;
             end
@@ -756,7 +764,7 @@ module lm1_control
             OP_TST_SHAPE: begin
                 if (is_any_ref(opb)) begin
                     ta_n    = ref_address(opb);
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_HDR_READ;
                 end else begin
@@ -787,7 +795,7 @@ module lm1_control
                 lsu_req  = 1'b1;
                 lsu_op   = LSU_LOAD32;
                 lsu_addr = pc + 64'd4;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 if (lsu_ready) ns = S_FIELD_WAIT;
             end
@@ -795,7 +803,7 @@ module lm1_control
             // ===== Raw memory =====
             OP_LDR: begin
                 ta_n    = (opb + imm_r) & ~64'h7;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
@@ -803,7 +811,7 @@ module lm1_control
             OP_STR: begin
                 ta_n    = (opa + imm_r) & ~64'h7;
                 td_n    = opb;   // rs1 value to store
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
@@ -811,19 +819,19 @@ module lm1_control
             // ===== Sub-word loads =====
             OP_LDB: begin
                 ta_n    = opb + imm_r;   // byte address, no alignment
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
             OP_LDH: begin
                 ta_n    = (opb + imm_r) & ~64'h1;  // halfword aligned
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
             OP_LDW: begin
                 ta_n    = (opb + imm_r) & ~64'h3;  // word aligned
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
@@ -832,21 +840,21 @@ module lm1_control
             OP_STB: begin
                 ta_n    = opa + imm_r;   // byte address
                 td_n    = opb;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
             OP_STH: begin
                 ta_n    = (opa + imm_r) & ~64'h1;
                 td_n    = opb;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
             OP_STW: begin
                 ta_n    = (opa + imm_r) & ~64'h3;
                 td_n    = opb;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
@@ -855,12 +863,12 @@ module lm1_control
             OP_LD: begin
                 if (!is_any_ref(opb)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opb) + {56'b0, dr.imm16[4:0] + 5'd1, 3'b0};
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;
                 end
@@ -869,13 +877,13 @@ module lm1_control
             OP_LD_CAR_CDR: begin
                 if (!is_any_ref(opb)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opb) +
                               (dr.imm16[0] ? 64'd16 : 64'd8);
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;
                 end
@@ -884,13 +892,13 @@ module lm1_control
             OP_ST: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opa) + {56'b0, dr.rs2 + 5'd1, 3'b0};
                     td_n    = opb;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;
                 end
@@ -913,13 +921,13 @@ module lm1_control
             OP_ST_WB: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opa) + {56'b0, dr.rs2 + 5'd1, 3'b0};
                     td_n    = opb;              // value being stored
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;      // do the store first
                     // After S_FIELD_MEM completes, S_FIELD_WAIT sends
@@ -934,14 +942,14 @@ module lm1_control
             OP_ST_CAR_CDR: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opa) +
                               (dr.rs2[0] ? 64'd16 : 64'd8);
                     td_n    = opb;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_FIELD_MEM;
                 end
@@ -974,12 +982,12 @@ module lm1_control
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_SP);
                         rf_w_data = sp_v - 64'd8;
-                        cyc_inc   = 1'b0;
+                        retire    = 1'b0;
                         pc_n      = pc;
                         ns        = S_MEM;
                     end else begin
                         ta_n    = sp_v;   // load from current SP
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_MEM;
                     end
@@ -991,7 +999,7 @@ module lm1_control
                 mb_n     = {dr.rd[0], 4'b0};
                 mdir_n   = 1'b0;
                 mi_n     = 5'd0;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_MULTI_ITER;
             end
@@ -1001,7 +1009,7 @@ module lm1_control
                 mb_n     = {dr.rd[0], 4'b0};
                 mdir_n   = 1'b1;
                 mi_n     = 5'd15;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_MULTI_ITER;
             end
@@ -1010,7 +1018,7 @@ module lm1_control
             OP_CALL_DIRECT: begin
                 tt_n     = pc + {{(XLEN-18){dr.imm16[15]}}, dr.imm16, 2'b00};
                 td_n     = pc + 64'd4;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_PUSH_FRAME_0;
             end
@@ -1020,7 +1028,7 @@ module lm1_control
             OP_CALL_REG: begin
                 tt_n     = opa;
                 td_n     = pc + 64'd4;
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 ns       = S_PUSH_FRAME_0;
             end
@@ -1028,13 +1036,13 @@ module lm1_control
             OP_CALL_CLOSURE: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_CLOSURE;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opa);
                     td_n    = pc + 64'd4;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_HDR_READ;
                 end
@@ -1043,13 +1051,13 @@ module lm1_control
             OP_CALL_IC: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opa);
                     td_n    = pc + 64'd4;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_HDR_READ;
                 end
@@ -1063,19 +1071,19 @@ module lm1_control
             OP_TAILCALL_IC: begin
                 if (!is_any_ref(opa)) begin
                     tc_n    = TRAP_NOT_REF;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
                     ta_n    = ref_address(opa);
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_HDR_READ;
                 end
             end
 
             OP_RET: begin
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_POP_FRAME_0;
             end
@@ -1091,7 +1099,7 @@ module lm1_control
                     ta_n    = ref_address(opb);
                     td_n    = rf_rd1_data;   // rs2 = code entry
                     tt_n    = opa;           // rd = callsite PC
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_HDR_READ;
                 end else begin
@@ -1119,7 +1127,7 @@ module lm1_control
                     tmpl_rd_idx = dr.imm16[7:0];
                     if (new_np > nl_v) begin
                         tc_n    = TRAP_NURSERY_OVERFLOW;
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_TRAP_LOOKUP;
                     end else begin
@@ -1128,7 +1136,7 @@ module lm1_control
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
-                        cyc_inc   = 1'b0;
+                        retire    = 1'b0;
                         pc_n      = pc;
                         ns        = S_ALLOC_HDR;
                     end
@@ -1148,7 +1156,7 @@ module lm1_control
                     tmpl_rd_idx = 8'd0;
                     if (new_np > nl_v) begin
                         tc_n    = TRAP_NURSERY_OVERFLOW;
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_TRAP_LOOKUP;
                     end else begin
@@ -1157,7 +1165,7 @@ module lm1_control
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
-                        cyc_inc   = 1'b0;
+                        retire    = 1'b0;
                         pc_n      = pc;
                         // Need an extra cycle to capture rs2 (cdr) since
                         // rf_rd1_addr was overridden to read NP above.
@@ -1175,7 +1183,7 @@ module lm1_control
                     // from 0 to 65,534, whose payload of length + 1 words
                     // the header's 16-bit size holds
                     tc_n    = is_fixnum(opb) ? TRAP_BAD_LENGTH : TRAP_NOT_FIXNUM;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
@@ -1193,7 +1201,7 @@ module lm1_control
                     new_np = np_v + {44'b0, {1'b0, nw} + 17'd1, 3'b0};
                     if (new_np > nl_v) begin
                         tc_n    = TRAP_NURSERY_OVERFLOW;
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_TRAP_LOOKUP;
                     end else begin
@@ -1202,7 +1210,7 @@ module lm1_control
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
-                        cyc_inc   = 1'b0;
+                        retire    = 1'b0;
                         pc_n      = pc;
                         ns        = S_ALLOC_HDR;
                     end
@@ -1224,7 +1232,7 @@ module lm1_control
                     tmpl_rd_idx = 8'd1;
                     if (new_np > nl_v) begin
                         tc_n    = TRAP_NURSERY_OVERFLOW;
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_TRAP_LOOKUP;
                     end else begin
@@ -1233,7 +1241,7 @@ module lm1_control
                         rf_we     = 1'b1;
                         rf_w_addr = banked_addr(cur_thread, REG_NP);
                         rf_w_data = new_np;
-                        cyc_inc   = 1'b0;
+                        retire    = 1'b0;
                         pc_n      = pc;
                         ns        = S_ALLOC_HDR;
                     end
@@ -1277,7 +1285,7 @@ module lm1_control
                             // A reserved system code: a fault, so the PC
                             // stays at the TRAP
                             tc_n    = TRAP_UNIMPLEMENTED;
-                            cyc_inc = 1'b0;
+                            retire  = 1'b0;
                             pc_n    = pc;
                         end
                     endcase
@@ -1285,8 +1293,8 @@ module lm1_control
                 end else begin
                     // User trap: advance PC past the TRAP instruction
                     // so that ERET returns to the instruction after TRAP.
-                    // (pc_n and cyc_inc keep their S_EXECUTE defaults:
-                    //  pc_n = pc + 4, cyc_inc = 1)
+                    // (pc_n and retire keep their S_EXECUTE defaults:
+                    //  pc_n = pc + 4, retire = 1)
                     ns      = S_TRAP_LOOKUP;
                 end
             end
@@ -1298,7 +1306,7 @@ module lm1_control
             OP_ERET: begin
                 if (!in_trap) begin
                     tc_n    = TRAP_UNIMPLEMENTED;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
@@ -1316,6 +1324,7 @@ module lm1_control
                     SYS_TILE_ID:      rf_w_data = cfg_tile_id;
                     SYS_THREAD_ID:    rf_w_data = cfg_thread_id;
                     SYS_CYCLE:        rf_w_data = cyc;
+                    SYS_INSTRET:      rf_w_data = instret[cur_thread];
                     SYS_TRAP_CAUSE:   rf_w_data = {56'b0, trap_cause};
                     SYS_TRAP_PC:      rf_w_data = trap_pc;
                     SYS_CARD_BASE:    rf_w_data = card_table_base;
@@ -1368,7 +1377,7 @@ module lm1_control
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_ENQ_WAIT;
                 end
@@ -1384,7 +1393,7 @@ module lm1_control
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_ENQ_WAIT;
                 end
@@ -1399,7 +1408,7 @@ module lm1_control
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_ENQ_WAIT;
                 end
@@ -1414,7 +1423,7 @@ module lm1_control
                 if (gc_cmd_ready) begin
                     ns = S_FETCH;
                 end else begin
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_ENQ_WAIT;
                 end
@@ -1426,7 +1435,7 @@ module lm1_control
                     // FENCE.GC: wait until all GC engines are idle
                     // and all pending barrier stores are drained
                     if (gc_engine_busy) begin
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_FENCE_GC;
                     end else begin
@@ -1434,7 +1443,7 @@ module lm1_control
                     end
                 end else begin
                     ta_n    = is_any_ref(opb) ? ref_address(opb) : opb;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_MEM;
                 end
@@ -1444,7 +1453,7 @@ module lm1_control
             OP_CAS_TAGGED: begin
                 ta_n    = is_any_ref(opb) ?
                           (ref_address(opb) & ~64'h7) : (opb & ~64'h7);
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_MEM;
             end
@@ -1475,7 +1484,7 @@ module lm1_control
                 mq_wr_data = opb;
                 if (!is_fixnum(opa) || qv[XLEN-1]) begin
                     tc_n    = is_fixnum(opa) ? TRAP_NO_ROUTE : TRAP_NOT_FIXNUM;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_wr_ready) begin
@@ -1483,11 +1492,11 @@ module lm1_control
                     ns       = S_FETCH;
                 end else if ({2'b00, qv[XLEN-1:2]} == cfg_tile_id && mq_wr_full) begin
                     tc_n    = TRAP_QUEUE_FULL;
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_TRAP_LOOKUP;
                 end else begin
-                    cyc_inc = 1'b0;
+                    retire  = 1'b0;
                     pc_n    = pc;
                     ns      = S_SEND_WAIT;
                 end
@@ -1499,7 +1508,7 @@ module lm1_control
                 ta_n     = {2'b00, qv[XLEN-1:2]};
                 tt_n     = {62'b0, qv[1:0]};
                 mq_rd_id = qv[1:0];
-                cyc_inc  = 1'b0;
+                retire   = 1'b0;
                 pc_n     = pc;
                 if (!is_fixnum(opb) || qv[XLEN-1]) begin
                     tc_n = is_fixnum(opb) ? TRAP_NO_ROUTE : TRAP_NOT_FIXNUM;
@@ -1524,7 +1533,7 @@ module lm1_control
                         opa_n = VAL_T;           // TRY.RECV's status
                         ns    = S_TRY_RECV_WB;
                     end else begin
-                        cyc_inc = 1'b1;
+                        retire  = 1'b1;
                         pc_n    = pc + 64'd4;
                         ns      = S_FETCH;
                     end
@@ -1535,7 +1544,7 @@ module lm1_control
 
             default: begin
                 tc_n    = TRAP_UNIMPLEMENTED;
-                cyc_inc = 1'b0;
+                retire  = 1'b0;
                 pc_n    = pc;
                 ns      = S_TRAP_LOOKUP;
             end
@@ -1562,7 +1571,7 @@ module lm1_control
                     tc_n = alu_trap_code;
                     ns   = S_TRAP_LOOKUP;
                 end else begin
-                    cyc_inc   = 1'b1;
+                    retire    = 1'b1;
                     pc_n      = pc + 64'd4;
                     rf_we     = 1'b1;
                     rf_w_addr = banked_addr(cur_thread, dr.rd);
@@ -1643,7 +1652,7 @@ module lm1_control
         // ---------------------------------------------------------
         S_MEM_WAIT: begin
             if (lsu_valid) begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
 
                 case (dr.opcode)
@@ -1681,10 +1690,10 @@ module lm1_control
                         rf_w_data = lsu_rdata;
                         // SP += 8
                         ta_n = ta + 64'd8;
-                        // Defer PC advance and cycle count to S_MULTI_SP_WR
-                        // (S_MEM_WAIT default already set cyc_inc=1, pc_n=pc+4
+                        // Defer PC advance and retirement to S_MULTI_SP_WR
+                        // (S_MEM_WAIT default already set retire=1, pc_n=pc+4
                         //  but S_MULTI_SP_WR will also set them → double advance)
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns   = S_MULTI_SP_WR;  // write SP
                     end
@@ -1696,7 +1705,7 @@ module lm1_control
                         // fixnums (spec/02-isa.md § 8.5).  A fault: nothing
                         // is stored or written, and the PC stays.
                         tc_n    = TRAP_NOT_FIXNUM;
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_TRAP_LOOKUP;
                     end else begin
@@ -1708,7 +1717,7 @@ module lm1_control
                         // (cannot issue store here — LSU is still in WAIT_RD,
                         //  lsu_ready is 0, so the store would be silently dropped)
                         td_n    = lsu_rdata + opc;
-                        cyc_inc = 1'b0;
+                        retire  = 1'b0;
                         pc_n    = pc;
                         ns      = S_ATOMIC_STORE;
                     end
@@ -1724,7 +1733,7 @@ module lm1_control
                         rf_we       = 1'b1;
                         rf_w_addr   = banked_addr(cur_thread, dr.rd);
                         rf_w_data   = VAL_T;
-                        cyc_inc     = 1'b0;
+                        retire      = 1'b0;
                         pc_n        = pc;
                         ns          = S_ATOMIC_STORE;
                     end else begin
@@ -1764,7 +1773,7 @@ module lm1_control
         // ---------------------------------------------------------
         S_FIELD_WAIT: begin
             if (lsu_valid) begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
 
                 case (dr.opcode)
@@ -1991,13 +2000,13 @@ module lm1_control
             // For POP_FRAME / RET: jump to tt
             case (dr.opcode)
             OP_RET: begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = tt;
                 ns      = S_FETCH;
             end
             OP_PUSH_POP: begin
                 // POP single — not used here (handled by MEM_WAIT)
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end
@@ -2006,7 +2015,7 @@ module lm1_control
                 rf_we     = 1'b1;
                 rf_w_addr = banked_addr(cur_thread, REG_FP);
                 rf_w_data = ta;
-                cyc_inc   = 1'b1;
+                retire    = 1'b1;
                 pc_n      = tt;
                 ns        = S_FETCH;
             end
@@ -2018,7 +2027,7 @@ module lm1_control
         // ---------------------------------------------------------
         S_MULTI_ITER: begin
             if (mm == 16'd0) begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end else if (mm[mi[3:0]]) begin
@@ -2093,12 +2102,12 @@ module lm1_control
             end
             OP_PUSH_POP: begin
                 // Single POP done
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end
             default: begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end
@@ -2213,7 +2222,7 @@ module lm1_control
             rf_we     = 1'b1;
             rf_w_addr = banked_addr(cur_thread, dr.rd);
             rf_w_data = make_ref(aa, acon);
-            cyc_inc   = 1'b1;
+            retire    = 1'b1;
             pc_n      = pc + 64'd4;
             ctr_alloc_inc       = 1'b1;
             ctr_alloc_bytes_inc = (anw + 16'd1) << 3;  // (nwords+1)*8
@@ -2244,7 +2253,7 @@ module lm1_control
                         rf_w_data = VAL_T;
                     else
                         rf_w_data = VAL_NIL;
-                    cyc_inc = 1'b1;
+                    retire  = 1'b1;
                     pc_n    = pc + 64'd4;
                     ns      = S_FETCH;
                 end
@@ -2281,7 +2290,7 @@ module lm1_control
                         ic_inst_pc     = tt;
                         ic_inst_shape  = shp;
                         ic_inst_target = td;
-                        cyc_inc = 1'b1;
+                        retire  = 1'b1;
                         pc_n    = pc + 64'd4;
                         ns      = S_FETCH;
                     end
@@ -2328,7 +2337,7 @@ module lm1_control
             OP_TAILCALL_IC: begin
                 if (ic_hit) begin
                     pc_n    = ic_hit_target;
-                    cyc_inc = 1'b1;
+                    retire  = 1'b1;
                     ctr_ic_hit_inc = 1'b1;
                     ns      = S_FETCH;
                 end else begin
@@ -2352,7 +2361,7 @@ module lm1_control
                 mq_wr_data = td;
                 if (mq_wr_ready) begin
                     mq_wr_en = 1'b1;
-                    cyc_inc  = 1'b1;
+                    retire   = 1'b1;
                     pc_n     = pc + 64'd4;
                     ns       = S_FETCH;
                 end else if (mq_wr_full) begin
@@ -2361,7 +2370,7 @@ module lm1_control
                 end
             end else if (rmq_ack) begin
                 if (rmq_ok) begin
-                    cyc_inc = 1'b1;
+                    retire  = 1'b1;
                     pc_n    = pc + 64'd4;
                     ns      = S_FETCH;
                 end else begin
@@ -2409,7 +2418,7 @@ module lm1_control
                     opa_n = got ? VAL_T : VAL_NIL;   // TRY.RECV's status
                     ns    = S_TRY_RECV_WB;
                 end else if (got) begin
-                    cyc_inc = 1'b1;
+                    retire  = 1'b1;
                     pc_n    = pc + 64'd4;
                     ns      = S_FETCH;
                 end else begin
@@ -2427,7 +2436,7 @@ module lm1_control
             rf_we     = 1'b1;
             rf_w_addr = banked_addr(cur_thread, dr.func);
             rf_w_data = opa;  // VAL_T or VAL_NIL
-            cyc_inc   = 1'b1;
+            retire    = 1'b1;
             pc_n      = pc + 64'd4;
             ns        = S_FETCH;
         end
@@ -2445,7 +2454,7 @@ module lm1_control
             gc_cmd_arg1  = opc;
             gc_cmd_arg2  = opa;    // region size for COPY
             if (gc_cmd_ready) begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end
@@ -2456,7 +2465,7 @@ module lm1_control
         // ---------------------------------------------------------
         S_FENCE_GC: begin
             if (!gc_engine_busy) begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end
@@ -2481,7 +2490,7 @@ module lm1_control
 
         S_ATOMIC_STORE_W: begin
             if (lsu_valid) begin
-                cyc_inc = 1'b1;
+                retire  = 1'b1;
                 pc_n    = pc + 64'd4;
                 ns      = S_FETCH;
             end

@@ -102,6 +102,7 @@ typedef struct lm1c_host {
 enum lm1c_thread_field {
     LM1C_THREAD_PC = 0,
     LM1C_THREAD_CYCLE_COUNT,
+    LM1C_THREAD_INSTRET,         /* the instructions the thread has retired */
     LM1C_THREAD_HALTED,          /* 0 or 1 */
     LM1C_THREAD_STALLED,         /* 0 or 1 */
     LM1C_THREAD_STALL_QUEUE,     /* the descriptor value, tile * 4 + queue, of the

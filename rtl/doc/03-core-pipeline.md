@@ -701,6 +701,18 @@ executed outside a trap handler, or `ERET` carries another func, it traps
 Counters are read via `SYS_INFO` with `rs1 = SYS_PERF_CTR` and `imm16[4:0]`
 selecting the counter index.
 
+### Cycle and Instruction Counters
+
+The control FSM keeps two more counters, which `SYS_INFO` reads by their
+own sub-codes (spec/02-isa.md § 11.6). `cyc`, read by `SYS_INFO` 2 (`CYCLE`)
+and driven out of `lm1_cpu` as `cycle_count`, adds one on every clock from
+reset. The tile gates the clock of a halted core, so the count stops with
+it. `instret[t]`, one per thread, counts the instructions thread *t* has
+retired, and `SYS_INFO` 15 (`INSTRET`) reads the current thread's. The state
+that ends an instruction raises `retire` along with its PC advance; a fault,
+and a RECV that ends its turn waiting, leave it low. The CPU bench prints
+both counters after each program.
+
 ---
 
 ## Supporting Tables

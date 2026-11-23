@@ -139,6 +139,7 @@ LM1C_API int lm1c_thread_get(const lm1c_model *model, uint32_t tile, uint32_t th
     switch (field) {
     case LM1C_THREAD_PC: *value = t->pc; break;
     case LM1C_THREAD_CYCLE_COUNT: *value = t->cycle_count; break;
+    case LM1C_THREAD_INSTRET: *value = t->instret; break;
     case LM1C_THREAD_HALTED: *value = t->halted; break;
     case LM1C_THREAD_STALLED: *value = t->stalled; break;
     case LM1C_THREAD_STALL_QUEUE: *value = uint64_t(t->stall_queue); break;
@@ -161,6 +162,7 @@ LM1C_API int lm1c_thread_set(lm1c_model *model, uint32_t tile, uint32_t thread,
     switch (field) {
     case LM1C_THREAD_PC: t->pc = value; break;
     case LM1C_THREAD_CYCLE_COUNT: t->cycle_count = value; break;
+    case LM1C_THREAD_INSTRET: t->instret = value; break;
     case LM1C_THREAD_HALTED: t->halted = value != 0; break;
     case LM1C_THREAD_STALLED: t->stalled = value != 0; break;
     case LM1C_THREAD_STALL_QUEUE: t->stall_queue = int64_t(value); break;

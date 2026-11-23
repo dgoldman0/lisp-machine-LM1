@@ -25,6 +25,7 @@ Tests cover:
   51: reserved encodings trap TRAP_UNIMPLEMENTED; TRAP 0x70 and 0x7F vector
   52: ALLOC.CONS takes car and cdr registers, read before np moves; r0 gives nil
   53: ALLOCV's lengths run from 0 to 65,534; others trap TRAP_BAD_LENGTH
+  54: INSTRET counts retired instructions: a fault retires nothing
 """
 
 import os
@@ -1331,7 +1332,7 @@ def gen_test_51():
         ("PUSH.MULTI bank 2",    encode_i(Op.PUSH_MULTI, 2, 0, 0x0001)),
         ("POP.MULTI bank 3",     encode_i(Op.POP_MULTI, 3, 0, 0x0001)),
         ("ERET func 2",          encode_r(Op.ERET, 0, 0, 0, 2)),
-        ("SYS.INFO sub 15",      encode_i(Op.SYS_INFO, 11, 15, 0)),
+        ("SYS.INFO sub 16",      encode_i(Op.SYS_INFO, 11, 16, 0)),
         ("HALT/NOP selector 2",  encode_x(Op.HALT_NOP, 2 << 21)),
         ("TRAP 0x96",            encode_x(Op.TRAP, 0x96)),
         ("TRAP 0xA0",            encode_x(Op.TRAP, 0xA0)),
@@ -1544,6 +1545,102 @@ overflow_handler:
 
 
 # ===========================================================================
+# Test 54: INSTRET counts the instructions the thread retired
+# ===========================================================================
+def gen_test_54():
+    reserved_sub = encode_i(Op.SYS_INFO, 9, 16, 0)   # the first reserved sub-code
+    source = f"""\
+    ; Test 54: INSTRET, SYS_INFO 15, reads the number of instructions the
+    ; thread retired before it (spec/02-isa.md section 11.6).  An
+    ; instruction retires once it has done its work.  A fault retires
+    ; nothing, and the faulting instruction retires when it runs again; a
+    ; system trap, an explicit TRAP, a call, a return, ERET and every
+    ; instruction of a handler retire.  SYS_INFO 16 is reserved.  Over the
+    ; same span the cycle counter advances at least as far as INSTRET.
+
+    INSTRET r16           ; nothing retired before it
+    NOP
+    NOP
+    INSTRET r17           ; INSTRET and two NOPs
+
+    LI  r1, {TRAP_TABLE}
+    TRAP 0x90
+    LI  r14, mend_handler
+    LI  r15, {TRAP_TABLE + 0x03 * 8}   ; TRAP_DIVIDE_BY_ZERO
+    STR r15, r14, 0
+    LI  r14, call_handler
+    LI  r15, {TRAP_TABLE + 0x42 * 8}   ; the code TRAP 0x42 raises
+    STR r15, r14, 0
+    LI  r14, unimpl_handler
+    LI  r15, {TRAP_TABLE + 0x7E * 8}   ; TRAP_UNIMPLEMENTED
+    STR r15, r14, 0
+    LI  sp, {STACK_TOP}
+    LI  r9, 0x99
+
+    ; --- a fault retires nothing; the run that succeeds retires ---
+    CYCLE r3
+    INSTRET r2
+    LI  r10, {tag_fixnum(42)}
+    LI  r11, {tag_fixnum(0)}
+    DIV.FIX r12, r10, r11 ; faults; the handler mends r11 and DIV.FIX runs again
+    INSTRET r4
+    CYCLE r5
+    SUB r18, r4, r2       ; INSTRET, two LIs, the handler's two, DIV.FIX once
+    SUB r6, r5, r3        ; the cycles over the same span
+    SUB r7, r6, r18
+    LI  r8, 63
+    SHR r7, r7, r8        ; 0: no fewer cycles than retired instructions
+
+    ; --- an explicit TRAP retires before its handler runs ---
+    INSTRET r2
+    TRAP 0x42
+    INSTRET r4
+    SUB r19, r4, r2       ; INSTRET, TRAP, the handler's two
+
+    ; --- a reserved encoding faults and retires nothing ---
+    INSTRET r2
+    .u32 {reserved_sub:#010x}   ; SYS_INFO r9, 16
+    INSTRET r4
+    SUB r20, r4, r2       ; INSTRET and the handler's two
+
+    ; --- a call and its return retire once each ---
+    INSTRET r2
+    CALL.DIRECT leaf
+    INSTRET r4
+    SUB r21, r4, r2       ; INSTRET, CALL.DIRECT, RET
+    HALT
+
+leaf:
+    RET
+
+mend_handler:
+    LI  r11, {tag_fixnum(2)}
+    ERET
+
+call_handler:
+    LI  r13, 0x13
+    ERET
+
+unimpl_handler:
+    TRAP.CAUSE r22
+    ERET.NEXT
+"""
+    emit_test('54_instret', source, {
+        'r16': 0,
+        'r17': 3,
+        'r18': 6,
+        'r7': 0,                  # the cycle counter kept up
+        'r12': tag_fixnum(21),    # DIV.FIX ran again after the handler
+        'r19': 4,
+        'r13': 0x13,
+        'r20': 3,
+        'r22': 0x7E,              # TRAP_UNIMPLEMENTED
+        'r9': 0x99,               # the reserved read wrote nothing
+        'r21': 3,
+    })
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -1572,4 +1669,5 @@ if __name__ == '__main__':
     gen_test_51()
     gen_test_52()
     gen_test_53()
+    gen_test_54()
     print("Done. All gap tests generated.")

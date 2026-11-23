@@ -116,6 +116,14 @@ module lm1_cluster_tb;
             $display("TIMEOUT after %0d cycles (halted %b)", ncycles, tile_halted);
         $display("TILE 0 COLLISIONS write %0d read %0d", wr_collisions[0], rd_collisions[0]);
         $display("TILE 1 COLLISIONS write %0d read %0d", wr_collisions[1], rd_collisions[1]);
+        // Each core's cycle counter, which stops while its tile gates the
+        // clock of a halted core, and the instructions thread 0 retired.
+        $display("TILE 0 CYCLE = %0d INSTRET = %0d",
+                 u_cluster.gen_tiles[0].u_tile.u_core.u_ctrl.cyc,
+                 u_cluster.gen_tiles[0].u_tile.u_core.u_ctrl.instret[0]);
+        $display("TILE 1 CYCLE = %0d INSTRET = %0d",
+                 u_cluster.gen_tiles[1].u_tile.u_core.u_ctrl.cyc,
+                 u_cluster.gen_tiles[1].u_tile.u_core.u_ctrl.instret[0]);
 
         for (int i = 0; i < 32; i++)
             $display("TILE 0 REG r%0d = %016h", i,

@@ -626,11 +626,11 @@ Used with LI to construct 32-bit constants.
 ```
 opcode = 111100 (TRAP #code): bits 7:0 = the code, bits 25:8 = 0
 opcode = 111101 (ERET, ERET.NEXT — func selects which)
-opcode = 111110 (SYS_INFO: TILE.ID, THREAD.ID, CYCLE and the other reads)
+opcode = 111110 (SYS_INFO: TILE.ID, THREAD.ID, CYCLE, INSTRET and the other reads)
 opcode = 111111 (HALT, NOP — bits 25:21 select which)
 ```
 
-`SYS_INFO Rd, #sub` is Format I: `Rd` in bits 25:21, the sub-code in bits 20:16 ([02-isa.md](02-isa.md) § 11.6 lists them), and for sub-code 10 the performance counter's number in bits 4:0 of `imm16`. Sub-codes 15 to 31 are reserved. `HALT` and `NOP` are told apart by bits 25:21: `00000` for `HALT`, `00001` for `NOP`, other values reserved; bits 20:0 are 0.
+`SYS_INFO Rd, #sub` is Format I: `Rd` in bits 25:21, the sub-code in bits 20:16 ([02-isa.md](02-isa.md) § 11.6 lists them), and for sub-code 10 the performance counter's number in bits 4:0 of `imm16`. Sub-codes 16 to 31 are reserved. `HALT` and `NOP` are told apart by bits 25:21: `00000` for `HALT`, `00001` for `NOP`, other values reserved; bits 20:0 are 0.
 
 `ERET` and `ERET.NEXT` share their opcode and are told apart by Format R's `func`, bits 10:6: `00000` for `ERET`, which resumes at the saved PC, and `00001` for `ERET.NEXT`, which resumes at the saved PC + 4 ([03-core.md](03-core.md) § 6.3). The other payload bits are 0.
 

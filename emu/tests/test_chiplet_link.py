@@ -655,7 +655,8 @@ def test_release_starts_over():
     assert mp.rung == [9, 1, 9] and mp.model.link(chiplet.LINK_DOORBELLS_IN) == 0
     mp.reset()
     assert all(mp.model.thread_get(0, 0, f) == v for f, v in (
-        (chiplet.THREAD_HALTED, 1), (chiplet.THREAD_PC, 0), (chiplet.THREAD_CYCLE_COUNT, 0)))
+        (chiplet.THREAD_HALTED, 1), (chiplet.THREAD_PC, 0), (chiplet.THREAD_CYCLE_COUNT, 0),
+        (chiplet.THREAD_INSTRET, 0)))
     assert mp.model.queue(0, 0) == [] and mp.model.queue(0, 1) == []
     assert mp.lm1_word(0) == 0
 

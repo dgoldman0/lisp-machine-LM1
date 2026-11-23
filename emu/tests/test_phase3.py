@@ -381,7 +381,7 @@ _RESERVED = (
     ("PUSH.MULTI bank 2", encode_i(Op.PUSH_MULTI, 2, 0, 0x0001)),
     ("POP.MULTI bank 31", encode_i(Op.POP_MULTI, 31, 0, 0xFFFF)),
     ("ERET func 2", encode_r(Op.ERET, 0, 0, 0, 2)),
-    ("SYS.INFO sub 15", encode_i(Op.SYS_INFO, 3, 15, 0)),
+    ("SYS.INFO sub 16", encode_i(Op.SYS_INFO, 3, 16, 0)),
     ("HALT/NOP selector 2", encode_x(Op.HALT_NOP, 2 << 21)),
     ("TRAP 0x96", encode_x(Op.TRAP, 0x96)),
     ("TRAP 0xA0", encode_x(Op.TRAP, 0xA0)),

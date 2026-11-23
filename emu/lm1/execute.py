@@ -245,34 +245,49 @@ class Emulator:
     def run(self, max_instructions: int = 0) -> None:
         """Run until HALT or max_instructions reached (0 = unlimited)."""
         t = self.thread
-        mem = self.mem
         count = 0
 
         while not t.halted and not t.stalled:
-            # Fetch
-            raw = mem.load_u32(t.pc)
-            inst = decode(raw)
-
-            if self.trace:
-                self._trace_instruction(t.pc, inst)
-
-            # Advance PC (may be overwritten by branches)
-            next_pc = t.pc + 4
-
-            try:
-                # Execute
-                next_pc = self._execute(inst, next_pc)
-            except LM1Trap as trap:
-                next_pc = self._take_trap(trap)
-
-            # The PC is a 64-bit register: a branch below address 0 wraps.
-            t.pc = next_pc & WORD_MASK
-            t.cycle_count += 1
-            self.instruction_count += 1
+            self._step()
             count += 1
 
             if max_instructions and count >= max_instructions:
                 break
+
+    def _step(self) -> None:
+        """Run one instruction of the current thread, the one step of each
+        run loop: fetch, decode, execute, and answer a trap it raises
+        (_take_trap); a trap no handler answers stands, and the run ends.
+
+        The instruction retires, and adds one to the thread's INSTRET, when
+        it has done its work.  A fault retires nothing, and neither does a
+        RECV that waits for a word: each runs again.  An explicit TRAP
+        retires before its trap is taken, whether a handler answers it or
+        not, as the RTL retires it.
+        """
+        t = self.thread
+        raw = self.mem.load_u32(t.pc)
+        inst = decode(raw)
+
+        if self.trace:
+            self._trace_instruction(t.pc, inst)
+
+        # Advance PC (may be overwritten by branches)
+        next_pc = t.pc + 4
+
+        try:
+            next_pc = self._execute(inst, next_pc)
+            if not t.stalled:
+                t.instret += 1
+        except LM1Trap as trap:
+            if trap.resume_pc is not None:   # an explicit TRAP
+                t.instret += 1
+            next_pc = self._take_trap(trap)
+
+        # The PC is a 64-bit register: a branch below address 0 wraps.
+        t.pc = next_pc & WORD_MASK
+        t.cycle_count += 1
+        self.instruction_count += 1
 
     # -- Execute dispatch ---
 
@@ -512,6 +527,8 @@ class Emulator:
                 case 12: t.regs[inst.rd] = 0                      # SCAN_HEAD_OBJ (stub)
                 case 13: t.regs[inst.rd] = 0                      # SCAN_HEAD_FIELD (stub)
                 case 14: t.regs[inst.rd] = 0                      # SCAN_POP_REF (stub)
+                # INSTRET: the instructions the thread retired before this one
+                case 15: t.regs[inst.rd] = t.instret & WORD_MASK
 
         # ---- HALT / NOP ----
         elif op == Op.HALT_NOP:
@@ -1440,7 +1457,6 @@ class Emulator:
         round.  A stalled thread (blocked on RECV) is un-stalled when its
         queue has data.
         """
-        mem = self.mem
         count = 0
         n_threads = len(self.threads)
 
@@ -1470,22 +1486,7 @@ class Emulator:
                     if t.halted or t.stalled:
                         break
 
-                    raw = mem.load_u32(t.pc)
-                    inst = decode(raw)
-
-                    if self.trace:
-                        self._trace_instruction(t.pc, inst)
-
-                    next_pc = t.pc + 4
-
-                    try:
-                        next_pc = self._execute(inst, next_pc)
-                    except LM1Trap as trap:
-                        next_pc = self._take_trap(trap)
-
-                    t.pc = next_pc & WORD_MASK
-                    t.cycle_count += 1
-                    self.instruction_count += 1
+                    self._step()
                     count += 1
 
                     if max_instructions and count >= max_instructions:
@@ -1563,28 +1564,12 @@ class Cluster:
                             continue
 
                     any_runnable = True
-                    mem = tile.mem
 
                     for _ in range(quanta):
                         if t.halted or t.stalled:
                             break
 
-                        raw = mem.load_u32(t.pc)
-                        inst = decode(raw)
-
-                        if tile.trace:
-                            tile._trace_instruction(t.pc, inst)
-
-                        next_pc = t.pc + 4
-
-                        try:
-                            next_pc = tile._execute(inst, next_pc)
-                        except LM1Trap as trap:
-                            next_pc = tile._take_trap(trap)
-
-                        t.pc = next_pc & WORD_MASK
-                        t.cycle_count += 1
-                        tile.instruction_count += 1
+                        tile._step()
                         count += 1
 
                         if max_instructions and count >= max_instructions:

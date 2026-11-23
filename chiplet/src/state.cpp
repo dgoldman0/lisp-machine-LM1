@@ -17,7 +17,8 @@ namespace lm1 {
 namespace {
 
 constexpr char MAGIC[8] = {'L', 'M', '1', 'C', 'H', 'I', 'P', 'S'};
-constexpr uint32_t VERSION = 3;  // 2: a tile's queue base; 3: the runtime's stand-in
+constexpr uint32_t VERSION = 4;  // 2: a tile's queue base; 3: the runtime's stand-in;
+                                 // 4: a thread's INSTRET
 
 class Writer {
 public:
@@ -147,6 +148,7 @@ void save_thread(Writer &w, const Thread &t) {
     for (u64 r : t.regs) w.word64(r);
     w.word64(t.pc);
     w.word64(t.cycle_count);
+    w.word64(t.instret);
     w.flag(t.halted);
     w.flag(t.stalled);
     w.word64(u64(t.stall_queue));
@@ -163,10 +165,10 @@ bool restore_thread(Reader &r, Thread &t) {
     for (u64 &reg : t.regs) {
         if (!r.word64(reg)) return false;
     }
-    return r.word64(t.pc) && r.word64(t.cycle_count) && r.flag(t.halted) && r.flag(t.stalled) &&
-           r.signed64(t.stall_queue) && r.word64(t.trap_table_base) && r.word64(t.trap_cause) &&
-           r.word64(t.trap_pc) && r.flag(t.in_trap) && r.word64(t.tile_id) && r.word64(t.thread_id) &&
-           r.word64(t.slice_base);
+    return r.word64(t.pc) && r.word64(t.cycle_count) && r.word64(t.instret) && r.flag(t.halted) &&
+           r.flag(t.stalled) && r.signed64(t.stall_queue) && r.word64(t.trap_table_base) &&
+           r.word64(t.trap_cause) && r.word64(t.trap_pc) && r.flag(t.in_trap) &&
+           r.word64(t.tile_id) && r.word64(t.thread_id) && r.word64(t.slice_base);
 }
 
 void save_tile(Writer &w, const Tile &tile) {

@@ -82,7 +82,7 @@ inline bool reserved(const Inst &in) {
     case OP_PUSH_POP: return in.func > 1;
     case OP_PUSH_MULTI: case OP_POP_MULTI: return in.rd > 1;  // two banks of 16
     case OP_ERET: return in.func > FUNC_ERET_NEXT;
-    case OP_SYS_INFO: return in.rs1 > 14;
+    case OP_SYS_INFO: return in.rs1 > 15;  // 15, INSTRET, is the last assigned
     case OP_HALT_NOP: return in.rd > 1;
     default: return false;
     }
@@ -528,6 +528,7 @@ Flow Executor::execute(const Inst &in, u64 &next_pc) {
         case 6: v = tile_.card_shift; break;
         case 7: v = tile_.gen_boundary; break;
         case 8: v = tile_.queue_base; break;
+        case 15: v = t_.instret; break;  // the instructions retired before this one
         default:
             v = 0;  // GC status, counters and scan results: no engines are modeled
             break;
@@ -953,12 +954,18 @@ void card_table_reset(Tile &tile) {
 // collection only when none is.  When the thread's chunk is already empty
 // and no thread has taken free space since the last collection, no
 // collection makes room, and the trap stands.
+//
+// The instruction retires, and adds one to the thread's INSTRET, when it has
+// done its work (Emulator._step): a fault and a RECV that waits retire
+// nothing, and an explicit TRAP retires before its trap is taken, whether a
+// handler answers it or not.
 Flow Model::step(Tile &tile, Thread &t) {
     u64 raw;
     if (!load_u32(*this, tile, t.pc, raw)) return Flow::Stop;
     u64 next_pc = t.pc + 4;
     Executor ex(*this, tile, t);
     Flow f = ex.execute(decode(raw), next_pc);
+    if ((f == Flow::Next && !t.stalled) || (f == Flow::Trap && trap.resumes)) t.instret += 1;
     if (f == Flow::Trap) {
         uint32_t code = trap.code;
         bool handled_by_table = false;

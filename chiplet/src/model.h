@@ -92,6 +92,7 @@ struct Thread {
     u64 regs[REGS] = {};
     u64 pc = 0;
     u64 cycle_count = 0;
+    u64 instret = 0;  // INSTRET: the instructions the thread has retired
     bool halted = false;
     bool stalled = false;
     i64 stall_queue = -1;  // the descriptor value, tile * 4 + queue, a RECV waits on
