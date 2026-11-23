@@ -596,11 +596,13 @@ bool restore_state(Model &m, const uint8_t *data, size_t size) {
         if (!restore_tile(r, tile, fresh.queue_depth)) return false;
     }
     if (!restore_standin(r, fresh.standin) || !r.done()) return false;
+    m.profile_flush();
     m.tiles = std::move(fresh.tiles);
     m.link = std::move(fresh.link);
     m.standin = std::move(fresh.standin);
     m.trap = {};
     m.stop = {};
+    m.profile_restart();
     return true;
 }
 

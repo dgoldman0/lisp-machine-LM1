@@ -11,6 +11,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -244,6 +246,13 @@ struct Config {
     // keeps LM-1's clock and MegaPad's within a small factor of each other.
     u64 unit_ns = 200;
     u64 hook_id = 0;              // names the model to the test hooks
+    // The per-function profile (profile.cpp): a sample every profile cycles
+    // of the timing model, 0 for none, a record every profile_interval
+    // cycles, appended to profile_file.  They change nothing the model
+    // computes, so the configuration a saved state carries leaves them out.
+    u64 profile = 0;
+    u64 profile_interval = 100000000;
+    std::string profile_file;
 };
 
 // Parses a configuration string; on failure returns false with a reason.
@@ -251,6 +260,42 @@ bool parse_config(const char *text, Config &config, std::string &error);
 // The configuration as one canonical string, every key in a fixed order,
 // which a saved state carries so that it restores only where it fits.
 std::string config_text(const Config &config);
+
+// The per-function profile (profile.cpp, docs/profile.md).  Every profile
+// cycles of the timing model it samples a core's current thread: the
+// function holding its PC and the callers its frame chain names, from the
+// symbol table an image carries at its end.  Each core's samples go into a
+// record every profile_interval cycles, in the shape of MegaPad's
+// guest-words.jsonl.  It reads the model and never writes it, so a run
+// computes the same with it as without.
+struct Symbol {
+    u64 address;
+    std::string name;
+};
+
+struct CoreProfile {
+    u64 next_sample = 0;  // the cycle count at which the next sample falls
+    u64 start = 0;        // the cycle count the record in hand began at
+    u64 cycles = 0, samples = 0;
+    std::map<std::string, u64> inclusive, leaf, chains;
+};
+
+class Profiler {
+public:
+    Profiler() = default;
+    Profiler(const Profiler &) = delete;
+    Profiler &operator=(const Profiler &) = delete;
+    ~Profiler();
+
+    // The symbol table at the end of SIZE bytes of an image: false, and no
+    // table, when the bytes end in none.
+    bool load_symbols(const uint8_t *data, size_t size);
+    std::vector<Symbol> symbols;  // by address
+    std::vector<CoreProfile> cores;
+    std::string path;
+    u64 interval = 0;
+    std::FILE *out = nullptr;
+};
 
 // Where LM-1's end of the link stands (link.cpp).
 enum class Boot : uint8_t {
@@ -298,8 +343,12 @@ struct Model {
     // and the cards the current instruction marked; not state.
     u64 data_reads = 0;
     u64 marks = 0;
+    // The per-function profile; not state.
+    Profiler profiler;
 
     explicit Model(const Config &config);
+    // Writes the profile's records in hand.
+    ~Model();
 
     // Every tile back to the state the configuration gives it.
     void init_tiles();
@@ -326,7 +375,20 @@ struct Model {
     // Ends the run with a fault at ADDRESS, outside the tile's memory.
     Flow memory_fault(u128 address);
     Flow host_failure();
+
+    // The per-function profile (profile.cpp).  profile_sample takes the
+    // samples due once an instruction of thread T has charged TILE's
+    // cycles; profile_restart writes the records in hand and starts each
+    // core's sampling over from its cycle count, as after a reset or a
+    // restore; profile_flush writes the records in hand.
+    void profile_sample(Tile &tile, const Thread &t);
+    void profile_restart();
+    void profile_flush();
 };
+
+// Opens the profile's file when the configuration asks for a profile, and
+// starts each core's sampling; on failure returns false with a reason.
+bool profile_open(Model &m, std::string &error);
 
 // The models mp64_chiplet_create made, which lm1c_chiplet_find searches.
 void register_module_model(lm1c_model *model);

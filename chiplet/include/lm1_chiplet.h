@@ -192,6 +192,23 @@ LM1C_API int lm1c_tile_set(lm1c_model *model, uint32_t tile, int field,
    refused with LM1C_BAD_INDEX. */
 LM1C_API int lm1c_tile_perf(const lm1c_model *model, uint32_t tile, uint32_t index,
                             uint64_t *value);
+
+/*
+ * The per-function profile (docs/profile.md).  With profile=N in the
+ * configuration the model samples each core's current thread every N
+ * cycles of its timing model and appends a record of each core's samples to
+ * profile_file every profile_interval cycles (100000000 unless set):
+ *   profile=0                cycles between samples; 0 for no profile
+ *   profile_interval=100000000  cycles a record covers
+ *   profile_file=PATH        the file of records, JSON lines; PATH holds no comma
+ * A chiplet module reads the symbol table its boot image carries at its end;
+ * lm1c_profile_symbols reads it from the SIZE bytes of an image that end
+ * with one, or refuses bytes with none with LM1C_BAD_VALUE.
+ * lm1c_profile_flush writes each core's record in hand, as destroying the
+ * model does.
+ */
+LM1C_API int lm1c_profile_symbols(lm1c_model *model, const uint8_t *image, size_t size);
+LM1C_API int lm1c_profile_flush(lm1c_model *model);
 LM1C_API int lm1c_thread_get(const lm1c_model *model, uint32_t tile, uint32_t thread,
                              int field, uint64_t *value);
 LM1C_API int lm1c_thread_set(lm1c_model *model, uint32_t tile, uint32_t thread,

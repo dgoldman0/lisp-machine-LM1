@@ -909,6 +909,7 @@ void Model::init_tiles() {
         tile.templates[1] = make_header(HDR_CLOSURE, 0, 1);
         tile.templates[2] = make_header(HDR_VECTOR, 0, 2);
     }
+    profile_restart();
 }
 
 void Model::reset_chiplet() {
@@ -1076,6 +1077,7 @@ Flow Model::step(Tile &tile, Thread &t) {
         return f;
     }
     t.pc = next_pc;
+    if (config.profile != 0) profile_sample(tile, t);
     return Flow::Next;
 }
 

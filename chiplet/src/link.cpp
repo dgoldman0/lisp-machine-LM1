@@ -106,6 +106,16 @@ void start(Model &m) {
         t.pc = m.config.load_base;
         t.regs[1] = l.boot_arg;
     }
+    // The profile names functions from the symbol table the image carries
+    // at its end, when it carries one (profile.cpp).
+    if (m.config.profile != 0 && l.boot_len != 0) {
+        const Tile &tile = m.tiles[LINK_TILE];
+        const size_t first = size_t(m.config.load_base / 8);
+        const size_t words = std::min(size_t(image_words(l)), tile.mem.size() - first);
+        std::vector<uint8_t> image(words * 8);
+        std::memcpy(image.data(), tile.mem.data() + first, image.size());
+        m.profiler.load_symbols(image.data(), std::min<size_t>(image.size(), size_t(l.boot_len)));
+    }
 }
 
 // One request of the boot fetch.
@@ -359,6 +369,10 @@ LM1C_API int mp64_chiplet_create(const char *config, mp64_chiplet_module *out) {
         model = new lm1c_model(c);
         model->reset_chiplet();
     } catch (const std::bad_alloc &) {
+        delete model;
+        return 1;
+    }
+    if (!profile_open(*model, why)) {
         delete model;
         return 1;
     }

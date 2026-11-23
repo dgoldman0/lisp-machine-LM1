@@ -25,7 +25,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from lm1 import chiplet
+import json
+
+from lm1 import chiplet, image
 from lm1.decode import Op, encode_b, encode_i, encode_r, encode_s, encode_x
 from lm1.testing.harness import test
 from lm1.word import NIL, T, WORD_MASK, tag_fixnum
@@ -659,6 +661,26 @@ def test_release_starts_over():
     assert mp.model.tile_get(0, chiplet.TILE_INSTRUCTION_COUNT) == 0
     assert mp.model.queue(0, 0) == [] and mp.model.queue(0, 1) == []
     assert mp.lm1_word(0) == 0
+
+
+@test("module.profile_reads_the_boot_image", batch="chiplet_module")
+def test_profile_reads_the_boot_image():
+    """A module that profiles names the functions of the program it booted
+    from the symbol table at the end of its boot image (docs/profile.md)."""
+    img = image.compile_program("""
+        (defun busy (n acc) (if (= n 0) acc (busy (- n 1) (+ acc n))))
+        (defun main () (busy 300 0))""")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "profile.jsonl"
+        mp = _booted(f"profile=5,profile_file={path}", img.words)
+        assert mp.model.thread_get(0, 0, chiplet.THREAD_HALTED) == 1
+        mp.model.profile_flush()
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+    chains: dict[str, int] = {}
+    for record in records:
+        for chain, cycles in record["chains"].items():
+            chains[chain] = chains.get(chain, 0) + cycles
+    assert max(chains, key=chains.get) == "busy < main < _call_main", chains
 
 
 @test("module.save_and_restore", batch="chiplet_module")

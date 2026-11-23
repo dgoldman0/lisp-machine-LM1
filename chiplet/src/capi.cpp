@@ -58,12 +58,19 @@ LM1C_API lm1c_model *lm1c_create(const char *config, char *error, size_t error_s
         write_error(error, error_size, why);
         return nullptr;
     }
+    lm1c_model *model = nullptr;
     try {
-        return new lm1c_model(c);
+        model = new lm1c_model(c);
     } catch (const std::bad_alloc &) {
         write_error(error, error_size, "not enough host memory for the model");
         return nullptr;
     }
+    if (!profile_open(*model, why)) {
+        delete model;
+        write_error(error, error_size, why);
+        return nullptr;
+    }
+    return model;
 }
 
 LM1C_API void lm1c_destroy(lm1c_model *model) { delete model; }
@@ -109,6 +116,17 @@ LM1C_API int lm1c_tile_perf(const lm1c_model *model, uint32_t tile, uint32_t ind
     Tile *t = tile_at(model, tile);
     if (t == nullptr || index >= PERF_COUNTERS) return LM1C_BAD_INDEX;
     *value = t->perf[index];
+    return LM1C_OK;
+}
+
+LM1C_API int lm1c_profile_symbols(lm1c_model *model, const uint8_t *image, size_t size) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    return model->profiler.load_symbols(image, size) ? LM1C_OK : LM1C_BAD_VALUE;
+}
+
+LM1C_API int lm1c_profile_flush(lm1c_model *model) {
+    if (model == nullptr) return LM1C_BAD_INDEX;
+    model->profile_flush();
     return LM1C_OK;
 }
 

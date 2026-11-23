@@ -122,6 +122,21 @@ bool parse_config(const char *text, Config &config, std::string &error) {
             config.lend.emplace_back(base, length);
             continue;
         }
+        // The profile's keys change nothing the model computes, so they
+        // stay out of KEYS and of the configuration a saved state carries.
+        if (key == "profile_file") {
+            config.profile_file = value;
+            continue;
+        }
+        if (key == "profile" || key == "profile_interval") {
+            u64 v;
+            if (!parse_number(value, v)) {
+                error = "configuration key '" + key + "' takes a number, not '" + value + "'";
+                return false;
+            }
+            (key == "profile" ? config.profile : config.profile_interval) = v;
+            continue;
+        }
         const Key *found = nullptr;
         for (const Key &k : KEYS) {
             if (key == k.name) found = &k;
@@ -196,6 +211,15 @@ bool parse_config(const char *text, Config &config, std::string &error) {
     }
     if (config.window_limit == 0 || config.hold_limit == 0 || config.hold_gap == 0) {
         error = "window_limit, hold_limit and hold_gap are nanoseconds above zero";
+        return false;
+    }
+    // A profile needs a file for its records and an interval to fill them.
+    if (config.profile != 0 && config.profile_file.empty()) {
+        error = "a profile writes to profile_file, which is not named";
+        return false;
+    }
+    if (config.profile_interval == 0) {
+        error = "profile_interval is cycles above zero";
         return false;
     }
     return true;

@@ -270,6 +270,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         "lm1c_tile_get": (i32, [p, u32, i32, pu64]),
         "lm1c_tile_set": (i32, [p, u32, i32, u64]),
         "lm1c_tile_perf": (i32, [p, u32, u32, pu64]),
+        "lm1c_profile_symbols": (i32, [p, c.c_char_p, c.c_size_t]),
+        "lm1c_profile_flush": (i32, [p]),
         "lm1c_thread_get": (i32, [p, u32, u32, i32, pu64]),
         "lm1c_thread_set": (i32, [p, u32, u32, i32, u64]),
         "lm1c_reg_get": (i32, [p, u32, u32, u32, pu64]),
@@ -458,6 +460,17 @@ class Model:
         out = ctypes.c_uint64()
         _check(self._lib.lm1c_tile_perf(self._handle, tile, index, ctypes.byref(out)), "tile_perf")
         return out.value
+
+    # -- the per-function profile (docs/profile.md) --
+
+    def profile_symbols(self, image: bytes) -> bool:
+        """Read the symbol table at the end of an image's bytes; False when
+        the image carries none."""
+        return self._lib.lm1c_profile_symbols(self._handle, image, len(image)) == 0
+
+    def profile_flush(self) -> None:
+        """Write each core's profile record in hand."""
+        _check(self._lib.lm1c_profile_flush(self._handle), "profile_flush")
 
     def thread_get(self, tile: int, thread: int, field: int) -> int:
         out = ctypes.c_uint64()
@@ -1053,15 +1066,19 @@ class Emulator:
         num_threads: int = 1,
         block_device: str | None = None,
         nursery_chunk: int | None = None,
+        config: str = "",
         _model: Model | None = None,
         _tile: int = 0,
     ):
         if trace:
             raise NotImplementedError("the chiplet model does not trace")
         if _model is None:
+            # CONFIG adds keys the reference has no argument for, such as
+            # the profile's (lm1_chiplet.h).
             _model = Model(_config(mem_size, nursery_base, nursery_size, oldgen_base,
                                    oldgen_size, tiles=1, threads=num_threads,
-                                   tile_id=tile_id, nursery_chunk=nursery_chunk))
+                                   tile_id=tile_id, nursery_chunk=nursery_chunk)
+                           + ("," + config if config else ""))
             _attach_host(_model)
         self._model = _model
         self._tile = _tile
@@ -1098,6 +1115,15 @@ class Emulator:
     def perf(self) -> list[int]:
         """The core's performance counters, as SYS_INFO 10 reads them."""
         return [self._model.tile_perf(self._tile, i) for i in range(PERF_COUNTERS)]
+
+    def profile_symbols(self, image: bytes) -> bool:
+        """Name the profile's functions from the symbol table at the end of
+        an image's bytes (lm1/image.py); False when it carries none."""
+        return self._model.profile_symbols(image)
+
+    def profile_flush(self) -> None:
+        """Write the profile's records in hand (docs/profile.md)."""
+        self._model.profile_flush()
 
     @property
     def threads(self) -> list[Thread]:
