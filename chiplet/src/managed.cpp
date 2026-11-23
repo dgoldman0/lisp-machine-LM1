@@ -251,6 +251,11 @@ private:
         for (const auto &f : s_.free) n += f.second - f.first;
         return n;
     }
+    // The largest a core's region grows by default: a quarter of the heap,
+    // the reserve LM-1 keeps, or the configured size when that is larger.
+    u64 region_cap() const {
+        return std::max<u64>(m_.config.region_bytes, (heap_bytes() / 4) & ~63ull);
+    }
     u64 rec(u64 c) const { return s_.core_table + CR_SIZE * c; }
     u64 entry(u64 c) const { return s_.lm1_block + LB_CORES + LB_ENTRY * c; }
     bool serving() const { return s_.phase == MdPhase::Serving; }
@@ -575,7 +580,10 @@ void Service::serve_core(u64 c) {
 // core's record may still name a region a hold retired, until the core
 // next opens a window, so no region the core is granted starts at the base
 // its record names: the base alone tells LM-1 which grant the record means.
+// A region is never empty, since a core takes an empty one as corrupt.
 bool Service::grant_region(u64 c, u64 bytes, u64 &base, u64 &limit) {
+    base = limit = 0;
+    if (bytes == 0) return true;
     const u64 avoid = s_.core[size_t(c)].recorded_region;
     for (auto it = s_.free.begin(); it != s_.free.end(); ++it) {
         const u64 first = it->first, end = it->second;
@@ -623,11 +631,12 @@ void Service::region(u64 c, const QEntry &e) {
     }
     core.makes_objects = true;
     // Regions grow for a core that fills them quickly: within one epoch,
-    // each request doubles the core's next default size.
-    if (core.asked_epoch == epoch()) core.region_size *= 2;
+    // each request doubles the core's next default size, up to the cap.
+    if (core.asked_epoch == epoch())
+        core.region_size = std::min(core.region_size * 2, region_cap());
     core.asked_epoch = epoch();
     const u64 asked = (std::max<u64>(e.w[6], 8) + 63) & ~63ull;
-    const u64 bytes = std::max(asked, core.region_size);
+    const u64 bytes = std::max(asked, std::min(core.region_size, region_cap()));
     u64 base, limit;
     if (!grant_region(c, bytes, base, limit)) {
         fail(NOTICE_CORRUPT, WHY_RECORD, entry(c));
@@ -1009,7 +1018,7 @@ void Service::active_work() {
         MdCore &core = s_.core[size_t(c)];
         if (!core.makes_objects) continue;
         u64 base, limit;
-        if (!grant_region(c, core.region_size, base, limit)) {
+        if (!grant_region(c, std::min(core.region_size, region_cap()), base, limit)) {
             fail(NOTICE_CORRUPT, WHY_RECORD, entry(c));
             return;
         }
