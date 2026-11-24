@@ -39,6 +39,10 @@ Assume everything is rough draft, both in this project and in the megapad projec
 
 Feel free top drop by and discuss this project in the Tinkerers Guild channel of the Barayin-Adamah server: https://discord.gg/AnrXxhs3b2
 
+## Requirements
+
+The emulator, its tests and the toolchain run on CPython 3.13. Where the system's Python is older, [uv](https://docs.astral.sh/uv/) installs 3.13 without administrator rights (`uv python install 3.13`). The chiplet module builds with a C++17 compiler and make, against the MegaPad checkout beside this one (`make -C chiplet`).
+
 ## Documentation Map
 
 | Document | Description |
